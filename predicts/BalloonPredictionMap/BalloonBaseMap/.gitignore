@@ -1,0 +1,7 @@
+# This is the transpiled npm package, gotten from https://registry.npmjs.org/@russss/maplibregl-layer-switcher
+assets/components/maplibregl-layer-switcher
+
+assets/components/manual_data_sources
+
+# https://github.com/jimmyrocks/maplibre-gl-vector-text-protocol
+assets/components/maplibre-gl-vector-text-protocol.esm.js

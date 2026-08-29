@@ -1,0 +1,39 @@
+.control_rate {
+    width:          4em;
+}
+
+.control_altitude {
+    width:          5em;
+}
+
+.control_number {
+    width:          4em;
+}
+
+#fetch_button {
+    font-weight:    bold;
+}
+
+button.waiting{
+    background-color: rgb(180, 24, 24);
+}
+
+button.finished{
+    background-color: rgb(24, 180, 24);
+}
+
+
+/* 
+=======================================
+======= Parameter Sweep Dialog ========
+=======================================
+*/
+
+#param_sweep_dialog {
+    max-width:      1100px;
+    margin-top:     3%;
+}
+
+#param_sweep_dialog .labeled_input {
+    padding:        0.5em;
+}
