@@ -1,16 +1,18 @@
-# Integration plan for the existing BPP site
+# Integration plan — v2.2.0
 
-The modern build is intentionally isolated under `predicts/modern/` during testing.
+Use this folder as the only runnable Predicts application:
 
-Recommended rollout sequence:
+```text
+Ryeed-BPP-Tracking/predicts/modern
+```
 
-1. Run and validate `predicts/modern` locally.
-2. Compare Burst and Float outputs against the current `predicts/BalloonPredictionMap` for identical inputs.
-3. Validate launch-location and airspace Git LFS files are present.
-4. Obtain/configure an APRS.fi API key and verify all three callsigns.
-5. Test desktop, tablet, and phone widths.
-6. Put the Python API behind the BPP Apache development site only.
-7. Change `predicts/index.html` to embed/redirect to the modern build only after team sign-off.
-8. Keep the legacy map accessible at a temporary `/predicts/legacy/` route during transition.
+The sibling `predicts/BalloonPredictionMap` directory may remain in the repository **only as a source of legacy GeoJSON data**. The modern UI no longer links to it, and the launch scripts never start it.
 
-This protects the currently working program and provides an easy rollback path.
+1. Delete or rename the old `predicts/modern` folder.
+2. Copy this `predicts/modern` folder into its place.
+3. From the repository root run `git lfs pull` once so the existing large GeoJSON data files are materialized.
+4. Run `predicts\modern\run_windows.bat` (or the top-level `START_BPP_PREDICTS.bat`). First-run setup is automatic.
+5. Verify `/api/health` reports version `2.2.0`.
+6. Test preset-site Burst/Float predictions, custom points, geofences, layers, KML, parameter sweep, and APRS if configured.
+
+The v2.2 launcher checks for older BPP Predicts servers before launch and opens the browser only after v2.2.0 is verified healthy.

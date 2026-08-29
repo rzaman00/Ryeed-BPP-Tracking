@@ -1,105 +1,115 @@
-# BPP Predicts — Modern Local Build
+# BPP Predicts — Current Modern Build v2.2.0
 
-This folder is a standalone, local-development version of the UMD Balloon Payload Program prediction map. It is intentionally additive: the existing `predicts/BalloonPredictionMap` implementation is left untouched.
+This folder is the current local BPP Predicts application. It keeps the familiar operational prediction workflow while modernizing the interface and fixing the landing-target alignment issue.
 
-## What this build adds
+## What changed in v2.2.0
 
-- Modern responsive desktop/mobile layout
-- Strong, high-contrast balloon trajectory rendering
-- Very prominent predicted landing marker and landing card
-- Prediction summary and per-stage flight information
-- User-facing **Burst** and **Float** modes only
-- Float mode preserves BPP's stitched-float strategy so descent is still predicted
-- APRS.fi live tracking for `KC3SKW-8`, `KC3SKW-9`, and `KC3SKW-10`
-- Live re-prediction from the most recent APRS position
-- Cleaner, subdued airspace rendering using the existing BPP GeoJSON files when Git LFS data is present
-- KML export of the active prediction
-- Local Python API so APRS API keys never need to be exposed in browser JavaScript
-- Health/config endpoints and graceful handling when Git LFS or APRS credentials are missing
+- Refreshed modern interface with cleaner typography, rounded panels, improved spacing, and translucent map controls.
+- Light/dark theme toggle. The selected theme is remembered; dark mode also starts with the dark map basemap.
+- **Landing alignment fix:** predicted landing targets are rendered as native MapLibre GeoJSON circle layers at the exact final trajectory coordinate. They no longer use DOM/HTML markers that can visually drift from the line as map scale changes.
+- Launch-location normalization now prefers explicit legacy `latitude`/`longitude` properties when they exist, avoiding stale or rounded geometry for preset launch sites.
+- The modern header no longer links to the legacy predictor.
+- Static frontend files use versioned URLs and no-cache response headers so an old browser cache cannot masquerade as the newest build.
+- `run_windows.bat` now uses `run_latest.py`, which checks for running BPP Predicts instances, stops older builds, verifies **v2.2.0**, and only then opens the browser.
+- First run is automatic: `run_windows.bat` runs setup if the virtual environment does not exist.
 
-## Run locally
+## Windows — recommended
 
-From this directory:
-
-```bash
-python -m venv .venv
-```
-
-Windows PowerShell:
+From this folder:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-python app.py
+.\run_windows.bat
 ```
 
-macOS/Linux:
+That is the normal command for every run. On the first run it automatically creates `.venv` and installs the Python requirements.
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-python app.py
+If this package is extracted with its top-level launcher, you can instead double-click:
+
+```text
+START_BPP_PREDICTS.bat
 ```
 
-Then open:
+The launcher normally uses:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-### APRS live tracking
+If an unrelated program owns port 8000, it chooses a nearby free port and opens the correct URL automatically.
 
-Edit `.env` and add your APRS.fi API key:
+### Verify that the newest build is running
+
+Open:
+
+```text
+http://127.0.0.1:8000/api/health
+```
+
+The response should contain:
+
+```json
+"version": "2.2.0"
+```
+
+## macOS / Linux
+
+```bash
+./run_unix.sh
+```
+
+It also performs setup automatically when `.venv` is missing.
+
+## Existing BPP data
+
+For the full preset launch-site and reference-layer set, keep this modern folder at:
+
+```text
+Ryeed-BPP-Tracking/predicts/modern
+```
+
+and keep the existing sibling data directory at:
+
+```text
+Ryeed-BPP-Tracking/predicts/BalloonPredictionMap/BalloonBaseMap/assets/data/
+```
+
+The modern app reads the GeoJSON files from that location, but **you do not need to run or open the legacy BalloonPredictionMap application**. If the repository was freshly cloned, run `git lfs pull` once from the repository root so the large GeoJSON files are materialized.
+
+Without those legacy data files, the app still runs and supports custom launch points, but it uses a small fallback launch-site list and omits unavailable reference layers.
+
+## APRS live tracking
+
+Edit `.env` and set:
 
 ```text
 APRSFI_API_KEY=your_key_here
 ```
 
-The browser never receives this key. Requests are proxied through the local Python server.
-
-### Existing BPP GeoJSON / Git LFS
-
-This app reads launch locations and airspace from the existing BPP files under:
-
-```text
-../BalloonPredictionMap/BalloonBaseMap/assets/data/
-```
-
-Those files are tracked with Git LFS. If a clone contains only LFS pointer text, run from the repository root:
-
-```bash
-git lfs install
-git lfs pull
-```
-
-The app will still start without those files, but it will use a small fallback launch-site list and will omit unavailable airspace layers.
+The key remains server-side. APRS.fi requests are proxied through the local FastAPI backend.
 
 ## Prediction behavior
 
 ### Burst
 
-Uses the same SondeHub Tawhiri endpoint as the current BPP code (`https://api.v2.sondehub.org/tawhiri`) with the standard profile.
+Uses SondeHub-hosted Tawhiri's standard profile.
 
 ### Float
 
-Preserves the BPP stitched-float approach documented in the existing project:
+Uses the BPP stitched-float approach:
 
-1. Standard prediction to the requested float altitude; only its ascent segment is retained.
-2. A second standard prediction begins at the first segment's final point.
-3. The second ascent uses the requested slow float ascent rate for the requested duration and is relabeled `float`.
-4. The second prediction's normal descent is retained.
+1. Predict ascent to the requested float altitude.
+2. Start a second standard prediction at that point.
+3. Treat the second prediction's slow ascent as the float segment for the requested duration.
+4. Keep the normal descent from that second prediction.
 
-This provides ascent + float + descent, unlike Tawhiri's native float profile, which does not predict descent.
+The result is ascent + float + descent.
 
-## Live prediction behavior
+## Tests
 
-The backend polls APRS.fi and keeps a small in-memory history for each BPP callsign. New live predictions start from the latest reported latitude, longitude, altitude, and current timestamp. A flight-phase selector is included because APRS.fi's current-location API does not provide a reliable full vertical-rate history when the local server has just started.
+From this directory:
 
-- `Auto / Ascending`: predicts the remaining ascent and descent from the current position.
-- `Descending`: uses a near-immediate burst approximation so Tawhiri transitions to descent from approximately the current position/altitude.
+```bash
+PYTHONPATH=. pytest -q
+```
 
-## Production note
-
-This directory is designed for local validation first. Do not copy it into the production Apache document root until the team has tested the behavior, confirmed APRS.fi API use/credits, reviewed airspace data freshness, and chosen a deployment method for the Python API (systemd + uvicorn/gunicorn + Apache reverse proxy is one option).
+The core tests cover longitude conversion, distance calculations, final landing summarization, launch-location normalization, and the stitched-float workflow.

@@ -3,169 +3,194 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#111820" />
+  <meta name="theme-color" content="#050505" />
   <title>UMD BPP Predicts</title>
   <link rel="preconnect" href="https://unpkg.com" />
-  <link rel="preconnect" href="https://tile.openstreetmap.org" />
+  <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css" rel="stylesheet" />
+  <link href="static/styles.css?v=2.2.0" rel="stylesheet" />
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="https://bpp.umd.edu/" target="_blank" rel="noopener">
-      <span class="brand-mark" aria-hidden="true">◉</span>
-      <span><strong>UMD Nearspace</strong><small>Balloon Payload Program</small></span>
+  <header class="site-header">
+    <a class="site-brand" href="https://bpp.umd.edu/" target="_blank" rel="noopener">
+      <span class="program-mark" aria-hidden="true">◉</span>
+      <span>UMD Balloon Payload Program</span>
     </a>
-    <nav class="nav-tabs" aria-label="Prediction mode navigation">
-      <button class="nav-tab active" data-view="predict">Predict</button>
-      <button class="nav-tab" data-view="live">Live Track</button>
+    <nav class="site-nav" aria-label="BPP website navigation">
+      <a href="https://bpp.umd.edu/" target="_blank" rel="noopener">home</a>
+      <a href="https://bpp.umd.edu/news/" target="_blank" rel="noopener">news</a>
+      <a href="https://bpp.umd.edu/payloads/" target="_blank" rel="noopener">payloads</a>
+      <a href="https://bpp.umd.edu/flights/" target="_blank" rel="noopener">past flights</a>
+      <a class="active" href="#">predicts</a>
+      <a href="https://bpp.umd.edu/develop/tracking/" target="_blank" rel="noopener">tracking</a>
+      <a href="https://bpp.umd.edu/wiki/" target="_blank" rel="noopener">wiki</a>
+      <a href="https://bpp.umd.edu/archives/" target="_blank" rel="noopener">archives</a>
     </nav>
-    <div class="top-actions">
-      <button id="airspaceToggle" class="ghost-btn" type="button">Airspace</button>
-      <button id="helpToggle" class="icon-btn" type="button" aria-label="Help">?</button>
+    <div class="header-actions">
+      <span class="build-badge" id="buildBadge">v2.2.0</span>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
+        <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
+      </button>
     </div>
   </header>
 
-  <main class="workspace">
-    <aside class="panel" id="controlPanel">
-      <section class="view-panel active" data-panel="predict">
-        <div class="panel-heading">
-          <div><p class="eyebrow">Trajectory prediction</p><h1>Plan the flight</h1></div>
-          <span class="status-dot" id="apiStatus" title="API status"></span>
-        </div>
+  <section class="control-strip" aria-label="Prediction controls">
+    <label class="control-field mode-field"><span>Mode</span>
+      <select id="workspaceMode"><option value="predict">Predict</option><option value="live">Live Track</option></select>
+    </label>
+    <label class="control-field"><span>Predict Type</span>
+      <select id="predictType"><option value="burst">Burst</option><option value="float">Float</option></select>
+    </label>
 
-        <div class="segmented" role="group" aria-label="Prediction type">
-          <button type="button" data-mode="burst" class="segment active">Burst</button>
-          <button type="button" data-mode="float" class="segment">Float</button>
-        </div>
+    <div class="predict-only control-time-group">
+      <label class="control-field"><span>Date</span><input id="launchDate" type="date" required></label>
+      <label class="control-field"><span>Time</span><input id="launchTime" type="time" value="10:00" required></label>
+      <label class="control-field timezone"><span>TZ</span><select id="launchTimezone"><option value="local">Local</option><option value="utc">UTC</option></select></label>
+    </div>
 
-        <form id="predictForm">
-          <label class="field full"><span>Launch site</span>
-            <select id="launchSite"></select>
-          </label>
-          <div class="grid2">
-            <label class="field"><span>Latitude</span><input id="latitude" type="number" step="0.000001" required /></label>
-            <label class="field"><span>Longitude</span><input id="longitude" type="number" step="0.000001" required /></label>
-          </div>
-          <div class="grid2">
-            <label class="field"><span>Launch date</span><input id="launchDate" type="date" required /></label>
-            <label class="field"><span>Launch time</span><input id="launchTime" type="time" required /></label>
-          </div>
-          <div class="grid2">
-            <label class="field"><span>Ascent rate <em>m/s</em></span><input id="ascentRate" type="number" value="5.5" step="0.1" min="0.1" required /></label>
-            <label class="field"><span>Descent rate <em>m/s</em></span><input id="descentRate" type="number" value="9" step="0.1" min="0.1" required /></label>
-          </div>
-          <div id="burstFields">
-            <label class="field full"><span>Burst altitude <em id="burstFeet"></em></span><input id="burstAltitude" type="number" value="28000" step="1000" min="1000" required /></label>
-          </div>
-          <div id="floatFields" class="hidden">
-            <label class="field full"><span>Float altitude <em id="floatFeet"></em></span><input id="floatAltitude" type="number" value="22000" step="1000" min="1000" /></label>
-            <div class="grid2">
-              <label class="field"><span>Float ascent <em>m/s</em></span><input id="floatRate" type="number" value="1" step="0.1" min="0.1" /></label>
-              <label class="field"><span>Float duration <em>min</em></span><input id="floatDuration" type="number" value="60" step="10" min="10" /></label>
-            </div>
-          </div>
-          <button class="primary-btn" id="runPredict" type="submit"><span>Run prediction</span><span class="btn-arrow">→</span></button>
-          <p class="credit">Trajectory model: <a href="https://predict.sondehub.org/" target="_blank" rel="noopener">SondeHub / Tawhiri</a></p>
-        </form>
+    <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
+    <label class="control-field burst-control"><span>Burst Altitude (m)</span><div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="1000" min="1000"><small id="burstFeet">91864 ft</small></div></label>
+    <label class="control-field float-control hidden"><span>Float Altitude (m)</span><div class="input-with-note"><input id="floatAltitude" type="number" value="22000" step="1000" min="1000"><small id="floatFeet">72178 ft</small></div></label>
+    <label class="control-field float-control hidden"><span>Float Rate (m/s)</span><input id="floatRate" type="number" value="1" step="0.5" min="0.1"></label>
+    <label class="control-field float-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
+    <label class="control-field"><span>S.L. Descent Rate (m/s)</span><input id="descentRate" type="number" value="9" step="0.5" min="0.1"></label>
 
-        <details class="advanced">
-          <summary>Tools & export</summary>
-          <div class="tool-row">
-            <button type="button" class="secondary-btn" id="fitPrediction">Fit trajectory</button>
-            <button type="button" class="secondary-btn" id="exportKml">Export KML</button>
-          </div>
-          <p class="small-note">The original BPP predictor remains in the repository unchanged for legacy parameter sweeps, drawing/geofence workflows, and direct comparison during validation.</p>
-        </details>
+    <label class="control-field live-only hidden"><span>Callsign</span>
+      <select id="callsign"><option>KC3SKW-8</option><option>KC3SKW-9</option><option>KC3SKW-10</option></select>
+    </label>
+    <label class="control-field live-only hidden"><span>Flight Phase</span>
+      <select id="livePhase"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select>
+    </label>
+
+    <button id="runPredicts" class="run-button" type="button"><span class="run-label">Run Predicts</span><span class="run-state" id="runState"></span></button>
+    <button id="refreshLive" class="utility-button live-only hidden" type="button">Refresh APRS</button>
+  </section>
+
+  <main class="map-workspace">
+    <div id="map" aria-label="Balloon prediction map"></div>
+
+    <section class="drawing-control" id="drawingControl">
+      <button class="drawing-toggle" id="drawingToggle" type="button"><span class="tool-icon">✎</span> Open/Close Drawing Tools</button>
+      <div class="drawing-menu hidden" id="drawingMenu">
+        <button data-draw-mode="point" type="button"><span class="draw-symbol point"></span>Draw point</button>
+        <button data-draw-mode="rectangle" type="button"><span class="draw-symbol rectangle"></span>Draw rectangle</button>
+        <button data-draw-mode="select" type="button"><span class="tool-icon">↖</span>Select drawing</button>
+        <button id="deleteDrawing" type="button" disabled><span class="tool-icon">⌫</span>Delete selection</button>
+        <button id="deleteAllDrawings" type="button"><span class="tool-icon">🗑</span>Delete all drawings</button>
+        <button id="downloadDrawings" type="button"><span class="tool-icon">⇩</span>Download drawings</button>
+      </div>
+    </section>
+
+    <aside class="layer-panel" id="layerPanel" aria-label="Map layers">
+      <div class="layer-panel-title"><strong>Layers</strong><button id="collapseLayers" type="button" aria-label="Collapse layers">›</button></div>
+      <section class="layer-group">
+        <h3>Map Dimensions</h3>
+        <label><span>2D</span><input type="radio" name="dimension" value="2d" checked></label>
+        <label><span>3D</span><input type="radio" name="dimension" value="3d"></label>
       </section>
-
-      <section class="view-panel" data-panel="live">
-        <div class="panel-heading"><div><p class="eyebrow">APRS live tracking</p><h1>Follow the balloon</h1></div><span class="live-pill">LIVE</span></div>
-        <label class="field full"><span>Tracker callsign</span>
-          <select id="callsign"><option>KC3SKW-8</option><option>KC3SKW-9</option><option>KC3SKW-10</option></select>
-        </label>
-        <div class="live-station-card" id="liveStationCard">
-          <div class="station-top"><strong id="liveCallsign">KC3SKW-8</strong><span id="liveAge">Waiting for data</span></div>
-          <div class="station-metrics">
-            <div><small>Altitude</small><b id="liveAltitude">—</b></div>
-            <div><small>Speed</small><b id="liveSpeed">—</b></div>
-            <div><small>Phase</small><b id="livePhase">—</b></div>
-          </div>
-          <div class="coords" id="liveCoords">—</div>
-        </div>
-        <div class="toggle-row"><span>Auto-refresh every 30s</span><label class="switch"><input id="autoRefresh" type="checkbox" checked><span></span></label></div>
-        <div class="toggle-row"><span>Auto re-predict every 2 min</span><label class="switch"><input id="autoRepredict" type="checkbox"><span></span></label></div>
-        <label class="field full"><span>Live flight phase</span><select id="livePhaseSelect"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select></label>
-        <div class="segmented compact" role="group" aria-label="Live prediction type">
-          <button type="button" data-live-mode="burst" class="segment active">Burst</button>
-          <button type="button" data-live-mode="float" class="segment">Float</button>
-        </div>
-        <div class="grid2">
-          <label class="field"><span>Ascent <em>m/s</em></span><input id="liveAscent" type="number" value="5.5" step="0.1" /></label>
-          <label class="field"><span>Descent <em>m/s</em></span><input id="liveDescent" type="number" value="9" step="0.1" /></label>
-        </div>
-        <label class="field full"><span>Burst altitude <em>m</em></span><input id="liveBurst" type="number" value="28000" step="1000" /></label>
-        <div id="liveFloatFields" class="hidden">
-          <label class="field full"><span>Float altitude <em>m</em></span><input id="liveFloatAltitude" type="number" value="22000" step="1000" /></label>
-          <div class="grid2">
-            <label class="field"><span>Float ascent <em>m/s</em></span><input id="liveFloatRate" type="number" value="1" step="0.1" /></label>
-            <label class="field"><span>Duration <em>min</em></span><input id="liveFloatDuration" type="number" value="60" step="10" /></label>
-          </div>
-        </div>
-        <button class="primary-btn" id="runLivePredict" type="button"><span>Predict from live position</span><span class="btn-arrow">→</span></button>
-        <p class="credit">Live position data © <a href="https://aprs.fi/" target="_blank" rel="noopener">aprs.fi</a></p>
+      <section class="layer-group">
+        <h3>Basemap</h3>
+        <label><span>Esri Topography</span><input type="radio" name="basemap" value="topo" checked></label>
+        <label><span>Esri World Imagery Hybrid</span><input type="radio" name="basemap" value="hybrid"></label>
+        <label><span>USGS Topo</span><input type="radio" name="basemap" value="usgs"></label>
+        <label><span>Esri Dark Gray</span><input type="radio" name="basemap" value="dark"></label>
+      </section>
+      <section class="layer-group">
+        <h3>Reference</h3>
+        <label><span>Controlled Airspace</span><input type="checkbox" data-layer="controlled" checked></label>
+        <label><span>Uncontrolled Airspace</span><input type="checkbox" data-layer="uncontrolled"></label>
+        <label><span>TFR Airspace</span><input type="checkbox" data-layer="tfr" checked></label>
+        <label><span>National Address DB</span><input type="checkbox" data-layer="addresses"></label>
+        <label><span>Public School Locations</span><input type="checkbox" data-layer="schools"></label>
+        <label><span>McDonald's Locations</span><input type="checkbox" data-layer="mcdonalds"></label>
+        <label><span>Dunkin' Donuts Locations</span><input type="checkbox" data-layer="dunkin"></label>
+        <label><span>Launch Locations</span><input type="checkbox" data-layer="launch_locations"></label>
+        <label><span>POI</span><input type="checkbox" data-layer="poi"></label>
+      </section>
+      <section class="layer-group predicts-group">
+        <h3>Predicts</h3>
+        <div id="predictSiteList"><p class="loading-text">Loading launch sites…</p></div>
+        <label class="custom-predict-label"><span>Custom Launch Location</span><input id="customPredictEnabled" type="checkbox" checked></label>
       </section>
     </aside>
+    <button class="layers-reopen hidden" id="reopenLayers" type="button">Layers</button>
 
-    <section class="map-shell">
-      <div id="map"></div>
-      <div class="map-toolbar">
-        <button id="map2d" class="map-tool active">2D</button>
-        <button id="map3d" class="map-tool">3D</button>
+    <section class="drawing-info hidden" id="drawingInfo">
+      <div><strong id="drawingInfoTitle">Selected drawing</strong><button id="closeDrawingInfo" type="button">×</button></div>
+      <pre id="drawingCoordinates"></pre>
+      <button id="copyDrawingCoordinates" type="button">Copy coordinates</button>
+    </section>
+
+    <section class="live-status hidden" id="liveStatus">
+      <div class="live-title"><strong id="liveCallsign">KC3SKW-8</strong><span>LIVE</span></div>
+      <div class="live-grid">
+        <div><small>Age</small><b id="liveAge">—</b></div>
+        <div><small>Altitude</small><b id="liveAltitude">—</b></div>
+        <div><small>Speed</small><b id="liveSpeed">—</b></div>
+        <div><small>Phase</small><b id="livePhaseValue">—</b></div>
       </div>
+      <div class="live-coords" id="liveCoords">—</div>
+      <label class="inline-check"><input id="autoRefresh" type="checkbox" checked> Auto-refresh APRS every 30 s</label>
+      <label class="inline-check"><input id="autoRepredict" type="checkbox"> Auto re-predict every 2 min</label>
+    </section>
 
-      <div class="legend" id="legend">
-        <span><i class="legend-line ascent"></i>Ascent</span>
-        <span><i class="legend-line float"></i>Float</span>
-        <span><i class="legend-line descent"></i>Descent</span>
+    <section class="prediction-summary hidden" id="predictionSummary" aria-live="polite">
+      <div class="summary-heading">
+        <div><span class="summary-kicker">Prediction Summary</span><strong id="summaryTitle">Predicted Landing</strong></div>
+        <button id="closeSummary" type="button">×</button>
       </div>
-
-      <section class="summary-card hidden" id="summaryCard" aria-live="polite">
-        <button class="summary-close" id="summaryClose" aria-label="Close summary">×</button>
-        <p class="eyebrow">Predicted landing</p>
-        <div class="landing-title"><span class="landing-icon">⌖</span><div><strong id="landingCoords">—</strong><small id="landingTime">—</small></div></div>
-        <div class="summary-grid">
+      <div id="summaryList" class="summary-list"></div>
+      <div id="activeSummary" class="active-summary hidden">
+        <div class="landing-focus"><span class="target-icon">⌖</span><div><strong id="landingCoords">—</strong><small id="landingTime">—</small></div></div>
+        <div class="summary-metrics">
           <div><small>Flight time</small><b id="flightDuration">—</b></div>
           <div><small>Max altitude</small><b id="maxAltitude">—</b></div>
           <div><small>Ground track</small><b id="groundDistance">—</b></div>
           <div><small>Model</small><b id="modelDataset">—</b></div>
         </div>
-        <div id="approximationNote" class="warning-note hidden"></div>
         <div class="stage-list" id="stageList"></div>
-        <div class="summary-actions"><button id="centerLanding" class="secondary-btn">Center landing</button><button id="copyLanding" class="secondary-btn">Copy coordinates</button></div>
-      </section>
-
-      <section class="airspace-panel hidden" id="airspacePanel">
-        <div class="airspace-head"><strong>Airspace</strong><button id="closeAirspace">×</button></div>
-        <label><input type="checkbox" data-airspace="controlled" checked><span class="swatch controlled"></span>Controlled airspace</label>
-        <label><input type="checkbox" data-airspace="special" checked><span class="swatch special"></span>Special use / restricted</label>
-        <label><input type="checkbox" data-airspace="tfr" checked><span class="swatch tfr"></span>TFRs</label>
-        <p>Airspace is deliberately subdued so the balloon trajectory remains the strongest visual element.</p>
-      </section>
-
-      <div class="toast hidden" id="toast"></div>
+        <div class="summary-buttons"><button id="centerLanding" type="button">Center Landing</button><button id="copyLanding" type="button">Copy Coordinates</button></div>
+      </div>
     </section>
+
+    <div class="trajectory-legend" id="trajectoryLegend">
+      <span><i class="ascent"></i>Ascent</span><span><i class="float"></i>Float</span><span><i class="descent"></i>Descent</span><span><i class="landing"></i>Landing</span>
+    </div>
+
+    <div class="bottom-tools" role="toolbar" aria-label="Prediction map tools">
+      <button id="zoomPredicts" type="button">Zoom To Predicts</button>
+      <button id="downloadKml" type="button">Download Predict KMLs</button>
+      <button id="downloadGeofence" type="button">Download Geofence GeoJSON</button>
+      <button id="openSweep" type="button">Parameter Sweep</button>
+      <button id="queryAddresses" type="button">Query Addresses</button>
+      <button id="aboutMap" type="button">About Map</button>
+    </div>
+
+    <div class="status-toast hidden" id="toast"></div>
   </main>
 
-  <dialog id="helpDialog">
-    <button id="helpClose" class="dialog-close">×</button>
-    <h2>BPP Predicts</h2>
-    <p>Run a Burst or Float forecast from a predefined or custom launch point. Float uses BPP's stitched-float method so descent is included.</p>
-    <p>Live Track pulls the latest position for the three BPP APRS callsigns through the local Python API, keeping the APRS.fi API key out of browser code.</p>
-    <p>For operational use, always verify the forecast, weather model age, airspace data, NOTAMs/TFRs, and launch authorization independently.</p>
+  <dialog id="sweepDialog" class="classic-dialog">
+    <form method="dialog" class="dialog-head"><strong>Parameter Sweep</strong><button value="cancel">×</button></form>
+    <p>Run a controlled series of Tawhiri predictions from one launch site. Results are added to the map without replacing your normal predicts.</p>
+    <div class="dialog-grid">
+      <label><span>Launch site</span><select id="sweepSite"></select></label>
+      <label><span>Parameter</span><select id="sweepParameter"><option value="ascent_rate_ms">Ascent rate (m/s)</option><option value="descent_rate_ms">Descent rate (m/s)</option><option value="altitude">Burst/Float altitude (m)</option></select></label>
+      <label><span>Lower</span><input id="sweepLower" type="number" value="4.5" step="0.5"></label>
+      <label><span>Upper</span><input id="sweepUpper" type="number" value="6.5" step="0.5"></label>
+      <label><span>Step</span><input id="sweepStep" type="number" value="0.5" step="0.1" min="0.01"></label>
+    </div>
+    <div class="dialog-actions"><button id="runSweep" type="button" class="dialog-primary">Run Sweep</button><button id="clearSweep" type="button">Clear Sweep</button></div>
+    <div id="sweepProgress" class="dialog-progress"></div>
+  </dialog>
+
+  <dialog id="aboutDialog" class="classic-dialog">
+    <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
+    <p>This is the current BPP Predicts interface (v2.2.0), with updated rendering, exact georeferenced landing targets, light/dark themes, responsive behavior, and live APRS tracking.</p>
+    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> aprs.fi for KC3SKW-8, KC3SKW-9, and KC3SKW-10.</p>
+    <p>Airspace, school, restaurant, launch-location, and POI overlays are loaded from the existing BPP repository data. Run <code>git lfs pull</code> from the repository root if a layer is unavailable locally.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js"></script>
+  <script type="module" src="static/app.js?v=2.2.0"></script>
 </body>
 </html>

@@ -40,7 +40,9 @@ def test_normalize_launch_locations_legacy_properties():
         "type": "FeatureCollection",
         "features": [{
             "type": "Feature",
-            "geometry": None,
+            # Deliberately disagree with the explicit properties. Legacy presets can
+            # contain geometry generated separately from their authoritative fields.
+            "geometry": {"type": "Point", "coordinates": [-70.0, 35.0]},
             "properties": {"address": "Test School, Town, MD", "longitude": 282.5, "latitude": 39.5},
         }],
     }

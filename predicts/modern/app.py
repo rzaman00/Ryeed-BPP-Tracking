@@ -13,7 +13,7 @@ from typing import Any, Literal
 import httpx
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -28,8 +28,24 @@ TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawh
 APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 
-app = FastAPI(title="UMD BPP Predicts", version="2.0.0")
+BUILD_VERSION = "2.2.0"
+
+app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
+
+
+@app.middleware("http")
+async def latest_build_headers(request: Request, call_next):
+    """Prevent a stale browser cache from making an older frontend look current."""
+    response = await call_next(request)
+    response.headers["X-BPP-Build"] = BUILD_VERSION
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -384,16 +400,29 @@ def normalize_launch_locations(data: dict[str, Any]) -> dict[str, Any]:
             continue
         props = dict(feature.get("properties") or {})
         geometry = feature.get("geometry") or {}
-        coords = geometry.get("coordinates") if geometry.get("type") == "Point" else None
-        if not coords or len(coords) < 2:
-            lat = props.get("latitude", props.get("lat"))
-            lon = props.get("longitude", props.get("lon", props.get("lng")))
-            try:
+        geometry_coords = geometry.get("coordinates") if geometry.get("type") == "Point" else None
+
+        # The legacy launch-location file can contain geometry that is rounded, stale, or
+        # generated differently from the explicit latitude/longitude properties.  Prefer
+        # the explicit properties whenever both are valid so every preset predicts from
+        # the exact operational coordinate shown in the source data.
+        lat = props.get("latitude", props.get("lat"))
+        lon = props.get("longitude", props.get("lon", props.get("lng")))
+        coords = None
+        try:
+            if lat is not None and lon is not None:
                 coords = [to_map_lon(float(lon)), float(lat)]
+        except (TypeError, ValueError):
+            coords = None
+
+        if coords is None and geometry_coords and len(geometry_coords) >= 2:
+            try:
+                coords = [to_map_lon(float(geometry_coords[0])), float(geometry_coords[1])]
             except (TypeError, ValueError):
-                continue
-        else:
-            coords = [to_map_lon(float(coords[0])), float(coords[1])]
+                coords = None
+
+        if coords is None:
+            continue
         if not props.get("name"):
             address = str(props.get("address") or "").strip()
             props["name"] = address.split(",")[0] if address else f"Launch {idx + 1}"
@@ -442,7 +471,7 @@ async def index():
 async def health():
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": BUILD_VERSION,
         "tawhiri_url": TAWHIRI_API_URL,
         "aprs_configured": bool(APRSFI_API_KEY),
         "legacy_data_directory": str(LEGACY_DATA),
@@ -470,15 +499,72 @@ async def launch_locations():
 
 AIRSPACE_FILES = {
     "controlled": "controlled_airspace_reduced.geojson",
-    "special": "airspaces_special_use.geojson",
+    "uncontrolled": "uncontrolled_airspace_reduced.geojson",
     "tfr": "tfr_airspace.geojson",
 }
 
+REFERENCE_FILES = {
+    "schools": "public_school_locations_reduced.geojson",
+    "mcdonalds": "mcdonalds_locations.geojson",
+    "dunkin": "dunkinDonuts_reduced.geojson",
+    "launch_locations": "launch_locations.geojson",
+    "poi": "poi.geojson",
+}
+
+
+def normalize_reference_data(dataset: str, data: dict[str, Any]) -> dict[str, Any]:
+    if dataset == "launch_locations":
+        return normalize_launch_locations(data)
+    return data
+
 
 @app.get("/api/airspace/{dataset}")
-async def airspace(dataset: Literal["controlled", "special", "tfr"]):
+async def airspace(dataset: Literal["controlled", "uncontrolled", "tfr"]):
     data, warning = load_geojson(LEGACY_DATA / AIRSPACE_FILES[dataset])
     return {"data": data, "warning": warning}
+
+
+@app.get("/api/reference/{dataset}")
+async def reference_data(dataset: Literal["schools", "mcdonalds", "dunkin", "launch_locations", "poi"]):
+    data, warning = load_geojson(LEGACY_DATA / REFERENCE_FILES[dataset])
+    data = normalize_reference_data(dataset, data)
+    return {"data": data, "warning": warning}
+
+
+@app.get("/api/national-addresses")
+async def national_addresses(
+    west: float = Query(ge=-180, le=180),
+    south: float = Query(ge=-90, le=90),
+    east: float = Query(ge=-180, le=180),
+    north: float = Query(ge=-90, le=90),
+):
+    if west >= east or south >= north:
+        raise HTTPException(status_code=400, detail="Invalid map bounds")
+    # Match the legacy predictor's National Address Database layer, but proxy it through
+    # the local backend so the browser has one predictable API surface.
+    url = "https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/Address_Points_from_National_Address_Database_view/FeatureServer/0/query"
+    params = {
+        "where": "1=1",
+        "geometry": json.dumps({
+            "xmin": west, "ymin": south, "xmax": east, "ymax": north,
+            "spatialReference": {"wkid": 4326},
+        }),
+        "geometryType": "esriGeometryEnvelope",
+        "spatialRel": "esriSpatialRelContains",
+        "outFields": "AddNo_Full,StNam_Full,Inc_Muni,Post_City,County,State,Zip_Code",
+        "geometryPrecision": 6,
+        "f": "geojson",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(18.0, connect=7.0)) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"National Address Database request failed: {exc}") from exc
+    if isinstance(payload, dict) and payload.get("error"):
+        raise HTTPException(status_code=502, detail=payload["error"].get("message", "National Address Database error"))
+    return {"data": payload}
 
 
 @app.post("/api/predict")
