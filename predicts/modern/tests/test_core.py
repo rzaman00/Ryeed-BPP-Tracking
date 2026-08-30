@@ -266,7 +266,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "2.4.0"
+    assert h["version"] == "2.5.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -303,3 +303,58 @@ def test_every_identified_ui_button_has_javascript_wiring():
     assert len(button_ids) >= 20
     for button_id in button_ids:
         assert button_id in js, f"Button {button_id} has no JS reference"
+
+
+def test_inflation_calculator_matches_matlab_reference_values():
+    import app as appmod
+    req = appmod.InflationRequest(
+        station_pressure_inhg=29.85, site_temperature_f=70,
+        balloon_neck_mass_kg=1.605 + 0.650, payload_mass_kg=7.238 - 0.650,
+        target_ascent_rate_ms=5.5,
+    )
+    r = appmod.calculate_inflation(req)
+    assert r["expected_ascent_rate_ms"] == pytest.approx(5.5, abs=1e-9)
+    assert r["required_scale_lift_lb"] == pytest.approx(20.716485, rel=1e-6)
+    assert r["required_psi"] == pytest.approx(4143.2970, rel=1e-6)
+    assert r["burst_altitude_m"] == pytest.approx(28826.4092, rel=1e-6)
+    assert r["burst_altitude_ft"] == pytest.approx(94574.8363, rel=1e-6)
+    assert r["burst_altitude_reference"] == "above launch site"
+
+
+def test_inflation_calculator_rejects_unachievable_rate():
+    import app as appmod
+    with pytest.raises(ValueError, match="outside the range achievable"):
+        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+
+
+def test_standalone_tabs_and_auto_manual_burst_contract():
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'id="predictsTab"' in html
+    assert 'id="inflationTab"' in html
+    assert 'id="inflationForm"' in html
+    assert 'id="burstAltitudeMode"' in html
+    assert '<option value="auto" selected>' in html
+    assert '<option value="manual">' in html
+    assert "calculateInflation" in js
+    assert "setBurstAltitudeMode" in js
+    assert "ensureAutomaticBurst" in js
+    assert "bpp.umd.edu" not in html.lower()
+
+
+def test_launch_labels_use_city_dash_location():
+    from pathlib import Path
+    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    assert "return `${city} - ${location}`" in js
+
+
+def test_original_matlab_source_is_bundled_for_traceability():
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    matlab = base / "reference" / "InflationCalculations2024.m"
+    assert matlab.exists()
+    text = matlab.read_text(encoding="utf-8")
+    assert "Burst_alt = 7238.3 * log(Rat)" in text
+    assert "Lift_required*200" in text

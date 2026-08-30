@@ -1,18 +1,11 @@
-# Integration plan — v2.4.0
+# Integration — v2.5.0
 
-Use this folder as the only runnable Predicts application:
+Replace the previous `predicts/modern` directory with this one and keep the root launchers from this package.
 
-```text
-Ryeed-BPP-Tracking/predicts/modern
-```
-
-The sibling `predicts/BalloonPredictionMap` directory may remain only as a source of legacy GeoJSON data. The launch scripts never start it.
-
-1. Replace the old `predicts/modern` folder with this one.
-2. From the repository root run `git lfs pull` once.
-3. Run `predicts\modern\run_windows.bat` or top-level `START_BPP_PREDICTS.bat`.
-4. Verify `/api/health` reports version `2.4.0`.
-5. Add `APRSFI_API_KEY` to `.env` for live operation.
-6. In Live Track, enter one or more callsigns and confirm the displayed latitude/longitude/altitude match aprs.fi before running live predicts.
-
-The v2.4 launcher checks for older BPP Predicts servers before launch and opens the browser only after v2.4.0 is verified healthy.
+1. Copy/extract package into the repository root.
+2. Put an APRS.fi key in `predicts/modern/.env` if live tracking is needed.
+3. Run `START_BPP_PREDICTS.bat`.
+4. Confirm `/api/health` reports `2.5.0`.
+5. On Predicts, Burst Altitude defaults to Automatic (Inflation Calculator).
+6. Use the Inflation Calculator tab to change station pressure, temperature, balloon/neck mass, payload mass, or desired ascent rate.
+7. Switch Burst Altitude to Manual whenever an operator needs to override the calculator.

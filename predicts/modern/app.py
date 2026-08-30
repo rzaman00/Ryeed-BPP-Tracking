@@ -35,7 +35,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.4.0"
+BUILD_VERSION = "2.5.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -82,6 +82,115 @@ class PredictRequest(BaseModel):
         if self.mode == "float" and self.float_altitude_m <= current_alt:
             raise ValueError("Float altitude must be above launch/current altitude")
         return self
+
+
+class InflationRequest(BaseModel):
+    """Inputs exposed by the operational inflation calculator.
+
+    The equations and fixed model constants are a direct Python port of the
+    provided InflationCalculations2024.m MATLAB script.
+    """
+
+    station_pressure_inhg: float = Field(default=29.85, gt=0, le=40)
+    site_temperature_f: float = Field(default=70.0, gt=-459.67, le=160)
+    balloon_neck_mass_kg: float = Field(default=2.255, gt=0, le=20)
+    payload_mass_kg: float = Field(default=6.588, ge=0, le=100)
+    target_ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+
+
+def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
+    """Reproduce InflationCalculations2024.m without requiring MATLAB.
+
+    This intentionally keeps the validated constants from the MATLAB source:
+    cd=0.25, R_air=287.05, R_helium=2077.1, launch diameter range 2-3 m,
+    Hwoyee 1600 burst diameter 10.5 m, and the 7238.3 m exponential-density
+    approximation.
+    """
+    g = 9.80665
+    cd = 0.25
+    R_air = 287.05
+    R_helium = 2077.1
+    diameter_min = 2.0
+    diameter_max = 3.0
+    burst_diameter = 10.5
+
+    P_site_Pa = req.station_pressure_inhg * 3386.389
+    T_site_K = (req.site_temperature_f - 32.0) * (5.0 / 9.0) + 273.15
+    rho_air = P_site_Pa / (R_air * T_site_K)
+    rho_helium = P_site_Pa / (R_helium * T_site_K)
+    total_mass = req.balloon_neck_mass_kg + req.payload_mass_kg
+
+    def volume(diameter: float) -> float:
+        return math.pi * diameter ** 3 / 6.0
+
+    def net_lift_mass(diameter: float) -> float:
+        return (rho_air - rho_helium) * volume(diameter) - total_mass
+
+    def ascent_rate(diameter: float) -> float:
+        net = net_lift_mass(diameter)
+        if net <= 0:
+            return 0.0
+        return math.sqrt(8.0 * g * net / (cd * rho_air * math.pi * diameter ** 2))
+
+    liftoff_diameter = (6.0 * total_mass / (math.pi * (rho_air - rho_helium))) ** (1.0 / 3.0)
+    if liftoff_diameter >= diameter_max:
+        raise ValueError(
+            f"The balloon cannot produce positive free lift within the specified diameter range of {diameter_min:.2f} to {diameter_max:.2f} m."
+        )
+
+    diameter_lower_bound = max(diameter_min, liftoff_diameter * (1.0 + 1e-9))
+    minimum_ascent_rate = ascent_rate(diameter_lower_bound)
+    maximum_ascent_rate = ascent_rate(diameter_max)
+    target = req.target_ascent_rate_ms
+    if target < minimum_ascent_rate or target > maximum_ascent_rate:
+        raise ValueError(
+            "The requested ascent rate is outside the range achievable with diameters "
+            f"from {diameter_min:.2f} to {diameter_max:.2f} m. The available range is "
+            f"approximately {minimum_ascent_rate:.3f} to {maximum_ascent_rate:.3f} m/s."
+        )
+
+    # MATLAB uses fzero on the same monotonic bracket. Bisection gives the same
+    # physical root deterministically without adding a SciPy/MATLAB dependency.
+    lo, hi = diameter_lower_bound, diameter_max
+    for _ in range(100):
+        mid = (lo + hi) / 2.0
+        if ascent_rate(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    balloon_diameter = (lo + hi) / 2.0
+    actual_ascent_rate = ascent_rate(balloon_diameter)
+    vol = volume(balloon_diameter)
+
+    lift_required_kg = (rho_air - rho_helium) * vol - req.balloon_neck_mass_kg
+    lift_required_lb = lift_required_kg * 2.20462262185
+    required_psi = lift_required_lb * 200.0
+
+    vol_burst = (4.0 / 3.0) * math.pi * (burst_diameter / 2.0) ** 3
+    ratio = vol_burst / vol
+    burst_altitude_m = 7238.3 * math.log(ratio)
+    burst_altitude_ft = burst_altitude_m * 3.28084
+
+    return {
+        "expected_ascent_rate_ms": actual_ascent_rate,
+        "required_scale_lift_lb": lift_required_lb,
+        "required_psi": required_psi,
+        "burst_altitude_m": burst_altitude_m,
+        "burst_altitude_ft": burst_altitude_ft,
+        "burst_altitude_reference": "above launch site",
+        "balloon_diameter_m": balloon_diameter,
+        "helium_volume_m3": vol,
+        "air_density_kgm3": rho_air,
+        "helium_density_kgm3": rho_helium,
+        "minimum_ascent_rate_ms": minimum_ascent_rate,
+        "maximum_ascent_rate_ms": maximum_ascent_rate,
+        "model": "InflationCalculations2024.m direct equation port",
+        "constants": {
+            "g_ms2": g, "drag_coefficient": cd, "R_air": R_air, "R_helium": R_helium,
+            "diameter_min_m": diameter_min, "diameter_max_m": diameter_max,
+            "burst_diameter_m": burst_diameter, "density_scale_height_m": 7238.3,
+        },
+    }
 
 
 class LivePredictSettings(BaseModel):
@@ -840,7 +949,7 @@ async def fetch_tfr_airspace() -> dict[str, Any]:
 
 
 async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[str, Any], str | None, str]:
-    # backwards-compatible alias from v2.4
+    # backwards-compatible alias from v2.5
     if dataset == "uncontrolled":
         dataset = "class_e"
     cache_path = AIRSPACE_CACHE_DIR / f"{dataset}.geojson"
@@ -956,6 +1065,14 @@ async def national_addresses(
     if isinstance(payload, dict) and payload.get("error"):
         raise HTTPException(status_code=502, detail=payload["error"].get("message", "National Address Database error"))
     return {"data": payload}
+
+
+@app.post("/api/inflation/calculate")
+async def inflation_calculate(req: InflationRequest):
+    try:
+        return calculate_inflation(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/predict")

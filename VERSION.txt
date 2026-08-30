@@ -1,2 +1,2 @@
-BPP Predicts current build: 2.4.0
-Package: modern-only current launcher
+BPP Predicts current build: 2.5.0
+Standalone Predicts + Inflation Calculator
