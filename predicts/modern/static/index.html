@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.6.0" rel="stylesheet" />
+  <link href="static/styles.css?v=2.7.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -21,7 +21,7 @@
       <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.6.0</span>
+      <span class="build-badge" id="buildBadge">v2.7.0</span>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -67,12 +67,20 @@
     </label>
 
     <button id="runPredicts" class="run-button" type="button"><span class="run-label">Run Predicts</span><span class="run-state" id="runState"></span></button>
-    <button id="findOptimalSite" class="optimal-button predict-only" type="button"><span>Find Optimal Site</span><span class="run-state" id="optimalState"></span></button>
+    <button id="findOptimalCurrent" class="optimal-button predict-only" type="button" title="Checks selected preset sites plus every custom launch point"><span class="optimal-label">Find Optimal: Current Sites</span><span class="run-state" id="optimalCurrentState"></span></button>
+    <button id="findOptimalAll" class="optimal-button optimal-all-button predict-only" type="button" title="Checks the complete deduplicated preset launch-site list"><span class="optimal-label">Find Optimal: All Sites</span><span class="run-state" id="optimalAllState"></span></button>
     <button id="refreshLive" class="utility-button live-only hidden" type="button">Refresh APRS</button>
   </section>
   <div id="optimalResult" class="optimal-result hidden" aria-live="polite"></div>
 
   <main class="map-workspace">
+    <section id="siteStatusLegend" class="site-status-legend hidden" aria-label="Launch site status legend">
+      <strong>Launch Site Status</strong>
+      <span><i class="status-gold"></i>Gold — overall best available</span>
+      <span><i class="status-blue"></i>Blue — preferred + viable (Clear Spring / Hancock)</span>
+      <span><i class="status-green"></i>Green — viable / adjustable clear</span>
+      <span><i class="status-red"></i>Red — no-go / manual review</span>
+    </section>
     <div id="map" aria-label="Balloon prediction map"></div>
 
     <section class="drawing-control" id="drawingControl">
@@ -234,12 +242,12 @@
 
   <dialog id="aboutDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is BPP Predicts v2.6.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, optimal-site ranking, and clickable parameter-sweep values.</p>
+    <p>This is BPP Predicts v2.7.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, optimal-site ranking, and clickable parameter-sweep values.</p>
     <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> select one or more APRS callsigns. Each live prediction starts from the station's latest reported latitude, longitude, altitude, and packet timestamp.</p>
     <p><strong>Launch sites:</strong> shown by city only and loaded from resolved BPP data with cache/offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.6.0"></script>
+  <script type="module" src="static/app.js?v=2.7.0"></script>
 </body>
 </html>

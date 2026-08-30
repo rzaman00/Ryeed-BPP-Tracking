@@ -1,2 +1,2 @@
-BPP Predicts v2.6.0
+BPP Predicts v2.7.0
 Optimal Site + City Labels + Clickable Sweep

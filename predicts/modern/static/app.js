@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.6.0';
+const BUILD_VERSION = '2.7.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -207,8 +207,9 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-mcdonalds-layer',type:'circle',source:'ref-mcdonalds',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#ffc72c','circle-opacity':.9,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-dunkin-layer',type:'circle',source:'ref-dunkin',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#da1884','circle-opacity':.88,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-launch_locations-layer',type:'circle',source:'ref-launch_locations',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#0059ff'}});
-  map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','optimal_status'],'optimal'],16,12],'circle-color':['case',['==',['get','optimal_status'],'optimal'],'#21a35b','#d83a45'],'circle-opacity':['case',['==',['get','optimal_status'],'optimal'],.24,.12],'circle-blur':.35}});
-  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','optimal_status'],'optimal'],8,6.5],'circle-color':'#ffffff','circle-stroke-width':4,'circle-stroke-color':['case',['==',['get','optimal_status'],'optimal'],'#16894a','#c92d39']}});
+  const siteStatusColor=['match',['get','site_status'],'best','#d7a820','preferred','#2477d4','viable','#1f9d55','no-go','#d83a45','#8b949e'];
+  map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],17,13],'circle-color':siteStatusColor,'circle-opacity':['case',['==',['get','site_status'],'best'],.28,.15],'circle-blur':.38}});
+  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],8.5,6.8],'circle-color':'#ffffff','circle-stroke-width':4,'circle-stroke-color':siteStatusColor}});
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
@@ -287,8 +288,10 @@ function registerFeaturePopups() {
   map.on('click','optimal-site-points',(e)=>{
     const f=e.features?.[0];if(!f)return;const p=f.properties||{};
     const intrusion=Number(p.airspace_intrusion_m||0),umd=Number(p.umd_distance_m||0);
-    const status=p.optimal_status==='optimal'?'Optimal Site':'Evaluated Site';
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div><div><b>Distance from UMD:</b> ${fmt(miles(umd),1)} mi</div>`).addTo(map);
+    const viable=p.viable===true||p.viable==='true';
+    const status=p.site_status==='best'?(viable?'Overall Best + Viable':'Overall Best Available — Still No-Go'):p.site_status==='preferred'?'Preferred + Viable':p.site_status==='viable'?'Viable':'No-Go';
+    const bestRate=Number(p.best_ascent_rate_ms||0);
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>Airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div><div><b>Distance from UMD:</b> ${fmt(miles(umd),1)} mi</div>`).addTo(map);
   });
   map.on('mouseenter','optimal-site-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','optimal-site-points',()=>{map.getCanvas().style.cursor='';});
@@ -383,6 +386,7 @@ async function loadLaunchLocations() {
     return {...f,_id:`preset-${slug(label)}-${idx}`,_label:label};
   });
   buildPredictSiteList();
+  const allBtn=$('findOptimalAll');if(allBtn){const label=allBtn.querySelector('.optimal-label');if(label)label.textContent=`Find Optimal: All ${state.launchLocations.length} Sites`;}
   map.getSource('ref-launch_locations')?.setData({type:'FeatureCollection',features});
   state.referenceLoaded.add('launch_locations');
   if(r.warning) toast(`Launch locations: ${r.warning}`,true,6000);
@@ -396,7 +400,7 @@ function buildPredictSiteList() {
     const label=document.createElement('label');label.className='predict-site';label.dataset.predictSiteRow=site._id;
     const span=document.createElement('span');span.textContent=site._label;span.title=site.properties?.address||site.properties?.name||site._label;
     const input=document.createElement('input');input.type='checkbox';input.dataset.predictSite=site._id;input.checked=idx===clearSpringIndex;
-    input.addEventListener('change',()=>{refreshPredictionSources();renderSummary();refreshMarkers();});
+    input.addEventListener('change',()=>{invalidateOptimalSiteAnalysis();refreshPredictionSources();renderSummary();refreshMarkers();});
     label.append(span,input);root.appendChild(label);
   });
   if(!state.launchLocations.length)root.innerHTML='<p class="loading-text">No launch locations available.</p>';
@@ -407,7 +411,7 @@ function buildPredictSiteList() {
 function buildCustomPredictSiteList(){
   const root=$('customPredictSiteList');if(!root)return;root.innerHTML='';
   const points=state.drawings.filter(d=>d.properties?.kind==='point');
-  for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
+  for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';label.dataset.customPredictSiteRow=id;const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;invalidateOptimalSiteAnalysis();refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
   if(!points.length)root.innerHTML='<p class="loading-text">Draw a point to add a custom launch site.</p>';
 }
 function selectedPresetSites() {
@@ -420,44 +424,59 @@ function invalidateOptimalSiteAnalysis(){
   if(!state.optimalSiteAnalysis)return;
   state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();
 }
+function siteStatusClass(status){return status==='best'?'site-best':status==='preferred'?'site-preferred':status==='viable'?'site-viable':'site-nogo';}
+function showSiteStatusLegend(){ $('siteStatusLegend')?.classList.remove('hidden'); }
 function refreshOptimalSiteHighlights(){
   const analysis=state.optimalSiteAnalysis;
   const ranking=analysis?.ranking||[];const byId=new Map(ranking.map(x=>[x.site_id,x]));
-  qsa('[data-predict-site-row]').forEach(row=>{
-    const result=byId.get(row.dataset.predictSiteRow);row.classList.toggle('optimal-choice',!!result?.optimal);row.classList.toggle('nonoptimal-choice',!!result&&!result.optimal);
-    if(result){row.title=`${result.site_name} · airspace ${miles(result.airspace_intrusion_m).toFixed(2)} mi · UMD ${miles(result.umd_distance_m).toFixed(1)} mi`;}
+  qsa('[data-predict-site-row],[data-custom-predict-site-row]').forEach(row=>{
+    row.classList.remove('site-best','site-preferred','site-viable','site-nogo');
+    const id=row.dataset.predictSiteRow||row.dataset.customPredictSiteRow;const result=byId.get(id);
+    if(result){row.classList.add(siteStatusClass(result.site_status));const adjust=Math.abs(Number(result.best_ascent_rate_ms)-Number(result.requested_ascent_rate_ms));row.title=`${result.site_name} · ${result.site_status} · best ascent ${fmt(result.best_ascent_rate_ms,1)} m/s${adjust?` (${adjust.toFixed(1)} m/s adjustment)`:''} · airspace ${miles(result.airspace_intrusion_m).toFixed(2)} mi · UMD ${miles(result.umd_distance_m).toFixed(1)} mi`;}
   });
-  const features=ranking.map(result=>({type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties:{...result,optimal_status:result.optimal?'optimal':'nonoptimal'}}));
+  const features=ranking.map(result=>({type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties:{...result}}));
   map?.getSource?.('optimal-sites')?.setData({type:'FeatureCollection',features});
   const result=$('optimalResult');
   if(!result)return;
   if(!analysis){result.classList.add('hidden');result.textContent='';return;}
   const best=ranking[0];if(!best)return;
-  const air=best.clear_of_airspace?'Clear of scored airspace':`${fmt(miles(best.airspace_intrusion_m),2)} mi airspace intrusion`;
-  result.textContent=`Optimal: ${best.site_name} · ${air} · ${fmt(miles(best.umd_distance_m),1)} mi from UMD`;
-  result.classList.remove('hidden');
+  const status=best.viable?'VIABLE':'NO-GO / manual review';
+  const adjustment=Math.abs(Number(best.best_ascent_rate_ms)-Number(best.requested_ascent_rate_ms));
+  result.textContent=`Gold: ${best.site_name} · ${status} · best ascent ${fmt(best.best_ascent_rate_ms,1)} m/s${adjustment?` · adjust ${adjustment.toFixed(1)} m/s`:''} · ${fmt(miles(best.airspace_intrusion_m),2)} mi airspace`;
+  result.classList.remove('hidden');showSiteStatusLegend();
 }
-function setOptimalButton(running,detail=''){
-  const btn=$('findOptimalSite');if(!btn)return;btn.disabled=running;btn.classList.toggle('running',running);$('optimalState').textContent=detail;
+function setOptimalButton(which,running,detail=''){
+  const id=which==='all'?'findOptimalAll':'findOptimalCurrent';const stateId=which==='all'?'optimalAllState':'optimalCurrentState';
+  const btn=$(id);if(!btn)return;btn.disabled=running;btn.classList.toggle('running',running);$(stateId).textContent=detail;
 }
-async function findOptimalSite(){
+function candidateFromTarget(target){
+  const [lon,lat]=target.geometry.coordinates;const city=String(target._label||'');
+  return {site_id:target._id,name:target._label,latitude:Number(lat),longitude:Number(lon),preferred:/^(clear spring|hancock)$/i.test(city.trim())};
+}
+function optimalSweepRates(){
+  const current=Number($('ascentRate').value);return [current,current-.5,current+.5,current-1,current+1].filter((v,i,a)=>v>0&&v<=20&&a.indexOf(v)===i);
+}
+async function findOptimalSite(scope='current'){
   if(state.workspaceMode!=='predict'){toast('Optimal-site search is available in Predict mode.',true);return;}
-  if(!state.launchLocations.length){toast('No launch sites are loaded.',true);return;}
   if(!(await ensureAutomaticBurst()))return;
-  const template=predictionBody(state.launchLocations[0]);
+  const targets=scope==='all'?[...state.launchLocations]:[...selectedPresetSites(),...allCustomPointTargets()];
+  const unique=new Map(targets.map(t=>[t._id,t]));const sites=[...unique.values()];
+  if(!sites.length){toast(scope==='all'?'No launch sites are loaded.':'Select at least one launch site or draw a custom point first.',true);return;}
+  const template=predictionBody(sites[0]);
   const body={
-    launch_sites:state.launchLocations.map(site=>{const [lon,lat]=site.geometry.coordinates;return{site_id:site._id,name:site._label,latitude:Number(lat),longitude:Number(lon)};}),
+    launch_sites:sites.map(candidateFromTarget),
     mode:template.mode,launch_datetime:template.launch_datetime,ascent_rate_ms:template.ascent_rate_ms,descent_rate_ms:template.descent_rate_ms,
     burst_altitude_m:template.burst_altitude_m,float_altitude_m:template.float_altitude_m,float_ascent_rate_ms:template.float_ascent_rate_ms,float_duration_min:template.float_duration_min,
-    airspace_layers:['controlled','class_e','sua','tfr'],
+    airspace_layers:['controlled','class_e','sua','tfr'],ascent_rate_sweep_ms:optimalSweepRates(),
+    automatic_burst:state.predictType==='burst'&&state.burstAltitudeMode==='auto',inflation:inflationRequestBody(),
   };
-  setOptimalButton(true,`${body.launch_sites.length} sites`);$('optimalResult').classList.add('hidden');
+  setOptimalButton(scope,true,`${sites.length} sites`);$('optimalResult').classList.add('hidden');
   try{
-    const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
-    const best=result.ranking?.[0];if(best){const air=best.clear_of_airspace?'no airspace intrusion':`${fmt(miles(best.airspace_intrusion_m),2)} mi airspace intrusion`;toast(`Optimal site: ${best.site_name} — ${air}; ${fmt(miles(best.umd_distance_m),1)} mi from UMD.`,false,7200);}
+    const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
+    const best=result.ranking?.[0];if(best){const viable=result.viable_count||0;toast(`Best ${scope==='all'?'overall':'active'} site: ${best.site_name}. ${viable}/${result.ranking.length} viable.`,false,7200);}
     if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
   }catch(e){state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
-  finally{setOptimalButton(false,'');}
+  finally{setOptimalButton(scope,false,'');}
 }
 
 function setPredictionType(type) {
@@ -559,6 +578,12 @@ function customPointTargets() {
   }));
 }
 
+function allCustomPointTargets() {
+  return state.drawings.filter(d=>d.properties?.kind==='point').map(d=>({
+    type:'Feature',geometry:d.geometry,properties:d.properties,_id:`custom-${d.properties.drawing_id}`,_label:d.properties.name||'Custom Launch Location'
+  }));
+}
+
 function setRunButton(status, detail='') {
   const btn=$('runPredicts');btn.classList.remove('running','success');
   if(status==='running')btn.classList.add('running');if(status==='success')btn.classList.add('success');
@@ -584,7 +609,7 @@ async function runPredicts() {
     $('runState').textContent=`${completed+failed}/${targets.length}`;
   }
   setRunButton('success',failed?`${completed} ok, ${failed} failed`:`${completed} updated`);
-  if(completed){fitPredictions();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
+  if(completed){fitPredictions();showSiteStatusLegend();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
 }
 
 function decoratePrediction(id,label,result) {
@@ -662,7 +687,7 @@ function downloadBlob(content,type,name){const blob=content instanceof Blob?cont
 function drawingFeatureCollection(includePreview=true){const features=state.drawings.map(d=>({...d,properties:{...(d.properties||{}),selected:d.properties?.drawing_id===state.selectedDrawingId}}));if(includePreview&&state.rectanglePreview)features.push(state.rectanglePreview);return{type:'FeatureCollection',features};}
 function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureCollection());buildCustomPredictSiteList();refreshSweepSites();}
 function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:`Geofence ${n}`;}
-function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
+function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;invalidateOptimalSiteAnalysis();refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
 function rectangleBaselinePreview(a,b){return{type:'Feature',geometry:{type:'LineString',coordinates:[[a.lng,a.lat],[b.lng,b.lat]]},properties:{kind:'rectangle-guide',preview:true}};}
 function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2}};}
 function cancelRectangleDraft(message='Rectangle drawing cancelled.'){state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();if(message)toast(message);}
@@ -683,8 +708,8 @@ function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_i
 function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
 function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';$('deleteDrawing').disabled=false;}
 function saveDrawingName(){const d=selectedDrawing();if(!d)return;const name=$('drawingName').value.trim();if(!name){toast('Enter a name first.',true);return;}d.properties.name=name;refreshDrawings();showSelectedDrawing();toast('Drawing name saved.');}
-function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
-function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
+function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
+function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
 function downloadDrawings(){if(!state.drawings.length){toast('No drawings to download.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:state.drawings},null,2),'application/geo+json','BPP_map_drawings.geojson');}
 function downloadGeofence(){const rectangles=state.drawings.filter(d=>d.properties?.kind==='rectangle');if(!rectangles.length){toast('Draw an oriented rectangle first.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:rectangles},null,2),'application/geo+json','BPP_geofence.geojson');}
 async function copyDrawing(){const d=selectedDrawing();if(!d)return;await navigator.clipboard.writeText(drawingCoordinateText(d));toast('Drawing coordinates copied.');}
@@ -820,7 +845,7 @@ function wireControls(){
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
   ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',invalidateOptimalSiteAnalysis));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
-  $('runPredicts').addEventListener('click',runPredicts);$('findOptimalSite').addEventListener('click',findOptimalSite);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});

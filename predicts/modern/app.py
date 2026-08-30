@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, model_validator
-from shapely.geometry import LineString, shape
+from shapely.geometry import LineString, Point, shape
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
@@ -38,7 +38,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.6.0"
+BUILD_VERSION = "2.7.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -221,6 +221,7 @@ class OptimalSiteCandidate(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     altitude_m: float | None = None
+    preferred: bool = False
 
 
 class OptimalSiteRequest(BaseModel):
@@ -238,6 +239,16 @@ class OptimalSiteRequest(BaseModel):
         min_length=1,
         max_length=4,
     )
+    ascent_rate_sweep_ms: list[float] = Field(default_factory=list, max_length=9)
+    automatic_burst: bool = False
+    inflation: InflationRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_sweep_rates(self):
+        for value in self.ascent_rate_sweep_ms:
+            if not math.isfinite(value) or value <= 0 or value > 20:
+                raise ValueError("Optimal-site ascent-rate sweep values must be positive and at most 20 m/s")
+        return self
 
 
 class ExternalServiceError(RuntimeError):
@@ -751,10 +762,30 @@ def normalize_launch_locations(data: dict[str, Any], source: str | None = None) 
     return {"type": "FeatureCollection", "features": features}
 
 
+def launch_city(feature: dict[str, Any]) -> str:
+    props = feature.get("properties") or {}
+    for key in ("city", "municipality", "CITY"):
+        value = str(props.get(key) or "").strip()
+        if value:
+            return value
+    parts = [part.strip() for part in str(props.get("address") or "").split(",") if part.strip()]
+    if len(parts) >= 3:
+        return parts[-2]
+    if len(parts) >= 2:
+        return parts[1]
+    return ""
+
+
 def launch_feature_key(feature: dict[str, Any]) -> tuple[str, int, int]:
     props = feature.get("properties") or {}
-    name = str(props.get("name") or props.get("address") or "").strip().lower()
+    city = launch_city(feature).casefold()
     coords = (feature.get("geometry") or {}).get("coordinates") or [0, 0]
+    # The historical list is presented by city. A repeated city is almost always the
+    # same operational site arriving once from the online file and again from the
+    # bundled/cache fallback, so city is the primary de-duplication key.
+    if city:
+        return f"city:{city}", 0, 0
+    name = str(props.get("name") or props.get("address") or "").strip().lower()
     return name, round(float(coords[0]) * 10000), round(float(coords[1]) * 10000)
 
 
@@ -767,7 +798,11 @@ def merge_launch_collections(*collections: dict[str, Any]) -> dict[str, Any]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append(feature)
+            copied = {**feature, "properties": dict(feature.get("properties") or {})}
+            city = launch_city(copied)
+            if city:
+                copied["properties"].setdefault("city", city)
+            out.append(copied)
     return {"type": "FeatureCollection", "features": out}
 
 
@@ -1136,11 +1171,58 @@ def score_prediction_against_airspace(prediction: dict[str, Any], indexes: dict[
     }
 
 
-def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, float, float]:
-    """Zero airspace conflict wins; then minimum intrusion; then distance to UMD."""
+def _high_risk_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build the landing no-go index used by the site classifier.
+
+    Restricted (R) controlled airspace is rendered red in the map. Special-use
+    airspace and active TFRs are also treated conservatively as landing no-go zones.
+    """
+    geometries: list[Any] = []
+    for layer, collection in collections.items():
+        for feature in collection.get("features", []) if isinstance(collection, dict) else []:
+            props = feature.get("properties") or {}
+            high_risk = layer in {"sua", "tfr"}
+            if layer == "controlled":
+                local_type = str(props.get("LOCAL_TYPE") or props.get("local_type") or "").upper()
+                high_risk = local_type in {"R", "RESTRICTED"}
+            if not high_risk:
+                continue
+            geometry = feature.get("geometry") or {}
+            try:
+                geom = shape(geometry)
+            except Exception:
+                continue
+            if not geom.is_empty and geom.geom_type in ("Polygon", "MultiPolygon"):
+                geometries.append(geom)
+    return {"geometries": geometries, "tree": STRtree(geometries) if geometries else None}
+
+
+def landing_in_high_risk_airspace(prediction: dict[str, Any], index: dict[str, Any]) -> bool:
+    landing = (prediction.get("summary") or {}).get("landing") or {}
+    try:
+        point = Point(float(landing["longitude"]), float(landing["latitude"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(_queried_geometries(index, point))
+
+
+def default_ascent_rate_sweep(current: float) -> list[float]:
+    """Current rate first, then practical +/-0.5 and +/-1.0 m/s adjustments."""
+    values = [current, current - 0.5, current + 0.5, current - 1.0, current + 1.0]
+    out: list[float] = []
+    for value in values:
+        value = round(float(value), 3)
+        if 0 < value <= 20 and value not in out:
+            out.append(value)
+    return out
+
+
+def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, float, float, float]:
+    """Viable sites win, then minimum intrusion/adjustment, then UMD distance."""
     return (
-        0 if candidate.get("clear_of_airspace") else 1,
-        float(candidate.get("airspace_intrusion_m") or 0.0),
+        0 if candidate.get("viable") else 1,
+        float(candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
+        float(candidate.get("ascent_rate_adjustment_ms") or 0.0),
         float(candidate.get("umd_distance_m") or 0.0),
     )
 
@@ -1169,7 +1251,7 @@ async def health():
         "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
-        "optimal_site": "all launch sites ranked by airspace intrusion, then UMD distance",
+        "optimal_site": "active/all-site viability sweep with ascent-rate adjustment, preferred sites, and no-go landing checks",
     }
 
 
@@ -1259,16 +1341,18 @@ async def predict(req: PredictRequest):
 
 @app.post("/api/optimal-site")
 async def optimal_site(req: OptimalSiteRequest):
-    """Sweep every supplied launch site and choose the operationally best option.
+    """Evaluate supplied sites, including practical ascent-rate adjustment.
 
-    Priority is exactly: (1) zero airspace intrusion, (2) least airspace intrusion
-    when none are clear, and (3) shortest distance to UMD College Park as the tie-break.
+    A site is viable when at least one tested ascent rate produces a trajectory with
+    no scored airspace intrusion and a landing outside restricted/SUA/TFR polygons.
+    The best available site is always marked gold; viable preferred sites (Clear
+    Spring/Hancock from the frontend) are marked blue, other viable sites green,
+    and sites that cannot be cleared by the tested adjustments are red/no-go.
     """
     validate_launch_window(req.launch_datetime)
     layers = list(dict.fromkeys(req.airspace_layers))
     airspace_results = await asyncio.gather(
-        *(operational_airspace(layer) for layer in layers),
-        return_exceptions=True,
+        *(operational_airspace(layer) for layer in layers), return_exceptions=True
     )
     collections: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
@@ -1276,64 +1360,110 @@ async def optimal_site(req: OptimalSiteRequest):
     for layer, outcome in zip(layers, airspace_results):
         if isinstance(outcome, Exception):
             warnings.append(f"{layer}: {outcome}")
-            collections[layer] = empty_fc()
-            sources[layer] = "unavailable"
-            continue
+            collections[layer] = empty_fc(); sources[layer] = "unavailable"; continue
         data, warning, source = outcome
-        collections[layer] = data
-        sources[layer] = source
-        if warning:
-            warnings.append(f"{layer}: {warning}")
-
+        collections[layer] = data; sources[layer] = source
+        if warning: warnings.append(f"{layer}: {warning}")
     if not any(collection.get("features") for collection in collections.values()):
-        raise HTTPException(
-            status_code=503,
-            detail="No FAA airspace data is available, so an optimal site cannot be ranked safely.",
-        )
+        raise HTTPException(status_code=503, detail="No FAA airspace data is available, so an optimal site cannot be ranked safely.")
 
     indexes = build_airspace_spatial_indexes(collections)
-    semaphore = asyncio.Semaphore(4)
+    high_risk_index = _high_risk_airspace_index(collections)
+    semaphore = asyncio.Semaphore(6)
+    sweep_rates = req.ascent_rate_sweep_ms or default_ascent_rate_sweep(req.ascent_rate_ms)
+    if req.ascent_rate_ms not in sweep_rates:
+        sweep_rates.insert(0, req.ascent_rate_ms)
+    # Keep current rate first, then the smallest operational adjustment.
+    sweep_rates = sorted(dict.fromkeys(round(float(v), 3) for v in sweep_rates), key=lambda v: (abs(v - req.ascent_rate_ms), v))
 
-    async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
+    async def predict_at_rate(site: OptimalSiteCandidate, rate: float) -> dict[str, Any]:
+        burst_altitude = req.burst_altitude_m
+        if req.mode == "burst" and req.automatic_burst and req.inflation is not None:
+            try:
+                inflation_req = req.inflation.model_copy(update={"target_ascent_rate_ms": rate})
+                burst_altitude = float(calculate_inflation(inflation_req)["burst_altitude_m"])
+            except ValueError as exc:
+                raise ExternalServiceError(f"Inflation model cannot use {rate:g} m/s: {exc}") from exc
+        pred_req = PredictRequest(
+            mode=req.mode,
+            launch=LaunchPoint(name=site.name, latitude=site.latitude, longitude=site.longitude, altitude_m=site.altitude_m),
+            launch_datetime=req.launch_datetime,
+            ascent_rate_ms=rate,
+            descent_rate_ms=req.descent_rate_ms,
+            burst_altitude_m=burst_altitude,
+            float_altitude_m=req.float_altitude_m,
+            float_ascent_rate_ms=req.float_ascent_rate_ms,
+            float_duration_min=req.float_duration_min,
+        )
         async with semaphore:
-            pred_req = PredictRequest(
-                mode=req.mode,
-                launch=LaunchPoint(
-                    name=site.name, latitude=site.latitude, longitude=site.longitude, altitude_m=site.altitude_m
-                ),
-                launch_datetime=req.launch_datetime,
-                ascent_rate_ms=req.ascent_rate_ms,
-                descent_rate_ms=req.descent_rate_ms,
-                burst_altitude_m=req.burst_altitude_m,
-                float_altitude_m=req.float_altitude_m,
-                float_ascent_rate_ms=req.float_ascent_rate_ms,
-                float_duration_min=req.float_duration_min,
-            )
             prediction = await (run_float(pred_req) if req.mode == "float" else run_burst(pred_req))
         score = score_prediction_against_airspace(prediction, indexes)
-        umd_distance = haversine_m(
-            (site.latitude, site.longitude), UMD_COLLEGE_PARK_REFERENCE
-        )
+        high_risk_landing = landing_in_high_risk_airspace(prediction, high_risk_index)
         summary = prediction.get("summary") or {}
+        return {
+            "ascent_rate_ms": rate,
+            "burst_altitude_m": burst_altitude,
+            **score,
+            "landing_in_high_risk_airspace": high_risk_landing,
+            "landing": summary.get("landing"),
+            "ground_distance_m": summary.get("ground_distance_m"),
+            "clear_and_safe": bool(score["clear_of_airspace"] and not high_risk_landing),
+        }
+
+    async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
+        scenarios: list[dict[str, Any]] = []
+        scenario_errors: dict[str, str] = {}
+        # Sequential within a site enables early exit once a practical clear rate is found;
+        # sites themselves still run concurrently through the shared semaphore.
+        for rate in sweep_rates:
+            try:
+                scenario = await predict_at_rate(site, rate)
+                scenarios.append(scenario)
+                if scenario["clear_and_safe"]:
+                    break
+            except Exception as exc:
+                scenario_errors[f"{rate:g}"] = str(exc)
+        if not scenarios:
+            raise ExternalServiceError(f"No ascent-rate scenario succeeded: {scenario_errors}")
+        scenarios.sort(key=lambda x: (
+            0 if x["clear_and_safe"] else 1,
+            0 if not x["landing_in_high_risk_airspace"] else 1,
+            float(x["airspace_intrusion_m"]),
+            abs(float(x["ascent_rate_ms"]) - req.ascent_rate_ms),
+        ))
+        best = scenarios[0]
+        viable = bool(best["clear_and_safe"])
+        umd_distance = haversine_m((site.latitude, site.longitude), UMD_COLLEGE_PARK_REFERENCE)
         return {
             "site_id": site.site_id,
             "site_name": site.name,
             "latitude": site.latitude,
             "longitude": site.longitude,
-            **score,
+            "preferred": bool(site.preferred),
+            "viable": viable,
+            "no_go": not viable,
+            "best_ascent_rate_ms": best["ascent_rate_ms"],
+            "requested_ascent_rate_ms": req.ascent_rate_ms,
+            "ascent_rate_adjustment_ms": abs(float(best["ascent_rate_ms"]) - req.ascent_rate_ms),
+            "best_airspace_intrusion_m": best["airspace_intrusion_m"],
+            "airspace_intrusion_m": best["airspace_intrusion_m"],
+            "airspace_intrusion_by_layer_m": best["airspace_intrusion_by_layer_m"],
+            "conflict_layers": best["conflict_layers"],
+            "clear_of_airspace": best["clear_of_airspace"],
+            "landing_in_high_risk_airspace": best["landing_in_high_risk_airspace"],
+            "landing": best["landing"],
+            "ground_distance_m": best["ground_distance_m"],
             "umd_distance_m": umd_distance,
-            "landing": summary.get("landing"),
-            "ground_distance_m": summary.get("ground_distance_m"),
+            "tested_ascent_rates_ms": [x["ascent_rate_ms"] for x in scenarios],
+            "scenario_errors": scenario_errors,
         }
 
     outcomes = await asyncio.gather(*(evaluate(site) for site in req.launch_sites), return_exceptions=True)
     ranking: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
     for site, outcome in zip(req.launch_sites, outcomes):
-        if isinstance(outcome, Exception):
-            errors[site.site_id] = str(outcome)
-        else:
-            ranking.append(outcome)
+        if isinstance(outcome, Exception): errors[site.site_id] = str(outcome)
+        else: ranking.append(outcome)
     if not ranking:
         raise HTTPException(status_code=502, detail=f"Every launch-site prediction failed: {errors}")
 
@@ -1341,25 +1471,27 @@ async def optimal_site(req: OptimalSiteRequest):
     for rank, candidate in enumerate(ranking, start=1):
         candidate["rank"] = rank
         candidate["optimal"] = rank == 1
+        if candidate["optimal"]:
+            candidate["site_status"] = "best"
+        elif candidate["viable"] and candidate["preferred"]:
+            candidate["site_status"] = "preferred"
+        elif candidate["viable"]:
+            candidate["site_status"] = "viable"
+        else:
+            candidate["site_status"] = "no-go"
     optimal = ranking[0]
-    if optimal["clear_of_airspace"]:
-        reason = "No airspace intrusion; shortest UMD distance among the clear sites."
+    viable_count = sum(1 for item in ranking if item["viable"])
+    if optimal["viable"]:
+        reason = "Best viable site after airspace/landing checks and practical ascent-rate adjustment; UMD distance breaks remaining ties."
     else:
-        reason = "No site was fully clear; this site has the least airspace intrusion, with UMD distance as the tie-break."
+        reason = "No tested site was fully viable; gold marks the least-conflicting option, but it remains a no-go until manually reviewed."
     return {
-        "optimal_site_id": optimal["site_id"],
-        "optimal_site_name": optimal["site_name"],
-        "reason": reason,
-        "ranking": ranking,
-        "errors": errors,
-        "airspace_layers": layers,
-        "airspace_sources": sources,
-        "warnings": warnings,
-        "umd_reference": {
-            "name": "University of Maryland College Park",
-            "latitude": UMD_COLLEGE_PARK_REFERENCE[0],
-            "longitude": UMD_COLLEGE_PARK_REFERENCE[1],
-        },
+        "optimal_site_id": optimal["site_id"], "optimal_site_name": optimal["site_name"],
+        "reason": reason, "ranking": ranking, "errors": errors,
+        "viable_count": viable_count, "no_go_count": len(ranking) - viable_count,
+        "ascent_rate_sweep_ms": sweep_rates,
+        "airspace_layers": layers, "airspace_sources": sources, "warnings": warnings,
+        "umd_reference": {"name":"University of Maryland College Park","latitude":UMD_COLLEGE_PARK_REFERENCE[0],"longitude":UMD_COLLEGE_PARK_REFERENCE[1]},
     }
 
 
@@ -1446,7 +1578,6 @@ async def live_predict_batch(req: LivePredictBatchRequest):
         "results": results,
         "errors": errors,
     }
-
 
 if __name__ == "__main__":
     host = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")

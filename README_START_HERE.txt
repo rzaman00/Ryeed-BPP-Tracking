@@ -1,4 +1,4 @@
-BPP Predicts v2.6.0 — standalone operational build
+BPP Predicts v2.7.0 — standalone operational build
 
 Run on Windows:
   Double-click START_BPP_PREDICTS.bat
@@ -6,7 +6,7 @@ Run on Windows:
 Or from PowerShell at the repository root:
   .\START_BPP_PREDICTS.bat
 
-The application opens at http://127.0.0.1:8000 only after /api/health confirms v2.6.0.
+The application opens at http://127.0.0.1:8000 only after /api/health confirms v2.7.0.
 
 Top-level application tabs:
   - Predicts
