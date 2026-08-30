@@ -38,7 +38,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.7.0"
+BUILD_VERSION = "2.8.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -780,13 +780,18 @@ def launch_feature_key(feature: dict[str, Any]) -> tuple[str, int, int]:
     props = feature.get("properties") or {}
     city = launch_city(feature).casefold()
     coords = (feature.get("geometry") or {}).get("coordinates") or [0, 0]
-    # The historical list is presented by city. A repeated city is almost always the
-    # same operational site arriving once from the online file and again from the
-    # bundled/cache fallback, so city is the primary de-duplication key.
-    if city:
-        return f"city:{city}", 0, 0
-    name = str(props.get("name") or props.get("address") or "").strip().lower()
-    return name, round(float(coords[0]) * 10000), round(float(coords[1]) * 10000)
+    name = str(props.get("name") or props.get("address") or "").strip().casefold()
+    # Operators specifically use one canonical Clear Spring site and one canonical
+    # Cumberland site. Collapse those repeated historical/fallback entries by city.
+    if city in {"clear spring", "cumberland"}:
+        return f"canonical-city:{city}", 0, 0
+    # Other cities can legitimately contain multiple distinct historical launch sites,
+    # so preserve them while still removing exact remote/cache duplicates.
+    try:
+        lon_key = round(float(coords[0]) * 10000); lat_key = round(float(coords[1]) * 10000)
+    except (TypeError, ValueError, IndexError):
+        lon_key = lat_key = 0
+    return f"{city}|{name}", lon_key, lat_key
 
 
 def merge_launch_collections(*collections: dict[str, Any]) -> dict[str, Any]:
@@ -1042,9 +1047,60 @@ async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[
 UMD_COLLEGE_PARK_REFERENCE = (38.986918, -76.942554)  # central College Park campus reference
 OPTIMAL_AIRSPACE_LAYERS = ("controlled", "class_e", "sua", "tfr")
 
+# Re-running the same optimal-site request within a short window should be instant.
+# This cache is deliberately brief so updated launch settings/FAA data are not masked.
+_OPTIMAL_RESULT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+OPTIMAL_RESULT_CACHE_TTL_S = 120.0
 
-def _polygon_geometries(collection: dict[str, Any]) -> list[Any]:
-    geometries: list[Any] = []
+
+def _parse_altitude_value_m(value: Any, unit: Any = None, code: Any = None, *, upper: bool = False) -> float | None:
+    """Best-effort FAA altitude normalization to meters MSL.
+
+    FAA class/SUA feeds normally provide numeric LOWER_VAL/UPPER_VAL values in feet,
+    sometimes with FL/SFC/UNL codes. Unknown values intentionally return None so the
+    scorer remains conservative instead of silently inventing a ceiling.
+    """
+    text = " ".join(str(x or "") for x in (value, unit, code)).upper().strip()
+    if "UNL" in text or "UNLIMIT" in text:
+        return math.inf
+    if "SFC" in text or "SURFACE" in text:
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        m = re.search(r"(-?\d+(?:\.\d+)?)", str(value or ""))
+        if not m:
+            return None
+        number = float(m.group(1))
+    u = str(unit or code or "").upper()
+    if "FL" in u or str(value or "").upper().startswith("FL"):
+        return number * 100.0 * 0.3048
+    if u in {"M", "METER", "METERS", "METRE", "METRES"} or "METER" in u or "METRE" in u:
+        return number
+    # FAA airspace altitude values are feet unless explicitly identified otherwise.
+    return number * 0.3048
+
+
+def _airspace_vertical_bounds_m(feature: dict[str, Any], layer: str) -> tuple[float, float]:
+    props = feature.get("properties") or {}
+    lower_val = next((props.get(k) for k in ("LOWER_VAL","LOWER_ALT","LOWER","LOWER_LIMIT","lower_val","lower_alt") if props.get(k) not in (None,"")), None)
+    upper_val = next((props.get(k) for k in ("UPPER_VAL","UPPER_ALT","UPPER","UPPER_LIMIT","upper_val","upper_alt") if props.get(k) not in (None,"")), None)
+    lower_unit = next((props.get(k) for k in ("LOWER_UOM","LOWER_UNIT","LOWER_CODE","lower_uom","lower_unit","lower_code") if props.get(k) not in (None,"")), None)
+    upper_unit = next((props.get(k) for k in ("UPPER_UOM","UPPER_UNIT","UPPER_CODE","upper_uom","upper_unit","upper_code") if props.get(k) not in (None,"")), None)
+    lower = _parse_altitude_value_m(lower_val, lower_unit, props.get("LOWER_CODE"))
+    upper = _parse_altitude_value_m(upper_val, upper_unit, props.get("UPPER_CODE"), upper=True)
+    # Missing vertical metadata stays conservative for SUA/TFR and old fallback data.
+    if lower is None:
+        lower = 0.0
+    if upper is None:
+        upper = math.inf
+    if upper < lower:
+        lower, upper = upper, lower
+    return float(lower), float(upper)
+
+
+def _polygon_records(collection: dict[str, Any], layer: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
     for feature in collection.get("features", []) if isinstance(collection, dict) else []:
         geometry = feature.get("geometry") if isinstance(feature, dict) else None
         if not geometry:
@@ -1053,46 +1109,69 @@ def _polygon_geometries(collection: dict[str, Any]) -> list[Any]:
             geom = shape(geometry)
         except Exception:
             continue
-        if geom.is_empty:
+        if geom.is_empty or geom.geom_type not in ("Polygon", "MultiPolygon"):
             continue
-        if geom.geom_type in ("Polygon", "MultiPolygon"):
-            geometries.append(geom)
-    return geometries
+        lower_m, upper_m = _airspace_vertical_bounds_m(feature, layer)
+        records.append({"geometry": geom, "lower_m": lower_m, "upper_m": upper_m, "feature": feature, "layer": layer})
+    return records
 
 
 def build_airspace_spatial_indexes(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Build reusable R-trees once for a full optimal-site sweep."""
+    """Build reusable R-trees once for a full optimal-site sweep.
+
+    Each spatial record keeps the FAA vertical floor/ceiling. This prevents a HAB
+    trajectory at 50,000+ ft from being marked as conflicting with a Class D circle
+    whose ceiling is only a few thousand feet MSL.
+    """
     layers: dict[str, dict[str, Any]] = {}
-    all_geometries: list[Any] = []
+    all_records: list[dict[str, Any]] = []
     for layer, collection in collections.items():
-        geoms = _polygon_geometries(collection)
-        layers[layer] = {"geometries": geoms, "tree": STRtree(geoms) if geoms else None}
-        all_geometries.extend(geoms)
+        records = _polygon_records(collection, layer)
+        geoms = [r["geometry"] for r in records]
+        layers[layer] = {"records": records, "geometries": geoms, "tree": STRtree(geoms) if geoms else None}
+        all_records.extend(records)
+    all_geometries = [r["geometry"] for r in all_records]
     return {
         "layers": layers,
-        "all": {"geometries": all_geometries, "tree": STRtree(all_geometries) if all_geometries else None},
+        "all": {"records": all_records, "geometries": all_geometries, "tree": STRtree(all_geometries) if all_geometries else None},
     }
 
 
-def _queried_geometries(index: dict[str, Any], line: Any) -> list[Any]:
+def _queried_geometries(index: dict[str, Any], geometry: Any) -> list[Any]:
     tree = index.get("tree")
     geometries = index.get("geometries") or []
     if tree is None or not geometries:
         return []
     try:
-        indices = tree.query(line, predicate="intersects")
+        indices = tree.query(geometry, predicate="intersects")
         return [geometries[int(i)] for i in indices]
     except Exception:
-        # Defensive fallback for environments/backends that return geometries instead of indices.
-        raw = tree.query(line)
+        raw = tree.query(geometry)
         out = []
         for item in raw:
-            if hasattr(item, "geom_type"):
-                geom = item
-            else:
-                geom = geometries[int(item)]
-            if line.intersects(geom):
+            geom = item if hasattr(item, "geom_type") else geometries[int(item)]
+            if geometry.intersects(geom):
                 out.append(geom)
+        return out
+
+
+def _queried_records(index: dict[str, Any], geometry: Any) -> list[dict[str, Any]]:
+    tree = index.get("tree")
+    records = index.get("records") or []
+    if tree is None or not records:
+        return []
+    try:
+        indices = tree.query(geometry, predicate="intersects")
+        return [records[int(i)] for i in indices]
+    except Exception:
+        geoms = index.get("geometries") or []
+        raw = tree.query(geometry)
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            idx = geoms.index(item) if hasattr(item, "geom_type") else int(item)
+            record = records[idx]
+            if geometry.intersects(record["geometry"]):
+                out.append(record)
         return out
 
 
@@ -1110,58 +1189,107 @@ def _geometry_haversine_length_m(geometry: Any) -> float:
     return 0.0
 
 
-def _prediction_lines(prediction: dict[str, Any]) -> list[Any]:
-    lines: list[Any] = []
+def _prediction_segments(prediction: dict[str, Any]) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
     for feature in prediction.get("features", []):
         geometry = feature.get("geometry") or {}
         if geometry.get("type") != "LineString":
             continue
         coords = geometry.get("coordinates") or []
+        for a, b in zip(coords, coords[1:]):
+            try:
+                lon1, lat1 = float(a[0]), float(a[1]); alt1 = float(a[2]) if len(a) > 2 else 0.0
+                lon2, lat2 = float(b[0]), float(b[1]); alt2 = float(b[2]) if len(b) > 2 else alt1
+                line = LineString([(lon1, lat1), (lon2, lat2)])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not line.is_empty and line.length > 0:
+                segments.append({"line": line, "alt1_m": alt1, "alt2_m": alt2})
+    return segments
+
+
+def _interval_vertical_fraction(alt1: float, alt2: float, lower: float, upper: float) -> float:
+    if lower <= min(alt1, alt2) and max(alt1, alt2) <= upper:
+        return 1.0
+    if max(alt1, alt2) < lower or min(alt1, alt2) > upper:
+        return 0.0
+    if abs(alt2 - alt1) < 1e-9:
+        return 1.0 if lower <= alt1 <= upper else 0.0
+    u1 = (lower - alt1) / (alt2 - alt1) if math.isfinite(lower) else -math.inf
+    u2 = (upper - alt1) / (alt2 - alt1) if math.isfinite(upper) else math.inf
+    lo = max(0.0, min(u1, u2)); hi = min(1.0, max(u1, u2))
+    return max(0.0, hi - lo)
+
+
+def _line_parts(geometry: Any) -> list[Any]:
+    if geometry is None or geometry.is_empty:
+        return []
+    if geometry.geom_type in ("LineString", "LinearRing"):
+        return [geometry]
+    if geometry.geom_type in ("MultiLineString", "GeometryCollection"):
+        out: list[Any] = []
+        for part in geometry.geoms:
+            out.extend(_line_parts(part))
+        return out
+    return []
+
+
+def _segment_record_intrusion_m(segment: dict[str, Any], record: dict[str, Any]) -> float:
+    line = segment["line"]
+    try:
+        intersection = line.intersection(record["geometry"])
+    except Exception:
+        return 0.0
+    total = 0.0
+    for part in _line_parts(intersection):
+        coords = list(part.coords)
         if len(coords) < 2:
             continue
+        p0, p1 = Point(coords[0]), Point(coords[-1])
         try:
-            lines.append(LineString([(float(c[0]), float(c[1])) for c in coords]))
-        except (TypeError, ValueError, IndexError):
+            t0 = float(line.project(p0, normalized=True)); t1 = float(line.project(p1, normalized=True))
+        except Exception:
+            t0, t1 = 0.0, 1.0
+        a0 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t0
+        a1 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t1
+        vertical_fraction = _interval_vertical_fraction(a0, a1, record["lower_m"], record["upper_m"])
+        if vertical_fraction <= 0:
             continue
-    return lines
+        total += _geometry_haversine_length_m(part) * vertical_fraction
+    return total
 
 
-def _line_intrusion_m(line: Any, index: dict[str, Any]) -> float:
-    candidates = _queried_geometries(index, line)
-    if not candidates:
+def _segment_intrusion_m(segment: dict[str, Any], index: dict[str, Any]) -> float:
+    records = _queried_records(index, segment["line"])
+    if not records:
         return 0.0
-    try:
-        airspace = unary_union(candidates)
-        return _geometry_haversine_length_m(line.intersection(airspace))
-    except Exception:
-        # A single malformed polygon should not make the whole site sweep unusable.
-        total = 0.0
-        for geom in candidates:
-            try:
-                total += _geometry_haversine_length_m(line.intersection(geom))
-            except Exception:
-                continue
-        return total
+    # Summing record intersections can double-count overlapping polygons. For HAB site
+    # classification this is acceptable only at the layer detail level; the all-layer
+    # total uses the maximum conservative estimate bounded by the segment length.
+    total = sum(_segment_record_intrusion_m(segment, record) for record in records)
+    return min(total, _geometry_haversine_length_m(segment["line"]))
 
 
 def score_prediction_against_airspace(prediction: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
-    """Measure ground-track distance inside the configured FAA airspace polygons.
+    """Score real 3-D trajectory interference with FAA airspace.
 
-    Ranking uses the union of all airspace layers, so overlap between two FAA layers
-    is not double-counted. Layer-specific lengths are returned for explainability.
+    Horizontal polygon overlap only counts when the balloon altitude overlaps the
+    feature's vertical floor/ceiling. This fixes the prior false-red behavior where
+    a high-altitude balloon merely passing above a Class B/C/D polygon was marked
+    as an airspace violation.
     """
-    lines = _prediction_lines(prediction)
-    if not lines:
+    segments = _prediction_segments(prediction)
+    if not segments:
         raise ValueError("Prediction contained no trajectory to score against airspace")
     by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
     total = 0.0
-    for line in lines:
-        total += _line_intrusion_m(line, indexes.get("all", {}))
+    for segment in segments:
+        total += _segment_intrusion_m(segment, indexes.get("all", {}))
         for layer, index in indexes.get("layers", {}).items():
-            by_layer[layer] += _line_intrusion_m(line, index)
-    # Ignore sub-meter geometry slivers caused by polygon-boundary precision.
-    total = 0.0 if total < 1.0 else total
-    by_layer = {layer: (0.0 if value < 1.0 else value) for layer, value in by_layer.items()}
+            by_layer[layer] += _segment_intrusion_m(segment, index)
+    # Ignore tiny GIS boundary slivers/rounding artifacts.
+    total = 0.0 if total < 25.0 else total
+    by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in by_layer.items()}
     conflicts = [layer for layer, value in by_layer.items() if value > 0]
     return {
         "airspace_intrusion_m": total,
@@ -1218,11 +1346,17 @@ def default_ascent_rate_sweep(current: float) -> list[float]:
 
 
 def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, float, float, float]:
-    """Viable sites win, then minimum intrusion/adjustment, then UMD distance."""
+    """All viable sites are equivalent on airspace; closest to UMD wins gold.
+
+    If nothing is viable, fall back to the least-conflicting option so operators still
+    get a best-available candidate while every unsafe site remains clearly flagged.
+    """
+    if candidate.get("viable"):
+        return (0, float(candidate.get("umd_distance_m") or 0.0), float(candidate.get("ascent_rate_adjustment_ms") or 0.0), 0.0)
     return (
-        0 if candidate.get("viable") else 1,
+        1,
         float(candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
-        float(candidate.get("ascent_rate_adjustment_ms") or 0.0),
+        1.0 if candidate.get("landing_in_high_risk_airspace") else 0.0,
         float(candidate.get("umd_distance_m") or 0.0),
     )
 
@@ -1251,7 +1385,7 @@ async def health():
         "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
-        "optimal_site": "active/all-site viability sweep with ascent-rate adjustment, preferred sites, and no-go landing checks",
+        "optimal_site": "active/all-site viability ranking with fast current-rate mode, optional ±1 m/s sweep, altitude-aware airspace checks, and UMD-distance tie-break",
     }
 
 
@@ -1343,13 +1477,19 @@ async def predict(req: PredictRequest):
 async def optimal_site(req: OptimalSiteRequest):
     """Evaluate supplied sites, including practical ascent-rate adjustment.
 
-    A site is viable when at least one tested ascent rate produces a trajectory with
-    no scored airspace intrusion and a landing outside restricted/SUA/TFR polygons.
+    A site is viable when the selected ascent-rate mode produces at least one trajectory
+    with no altitude-aware scored airspace intrusion and a landing outside restricted/SUA/TFR polygons.
     The best available site is always marked gold; viable preferred sites (Clear
     Spring/Hancock from the frontend) are marked blue, other viable sites green,
     and sites that cannot be cleared by the tested adjustments are red/no-go.
     """
     validate_launch_window(req.launch_datetime)
+    cache_key = req.model_dump_json()
+    cached_result = _OPTIMAL_RESULT_CACHE.get(cache_key)
+    if cached_result and time.monotonic() - cached_result[0] < OPTIMAL_RESULT_CACHE_TTL_S:
+        cached_copy = json.loads(json.dumps(cached_result[1]))
+        cached_copy["cache_hit"] = True
+        return cached_copy
     layers = list(dict.fromkeys(req.airspace_layers))
     airspace_results = await asyncio.gather(
         *(operational_airspace(layer) for layer in layers), return_exceptions=True
@@ -1369,7 +1509,7 @@ async def optimal_site(req: OptimalSiteRequest):
 
     indexes = build_airspace_spatial_indexes(collections)
     high_risk_index = _high_risk_airspace_index(collections)
-    semaphore = asyncio.Semaphore(6)
+    semaphore = asyncio.Semaphore(10)
     sweep_rates = req.ascent_rate_sweep_ms or default_ascent_rate_sweep(req.ascent_rate_ms)
     if req.ascent_rate_ms not in sweep_rates:
         sweep_rates.insert(0, req.ascent_rate_ms)
@@ -1482,17 +1622,24 @@ async def optimal_site(req: OptimalSiteRequest):
     optimal = ranking[0]
     viable_count = sum(1 for item in ranking if item["viable"])
     if optimal["viable"]:
-        reason = "Best viable site after airspace/landing checks and practical ascent-rate adjustment; UMD distance breaks remaining ties."
+        reason = "All clear sites are viable; gold marks the viable site closest to University of Maryland College Park."
     else:
         reason = "No tested site was fully viable; gold marks the least-conflicting option, but it remains a no-go until manually reviewed."
-    return {
+    response_payload = {
         "optimal_site_id": optimal["site_id"], "optimal_site_name": optimal["site_name"],
         "reason": reason, "ranking": ranking, "errors": errors,
         "viable_count": viable_count, "no_go_count": len(ranking) - viable_count,
         "ascent_rate_sweep_ms": sweep_rates,
         "airspace_layers": layers, "airspace_sources": sources, "warnings": warnings,
+        "cache_hit": False,
         "umd_reference": {"name":"University of Maryland College Park","latitude":UMD_COLLEGE_PARK_REFERENCE[0],"longitude":UMD_COLLEGE_PARK_REFERENCE[1]},
     }
+    _OPTIMAL_RESULT_CACHE[cache_key] = (time.monotonic(), response_payload)
+    # Bound memory even during long test/development sessions.
+    if len(_OPTIMAL_RESULT_CACHE) > 24:
+        oldest = min(_OPTIMAL_RESULT_CACHE, key=lambda key: _OPTIMAL_RESULT_CACHE[key][0])
+        _OPTIMAL_RESULT_CACHE.pop(oldest, None)
+    return response_payload
 
 
 @app.get("/api/live")

@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.7.0';
+const BUILD_VERSION = '2.8.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -208,8 +208,8 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-dunkin-layer',type:'circle',source:'ref-dunkin',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#da1884','circle-opacity':.88,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-launch_locations-layer',type:'circle',source:'ref-launch_locations',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#0059ff'}});
   const siteStatusColor=['match',['get','site_status'],'best','#d7a820','preferred','#2477d4','viable','#1f9d55','no-go','#d83a45','#8b949e'];
-  map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],17,13],'circle-color':siteStatusColor,'circle-opacity':['case',['==',['get','site_status'],'best'],.28,.15],'circle-blur':.38}});
-  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],8.5,6.8],'circle-color':'#ffffff','circle-stroke-width':4,'circle-stroke-color':siteStatusColor}});
+  map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],18,14],'circle-color':siteStatusColor,'circle-opacity':.26,'circle-blur':.42}});
+  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],9.5,8],'circle-color':siteStatusColor,'circle-stroke-width':3,'circle-stroke-color':'#ffffff'}});
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
@@ -425,7 +425,7 @@ function invalidateOptimalSiteAnalysis(){
   state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();
 }
 function siteStatusClass(status){return status==='best'?'site-best':status==='preferred'?'site-preferred':status==='viable'?'site-viable':'site-nogo';}
-function showSiteStatusLegend(){ $('siteStatusLegend')?.classList.remove('hidden'); }
+function showSiteStatusLegend(){ const el=$('siteStatusLegend');if(!el)return;el.classList.remove('hidden');el.classList.toggle('beside-summary',!$('predictionSummary').classList.contains('hidden')); }
 function refreshOptimalSiteHighlights(){
   const analysis=state.optimalSiteAnalysis;
   const ranking=analysis?.ranking||[];const byId=new Map(ranking.map(x=>[x.site_id,x]));
@@ -440,9 +440,9 @@ function refreshOptimalSiteHighlights(){
   if(!result)return;
   if(!analysis){result.classList.add('hidden');result.textContent='';return;}
   const best=ranking[0];if(!best)return;
-  const status=best.viable?'VIABLE':'NO-GO / manual review';
+  const status=best.viable?'VIABLE':'NO-GO / airspace conflict';
   const adjustment=Math.abs(Number(best.best_ascent_rate_ms)-Number(best.requested_ascent_rate_ms));
-  result.textContent=`Gold: ${best.site_name} · ${status} · best ascent ${fmt(best.best_ascent_rate_ms,1)} m/s${adjustment?` · adjust ${adjustment.toFixed(1)} m/s`:''} · ${fmt(miles(best.airspace_intrusion_m),2)} mi airspace`;
+  result.textContent=`Gold: ${best.site_name} · ${status} · best ascent ${fmt(best.best_ascent_rate_ms,1)} m/s${adjustment?` · adjust ${adjustment.toFixed(1)} m/s`:''} · ${fmt(miles(best.airspace_intrusion_m),2)} mi airspace${analysis.cache_hit?' · cached':''}`;
   result.classList.remove('hidden');showSiteStatusLegend();
 }
 function setOptimalButton(which,running,detail=''){
@@ -454,7 +454,20 @@ function candidateFromTarget(target){
   return {site_id:target._id,name:target._label,latitude:Number(lat),longitude:Number(lon),preferred:/^(clear spring|hancock)$/i.test(city.trim())};
 }
 function optimalSweepRates(){
-  const current=Number($('ascentRate').value);return [current,current-.5,current+.5,current-1,current+1].filter((v,i,a)=>v>0&&v<=20&&a.indexOf(v)===i);
+  const current=Number($('ascentRate').value);
+  if(!$('optimalAscentSweep')?.checked)return [current];
+  return [current,current-.5,current+.5,current-1,current+1].filter((v,i,a)=>v>0&&v<=20&&a.indexOf(v)===i);
+}
+function updateOptimalSweepLabel(){
+  const on=Boolean($('optimalAscentSweep')?.checked);
+  const label=$('optimalSweepModeLabel');if(label)label.textContent=on?'Try ±0.5 / ±1.0 m/s':'Current rate only';
+}
+function optimalAirspaceLayers(){
+  // B/C/D, Special Use and active TFRs are operational conflict layers. Class E
+  // is only added when the operator explicitly turns that broad layer on.
+  const layers=['controlled','sua','tfr'];
+  const classE=qs('input[data-layer="class_e"]');if(classE?.checked)layers.push('class_e');
+  return layers;
 }
 async function findOptimalSite(scope='current'){
   if(state.workspaceMode!=='predict'){toast('Optimal-site search is available in Predict mode.',true);return;}
@@ -467,13 +480,13 @@ async function findOptimalSite(scope='current'){
     launch_sites:sites.map(candidateFromTarget),
     mode:template.mode,launch_datetime:template.launch_datetime,ascent_rate_ms:template.ascent_rate_ms,descent_rate_ms:template.descent_rate_ms,
     burst_altitude_m:template.burst_altitude_m,float_altitude_m:template.float_altitude_m,float_ascent_rate_ms:template.float_ascent_rate_ms,float_duration_min:template.float_duration_min,
-    airspace_layers:['controlled','class_e','sua','tfr'],ascent_rate_sweep_ms:optimalSweepRates(),
+    airspace_layers:optimalAirspaceLayers(),ascent_rate_sweep_ms:optimalSweepRates(),
     automatic_burst:state.predictType==='burst'&&state.burstAltitudeMode==='auto',inflation:inflationRequestBody(),
   };
-  setOptimalButton(scope,true,`${sites.length} sites`);$('optimalResult').classList.add('hidden');
+  const rates=optimalSweepRates();setOptimalButton(scope,true,`${sites.length}×${rates.length}`);$('optimalResult').classList.add('hidden');
   try{
     const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
-    const best=result.ranking?.[0];if(best){const viable=result.viable_count||0;toast(`Best ${scope==='all'?'overall':'active'} site: ${best.site_name}. ${viable}/${result.ranking.length} viable.`,false,7200);}
+    const best=result.ranking?.[0];if(best){const viable=result.viable_count||0;toast(`Best ${scope==='all'?'overall':'active'} site: ${best.site_name}. ${viable}/${result.ranking.length} viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}
     if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
   }catch(e){state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
   finally{setOptimalButton(scope,false,'');}
@@ -655,6 +668,7 @@ function refreshMarkers(){refreshPredictionSources();}
 
 function renderSummary() {
   const panel=$('predictionSummary'),list=$('summaryList');const entries=visiblePredictionEntries();
+  if(state.optimalSiteAnalysis)requestAnimationFrame(showSiteStatusLegend);
   if(!entries.length){panel.classList.add('hidden');return;}panel.classList.remove('hidden');
   if(!state.activePredictionId||!entries.some(x=>x.site_id===state.activePredictionId))state.activePredictionId=entries[0].site_id;
   $('summaryTitle').textContent=entries.length===1?entries[0].site_name:`${entries.length} launch sites`;
@@ -845,7 +859,7 @@ function wireControls(){
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
   ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',invalidateOptimalSiteAnalysis));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
-  $('runPredicts').addEventListener('click',runPredicts);$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',()=>{invalidateOptimalSiteAnalysis();updateOptimalSweepLabel();});$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
@@ -861,7 +875,7 @@ function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTi
 async function init() {
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
-  setDefaultDate();wireControls();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
+  setDefaultDate();wireControls();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
   await calculateInflation(true).catch(()=>{});
   try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);renderCallsignControls();}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});

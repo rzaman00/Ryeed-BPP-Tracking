@@ -243,7 +243,7 @@ html[data-theme="dark"] .maplibregl-ctrl-attrib a{color:#8fc1ff}
 @media(max-width:900px){.app-tabs{margin-left:8px}.inflation-heading{align-items:start;flex-direction:column}.inflation-layout{grid-template-columns:1fr}.inflation-page{padding:24px 16px 44px}}@media(max-width:640px){.site-header{flex-wrap:wrap}.app-tabs{order:3;width:100%;margin:8px 0 0}.app-tab{flex:1}.inflation-grid,.inflation-result-grid{grid-template-columns:1fr}.inflation-result-grid .burst-result,.inflation-grid label.wide{grid-column:auto}.inflation-detail{align-items:stretch;flex-direction:column}.burst-altitude-control select{min-width:0}}
 
 
-/* v2.7 two-scope optimal-site workflow + operational status colors */
+/* v2.8 two-scope optimal-site workflow + operational status colors */
 .optimal-button{min-width:148px;border:1px solid #237a4b;background:linear-gradient(135deg,#1d7d4a,#17623c);color:#fff;font-weight:800;padding:0 12px;cursor:pointer;transition:filter .15s ease,transform .15s ease}
 .optimal-all-button{border-color:#315c86;background:linear-gradient(135deg,#345f8d,#294d74)}
 .optimal-button:hover{filter:brightness(1.08)}.optimal-button:disabled{opacity:.7;cursor:wait}.optimal-button.running{background:linear-gradient(135deg,#556273,#3f4b59)}
@@ -259,3 +259,38 @@ html[data-theme="dark"] .maplibregl-ctrl-attrib a{color:#8fc1ff}
 .site-status-legend strong{font-size:10px;text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}.site-status-legend span{display:flex;align-items:center;gap:7px;white-space:nowrap}.site-status-legend i{width:10px;height:10px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.2)}
 .site-status-legend .status-gold{background:#d7a820}.site-status-legend .status-blue{background:#2477d4}.site-status-legend .status-green{background:#1f9d55}.site-status-legend .status-red{background:#d83a45}
 @media(max-width:860px){.optimal-button{min-width:130px}.optimal-result{top:148px;max-width:calc(100% - 16px)}.site-status-legend{left:8px;bottom:50px;min-width:205px}}
+
+
+/* --------------------------------------------------------------------------
+   v2.8 consolidated operational fixes
+   -------------------------------------------------------------------------- */
+/* Use the actual remaining viewport height, even when the horizontally scrollable
+   control strip grows taller. This keeps the bottom operations toolbar on-screen. */
+body{display:flex;flex-direction:column;min-height:0}
+.site-header{flex:0 0 auto}
+#predictsView:not(.hidden){display:flex;flex:1 1 auto;min-height:0;flex-direction:column;overflow:hidden}
+#predictsView>.control-strip{flex:0 0 auto}
+#predictsView>.map-workspace{flex:1 1 auto;height:auto;min-height:0}
+#inflationView:not(.hidden){flex:1 1 auto;height:auto;min-height:0}
+.bottom-tools{display:flex!important;visibility:visible!important;z-index:28;min-height:42px;height:42px;border-top:1px solid var(--ui-border-strong);box-shadow:0 -4px 16px rgba(0,0,0,.12)}
+.maplibregl-ctrl-bottom-right,.maplibregl-ctrl-bottom-left{bottom:48px!important}
+.trajectory-legend{bottom:52px}
+.prediction-summary{bottom:52px}
+
+/* Compact speed/accuracy switch for optimal-site evaluation. */
+.optimal-sweep-toggle{display:flex;align-items:center;gap:8px;min-width:158px;padding:5px 10px;border-right:1px solid var(--ui-border);background:var(--surface-2);white-space:nowrap;cursor:pointer}
+.optimal-sweep-toggle input{width:18px;height:18px;accent-color:#2477d4;flex:0 0 auto}
+.optimal-sweep-toggle span{display:flex;flex-direction:column;gap:1px}.optimal-sweep-toggle strong{font-size:10px;color:var(--text)}.optimal-sweep-toggle small{font-size:9px;color:var(--text-muted)}
+
+/* Entire launch-site row is the status color rather than a subtle outline. */
+.predict-site{border:1px solid transparent!important;border-radius:8px;padding:5px 7px!important;margin:2px 0!important;transition:background .15s ease,color .15s ease,transform .12s ease}
+.predict-site.site-best{background:#d7a820!important;border-color:#f8df72!important;color:#15130b!important}.predict-site.site-best span{color:#15130b!important;font-weight:900}
+.predict-site.site-preferred{background:#2477d4!important;border-color:#78b5f5!important;color:#fff!important}.predict-site.site-preferred span{color:#fff!important;font-weight:850}
+.predict-site.site-viable{background:#1f9d55!important;border-color:#79d69f!important;color:#fff!important}.predict-site.site-viable span{color:#fff!important;font-weight:800}
+.predict-site.site-nogo{background:#b92332!important;border-color:#ef7d87!important;color:#fff!important}.predict-site.site-nogo span{color:#fff!important;font-weight:800}
+.predict-site.site-best input{accent-color:#6f5900}.predict-site.site-preferred input,.predict-site.site-viable input,.predict-site.site-nogo input{accent-color:#fff}
+
+/* Keep status legend beside, not on top of, the prediction summary. */
+.site-status-legend{left:390px;bottom:52px;z-index:20;min-width:250px;background:var(--surface-glass)}
+.site-status-legend.beside-summary{left:390px}
+@media(max-width:900px){.site-status-legend,.site-status-legend.beside-summary{left:8px;bottom:calc(52px + 38%);max-width:calc(100% - 16px)}.optimal-sweep-toggle{min-width:145px}}

@@ -266,7 +266,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "2.7.0"
+    assert h["version"] == "2.8.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -278,7 +278,7 @@ def test_ui_contract_has_required_controls_and_wiring():
     html = (base / "static" / "index.html").read_text(encoding="utf-8")
     js = (base / "static" / "app.js").read_text(encoding="utf-8")
     required_ids = [
-        "runPredicts", "findOptimalCurrent", "findOptimalAll", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
+        "runPredicts", "findOptimalCurrent", "findOptimalAll", "optimalAscentSweep", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
         "saveCustomCallsign", "callsignChips", "predictSiteList", "customPredictSiteList",
         "drawingToggle", "deleteDrawing", "deleteAllDrawings", "downloadDrawings", "saveDrawingName",
         "zoomPredicts", "downloadKml", "downloadGeofence", "openSweep", "queryAddresses", "aboutMap",
@@ -507,7 +507,7 @@ def test_ui_has_two_optimal_buttons_status_colors_and_legend():
     assert "selectedPresetSites(),...allCustomPointTargets()" in js
     assert "scope==='all'?[...state.launchLocations]" in js
     for status in ["site-best","site-preferred","site-viable","site-nogo"]: assert status in css
-    for color in ["Gold — overall best","Blue — preferred + viable","Green — viable","Red — no-go"]: assert color in html
+    for color in ["Gold — closest viable site to UMD","Blue — preferred + viable","Green — viable","Red — airspace conflict / no-go"]: assert color in html
 
 
 def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch):
@@ -531,3 +531,100 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
     assert site["best_ascent_rate_ms"] == 5.0
     assert site["site_status"] == "best"
     assert site["tested_ascent_rates_ms"] == [5.0,5.5] or set(site["tested_ascent_rates_ms"]) == {5.0,5.5}
+
+
+
+def test_v28_altitude_aware_airspace_does_not_flag_path_above_class_d():
+    import app as appmod
+    airspace={"controlled":{"type":"FeatureCollection","features":[{
+        "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":3000,"LOWER_UOM":"FT","UPPER_UOM":"FT"},
+        "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-76.9,38.9],[-76.9,39.1],[-77.2,39.1],[-77.2,38.9]]]}
+    }]}}
+    idx=appmod.build_airspace_spatial_indexes(airspace)
+    high={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,5000],[-76.8,39.0,5000]]}}]}
+    low={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,300],[-76.8,39.0,300]]}}]}
+    assert appmod.score_prediction_against_airspace(high,idx)["clear_of_airspace"] is True
+    assert appmod.score_prediction_against_airspace(low,idx)["airspace_intrusion_m"] > 10000
+
+
+def test_v28_closest_viable_site_is_gold_even_if_it_needed_adjustment():
+    import app as appmod
+    candidates=[
+        {"site_id":"near","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":1.0,"umd_distance_m":10000},
+        {"site_id":"far","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0.0,"umd_distance_m":50000},
+    ]
+    candidates.sort(key=appmod.optimal_site_sort_key)
+    assert candidates[0]["site_id"] == "near"
+
+
+def test_v28_optimal_ui_has_speed_toggle_solid_status_and_restored_bottom_toolbar():
+    from pathlib import Path
+    base=Path(__file__).resolve().parents[1]
+    html=(base/"static"/"index.html").read_text(encoding="utf-8")
+    js=(base/"static"/"app.js").read_text(encoding="utf-8")
+    css=(base/"static"/"styles.css").read_text(encoding="utf-8")
+    assert 'id="optimalAscentSweep"' in html
+    assert 'id="optimalSweepModeLabel"' in html
+    assert "if(!$('optimalAscentSweep')?.checked)return [current]" in js
+    assert "airspace_layers:optimalAirspaceLayers()" in js
+    assert "const layers=['controlled','sua','tfr']" in js
+    for control in ["zoomPredicts","downloadKml","downloadGeofence","openSweep","queryAddresses","aboutMap"]:
+        assert f'id="{control}"' in html
+    assert ".bottom-tools{display:flex!important;visibility:visible!important" in css
+    assert ".predict-site.site-viable{background:#1f9d55!important" in css
+    assert ".predict-site.site-nogo{background:#b92332!important" in css
+    assert ".site-status-legend{left:390px" in css
+
+
+def test_v28_current_rate_only_evaluates_one_scenario_per_site(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._OPTIMAL_RESULT_CACHE.clear()
+    empty={"type":"FeatureCollection","features":[]}
+    controlled={"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
+    async def fake_airspace(layer,force=False): return (controlled if layer=="controlled" else empty,None,"test")
+    calls=[]
+    async def fake_run(req,meta=None):
+        calls.append((req.launch.name,req.ascent_rate_ms))
+        lon=req.launch.longitude;lat=req.launch.latitude
+        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[lon+.01,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":lon+.01,"latitude":lat},"ground_distance_m":1000}}
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
+    req=appmod.OptimalSiteRequest(
+        launch_sites=[appmod.OptimalSiteCandidate(site_id="a",name="A",latitude=39,longitude=-77),appmod.OptimalSiteCandidate(site_id="b",name="B",latitude=39.1,longitude=-77.1)],
+        launch_datetime=datetime.now(timezone.utc),airspace_layers=["controlled"],ascent_rate_ms=5.5,ascent_rate_sweep_ms=[5.5],
+    )
+    result=asyncio.run(appmod.optimal_site(req))
+    assert len(calls)==2
+    assert result["ascent_rate_sweep_ms"] == [5.5]
+
+
+def test_v28_preserves_distinct_same_city_sites_except_canonical_clear_spring_cumberland():
+    import app as appmod
+    a={"type":"FeatureCollection","features":[
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.0,39.0]},"properties":{"city":"Example City","name":"Site A"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.1,39.1]},"properties":{"city":"Example City","name":"Site B"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.94,39.66]},"properties":{"city":"Clear Spring","name":"Operational"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.95,39.67]},"properties":{"city":"Clear Spring","name":"Fallback"}},
+    ]}
+    merged=appmod.merge_launch_collections(a)
+    names=[f["properties"]["name"] for f in merged["features"]]
+    assert "Site A" in names and "Site B" in names
+    assert sum(1 for f in merged["features"] if appmod.launch_city(f)=="Clear Spring") == 1
+
+
+def test_v28_identical_optimal_request_uses_short_cache(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._OPTIMAL_RESULT_CACHE.clear()
+    controlled={"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
+    async def fake_airspace(layer,force=False): return controlled,None,"test"
+    calls=[]
+    async def fake_run(req,meta=None):
+        calls.append(req.launch.name)
+        lon=req.launch.longitude;lat=req.launch.latitude
+        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[lon+.01,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":lon+.01,"latitude":lat},"ground_distance_m":1000}}
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
+    req=appmod.OptimalSiteRequest(launch_sites=[appmod.OptimalSiteCandidate(site_id="a",name="A",latitude=39,longitude=-77)],launch_datetime=datetime.now(timezone.utc),airspace_layers=["controlled"],ascent_rate_sweep_ms=[5.5])
+    first=asyncio.run(appmod.optimal_site(req));second=asyncio.run(appmod.optimal_site(req))
+    assert first["cache_hit"] is False and second["cache_hit"] is True
+    assert len(calls)==1

@@ -1,6 +1,6 @@
-# Build report — BPP Predicts v2.7.0
+# Build report — BPP Predicts v2.8.0
 
-## Added in v2.7
+## Added in v2.8
 - Two optimal-site searches: **Current Sites** (selected presets + all manually drawn points) and **All Sites** (complete deduplicated preset list; normally 16 from the historical source).
 - Site viability testing across the current ascent rate and practical ±0.5 / ±1.0 m/s adjustments.
 - Automatic-burst searches recalculate the inflation-model burst altitude for each tested ascent rate.
@@ -19,3 +19,13 @@
 - Geometry and UI-helper Node tests passed.
 - 31 Python automated tests passed, including duplicate-city handling, ascent-rate viability adjustment, restricted-airspace landing checks, preferred-site coloring, and both optimal-site button contracts.
 - Local FastAPI health/config/launch/inflation smoke tests passed.
+
+
+## v2.8 regressions covered
+- current-rate-only fast mode
+- optional ±1 m/s ascent sweep
+- altitude-aware controlled-airspace scoring
+- closest viable gold ranking
+- full-fill status colors
+- status legend beside summary
+- bottom operational toolbar visibility
