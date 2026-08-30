@@ -38,7 +38,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.8.0"
+BUILD_VERSION = "2.9.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -777,22 +777,24 @@ def launch_city(feature: dict[str, Any]) -> str:
 
 
 def launch_feature_key(feature: dict[str, Any]) -> tuple[str, int, int]:
+    """Return a stable operational key for a preset launch location.
+
+    The predictor UI is city-based: operators should see exactly one preset row per
+    launch city. Historical BPP sources contain multiple records for several cities
+    (not only Clear Spring/Cumberland), so de-duplicate *all* preset locations by city.
+    Manually drawn custom sites are not passed through this function and remain unique.
+    """
     props = feature.get("properties") or {}
     city = launch_city(feature).casefold()
     coords = (feature.get("geometry") or {}).get("coordinates") or [0, 0]
     name = str(props.get("name") or props.get("address") or "").strip().casefold()
-    # Operators specifically use one canonical Clear Spring site and one canonical
-    # Cumberland site. Collapse those repeated historical/fallback entries by city.
-    if city in {"clear spring", "cumberland"}:
+    if city:
         return f"canonical-city:{city}", 0, 0
-    # Other cities can legitimately contain multiple distinct historical launch sites,
-    # so preserve them while still removing exact remote/cache duplicates.
     try:
         lon_key = round(float(coords[0]) * 10000); lat_key = round(float(coords[1]) * 10000)
     except (TypeError, ValueError, IndexError):
         lon_key = lat_key = 0
-    return f"{city}|{name}", lon_key, lat_key
-
+    return f"uncategorized:{name}", lon_key, lat_key
 
 def merge_launch_collections(*collections: dict[str, Any]) -> dict[str, Any]:
     out: list[dict[str, Any]] = []
@@ -860,7 +862,10 @@ async def operational_launch_locations() -> tuple[dict[str, Any], list[str], lis
     elif bundled_warning:
         warnings.append(bundled_warning)
 
-    merged = merge_launch_collections(*collections)
+    # Bundled entries contain the canonical operational coordinates for the core
+    # BPP sites (including Clear Spring, Cumberland, Hancock, Chambersburg, and
+    # Emmitsburg), so let those win before merging the historical/cache sources.
+    merged = merge_launch_collections(bundled, *collections)
     if not merged.get("features"):
         warnings.append("No launch locations could be loaded")
     return merged, warnings, sources
@@ -1044,8 +1049,8 @@ async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[
         return empty_fc(), f"Airspace could not be loaded: {exc}", "unavailable"
 
 
-UMD_COLLEGE_PARK_REFERENCE = (38.986918, -76.942554)  # central College Park campus reference
 OPTIMAL_AIRSPACE_LAYERS = ("controlled", "class_e", "sua", "tfr")
+AIRSPACE_VERTICAL_TOLERANCE_M = 30.0  # ignore tiny ceiling/boundary numerical noise
 
 # Re-running the same optimal-site request within a short window should be instant.
 # This cache is deliberately brief so updated launch settings/FAA data are not masked.
@@ -1252,6 +1257,16 @@ def _segment_record_intrusion_m(segment: dict[str, Any], record: dict[str, Any])
             t0, t1 = 0.0, 1.0
         a0 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t0
         a1 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t1
+        crossing_min_alt = min(a0, a1)
+        crossing_max_alt = max(a0, a1)
+        # Horizontal overlap is not a conflict when the balloon is above the FAA
+        # feature's maximum altitude at the actual crossing. This is the core HAB
+        # overflight rule: compare trajectory altitude *where it crosses the polygon*,
+        # not the polygon footprint alone.
+        if math.isfinite(record["upper_m"]) and crossing_min_alt > record["upper_m"] + AIRSPACE_VERTICAL_TOLERANCE_M:
+            continue
+        if crossing_max_alt < record["lower_m"] - AIRSPACE_VERTICAL_TOLERANCE_M:
+            continue
         vertical_fraction = _interval_vertical_fraction(a0, a1, record["lower_m"], record["upper_m"])
         if vertical_fraction <= 0:
             continue
@@ -1345,21 +1360,36 @@ def default_ascent_rate_sweep(current: float) -> list[float]:
     return out
 
 
-def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, float, float, float]:
-    """All viable sites are equivalent on airspace; closest to UMD wins gold.
+def preferred_site_priority(name: str) -> int:
+    """Operational preference only; distance is intentionally never considered."""
+    value = str(name or "").strip().casefold()
+    if value == "clear spring" or value.startswith("clear spring "):
+        return 0
+    if value == "hancock" or value.startswith("hancock "):
+        return 1
+    return 99
 
-    If nothing is viable, fall back to the least-conflicting option so operators still
-    get a best-available candidate while every unsafe site remains clearly flagged.
+
+def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
+    """Rank by airspace safety and BPP preference, never by driving distance.
+
+    A viable Clear Spring/Hancock result is preferred (Clear Spring first when both
+    are viable). All other viable sites are equivalent from a site-selection
+    perspective; red/no-go sites fall behind and are ordered only by airspace harm.
     """
-    if candidate.get("viable"):
-        return (0, float(candidate.get("umd_distance_m") or 0.0), float(candidate.get("ascent_rate_adjustment_ms") or 0.0), 0.0)
+    viable = bool(candidate.get("viable"))
+    preference = preferred_site_priority(candidate.get("site_name", "")) if candidate.get("preferred") else 99
+    adjustment = float(candidate.get("ascent_rate_adjustment_ms") or 0.0)
+    if viable and preference < 99:
+        return (0, preference, adjustment, 0.0)
+    if viable:
+        return (1, 0, adjustment, 0.0)
     return (
-        1,
+        2,
+        1 if candidate.get("landing_in_high_risk_airspace") else 0,
         float(candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
-        1.0 if candidate.get("landing_in_high_risk_airspace") else 0.0,
-        float(candidate.get("umd_distance_m") or 0.0),
+        adjustment,
     )
-
 
 def validate_launch_window(value: datetime) -> None:
     if value.tzinfo is None:
@@ -1385,7 +1415,7 @@ async def health():
         "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
-        "optimal_site": "active/all-site viability ranking with fast current-rate mode, optional ±1 m/s sweep, altitude-aware airspace checks, and UMD-distance tie-break",
+        "optimal_site": "active/all-site viability ranking with fast current-rate mode, optional ±1 m/s sweep, crossing-altitude airspace checks, and preferred-site gold logic",
     }
 
 
@@ -1396,7 +1426,6 @@ async def config():
         "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
         "aprs_configured": bool(APRSFI_API_KEY), "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
-        "umd_reference": {"latitude": UMD_COLLEGE_PARK_REFERENCE[0], "longitude": UMD_COLLEGE_PARK_REFERENCE[1]},
     }
 
 
@@ -1475,13 +1504,13 @@ async def predict(req: PredictRequest):
 
 @app.post("/api/optimal-site")
 async def optimal_site(req: OptimalSiteRequest):
-    """Evaluate supplied sites, including practical ascent-rate adjustment.
+    """Evaluate supplied sites using altitude-aware airspace intersections.
 
-    A site is viable when the selected ascent-rate mode produces at least one trajectory
-    with no altitude-aware scored airspace intrusion and a landing outside restricted/SUA/TFR polygons.
-    The best available site is always marked gold; viable preferred sites (Clear
-    Spring/Hancock from the frontend) are marked blue, other viable sites green,
-    and sites that cannot be cleared by the tested adjustments are red/no-go.
+    A site is viable when at least one requested ascent-rate scenario has no scored
+    3-D airspace intrusion and its landing is outside restricted/SUA/TFR polygons.
+    Gold is reserved exclusively for a viable preferred operational site: Clear
+    Spring first, otherwise Hancock. Other viable sites are green; conflicts are red.
+    Geographic distance to UMD (or anywhere else) is never part of the ranking.
     """
     validate_launch_window(req.launch_datetime)
     cache_key = req.model_dump_json()
@@ -1490,6 +1519,7 @@ async def optimal_site(req: OptimalSiteRequest):
         cached_copy = json.loads(json.dumps(cached_result[1]))
         cached_copy["cache_hit"] = True
         return cached_copy
+
     layers = list(dict.fromkeys(req.airspace_layers))
     airspace_results = await asyncio.gather(
         *(operational_airspace(layer) for layer in layers), return_exceptions=True
@@ -1513,7 +1543,6 @@ async def optimal_site(req: OptimalSiteRequest):
     sweep_rates = req.ascent_rate_sweep_ms or default_ascent_rate_sweep(req.ascent_rate_ms)
     if req.ascent_rate_ms not in sweep_rates:
         sweep_rates.insert(0, req.ascent_rate_ms)
-    # Keep current rate first, then the smallest operational adjustment.
     sweep_rates = sorted(dict.fromkeys(round(float(v), 3) for v in sweep_rates), key=lambda v: (abs(v - req.ascent_rate_ms), v))
 
     async def predict_at_rate(site: OptimalSiteCandidate, rate: float) -> dict[str, Any]:
@@ -1553,8 +1582,6 @@ async def optimal_site(req: OptimalSiteRequest):
     async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
         scenarios: list[dict[str, Any]] = []
         scenario_errors: dict[str, str] = {}
-        # Sequential within a site enables early exit once a practical clear rate is found;
-        # sites themselves still run concurrently through the shared semaphore.
         for rate in sweep_rates:
             try:
                 scenario = await predict_at_rate(site, rate)
@@ -1573,13 +1600,12 @@ async def optimal_site(req: OptimalSiteRequest):
         ))
         best = scenarios[0]
         viable = bool(best["clear_and_safe"])
-        umd_distance = haversine_m((site.latitude, site.longitude), UMD_COLLEGE_PARK_REFERENCE)
         return {
             "site_id": site.site_id,
             "site_name": site.name,
             "latitude": site.latitude,
             "longitude": site.longitude,
-            "preferred": bool(site.preferred),
+            "preferred": bool(site.preferred and preferred_site_priority(site.name) < 99),
             "viable": viable,
             "no_go": not viable,
             "best_ascent_rate_ms": best["ascent_rate_ms"],
@@ -1593,7 +1619,6 @@ async def optimal_site(req: OptimalSiteRequest):
             "landing_in_high_risk_airspace": best["landing_in_high_risk_airspace"],
             "landing": best["landing"],
             "ground_distance_m": best["ground_distance_m"],
-            "umd_distance_m": umd_distance,
             "tested_ascent_rates_ms": [x["ascent_rate_ms"] for x in scenarios],
             "scenario_errors": scenario_errors,
         }
@@ -1608,34 +1633,46 @@ async def optimal_site(req: OptimalSiteRequest):
         raise HTTPException(status_code=502, detail=f"Every launch-site prediction failed: {errors}")
 
     ranking.sort(key=optimal_site_sort_key)
+    gold_candidate = next(
+        (candidate for candidate in ranking if candidate["viable"] and candidate.get("preferred") and preferred_site_priority(candidate["site_name"]) < 99),
+        None,
+    )
     for rank, candidate in enumerate(ranking, start=1):
         candidate["rank"] = rank
-        candidate["optimal"] = rank == 1
+        candidate["optimal"] = bool(gold_candidate and candidate["site_id"] == gold_candidate["site_id"])
         if candidate["optimal"]:
             candidate["site_status"] = "best"
-        elif candidate["viable"] and candidate["preferred"]:
-            candidate["site_status"] = "preferred"
         elif candidate["viable"]:
             candidate["site_status"] = "viable"
         else:
             candidate["site_status"] = "no-go"
-    optimal = ranking[0]
+
     viable_count = sum(1 for item in ranking if item["viable"])
-    if optimal["viable"]:
-        reason = "All clear sites are viable; gold marks the viable site closest to University of Maryland College Park."
+    recommended = gold_candidate or next((item for item in ranking if item["viable"]), ranking[0])
+    if gold_candidate:
+        reason = f"{gold_candidate['site_name']} is a preferred BPP launch site and is viable; it is the gold recommendation. Distance is not used."
+    elif viable_count:
+        reason = "Clear Spring and Hancock are not viable under the tested settings. Other clear sites remain green; no gold site is assigned. Distance is not used."
     else:
-        reason = "No tested site was fully viable; gold marks the least-conflicting option, but it remains a no-go until manually reviewed."
+        reason = "No tested site is fully viable. All evaluated sites remain red/no-go; no gold site is assigned. Distance is not used."
+
     response_payload = {
-        "optimal_site_id": optimal["site_id"], "optimal_site_name": optimal["site_name"],
-        "reason": reason, "ranking": ranking, "errors": errors,
-        "viable_count": viable_count, "no_go_count": len(ranking) - viable_count,
+        "optimal_site_id": recommended["site_id"],
+        "optimal_site_name": recommended["site_name"],
+        "gold_site_id": gold_candidate["site_id"] if gold_candidate else None,
+        "gold_site_name": gold_candidate["site_name"] if gold_candidate else None,
+        "reason": reason,
+        "ranking": ranking,
+        "errors": errors,
+        "viable_count": viable_count,
+        "no_go_count": len(ranking) - viable_count,
         "ascent_rate_sweep_ms": sweep_rates,
-        "airspace_layers": layers, "airspace_sources": sources, "warnings": warnings,
+        "airspace_layers": layers,
+        "airspace_sources": sources,
+        "warnings": warnings,
         "cache_hit": False,
-        "umd_reference": {"name":"University of Maryland College Park","latitude":UMD_COLLEGE_PARK_REFERENCE[0],"longitude":UMD_COLLEGE_PARK_REFERENCE[1]},
     }
     _OPTIMAL_RESULT_CACHE[cache_key] = (time.monotonic(), response_payload)
-    # Bound memory even during long test/development sessions.
     if len(_OPTIMAL_RESULT_CACHE) > 24:
         oldest = min(_OPTIMAL_RESULT_CACHE, key=lambda key: _OPTIMAL_RESULT_CACHE[key][0])
         _OPTIMAL_RESULT_CACHE.pop(oldest, None)

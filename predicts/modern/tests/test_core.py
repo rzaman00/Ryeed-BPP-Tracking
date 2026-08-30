@@ -266,7 +266,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "2.8.0"
+    assert h["version"] == "2.9.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -385,43 +385,44 @@ def test_optimal_site_score_detects_airspace_intrusion_and_clear_path():
     assert b["clear_of_airspace"] is True
 
 
-def test_optimal_site_sort_priority_is_airspace_then_umd_distance():
+def test_optimal_site_sort_uses_preference_and_never_distance():
     import app as appmod
     candidates = [
-        {"site_id":"far-clear","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0,"umd_distance_m":100000},
-        {"site_id":"near-conflict","viable":False,"best_airspace_intrusion_m":10,"ascent_rate_adjustment_ms":0,"umd_distance_m":1000},
-        {"site_id":"near-clear","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0,"umd_distance_m":50000},
+        {"site_id":"winchester","site_name":"Winchester","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0,"umd_distance_m":1},
+        {"site_id":"clear","site_name":"Clear Spring","preferred":True,"viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0,"umd_distance_m":999999},
+        {"site_id":"conflict","site_name":"Conflict","viable":False,"best_airspace_intrusion_m":10,"ascent_rate_adjustment_ms":0,"umd_distance_m":0},
     ]
     candidates.sort(key=appmod.optimal_site_sort_key)
-    assert [c["site_id"] for c in candidates] == ["near-clear","far-clear","near-conflict"]
+    assert [c["site_id"] for c in candidates] == ["clear","winchester","conflict"]
+    # Distance is not part of the key: two equally viable non-preferred sites tie.
+    a={"site_name":"A","viable":True,"ascent_rate_adjustment_ms":0,"umd_distance_m":1}
+    b={"site_name":"B","viable":True,"ascent_rate_adjustment_ms":0,"umd_distance_m":999999}
+    assert appmod.optimal_site_sort_key(a) == appmod.optimal_site_sort_key(b)
 
 
-def test_optimal_site_endpoint_sweeps_all_sites_and_uses_distance_tiebreak(monkeypatch):
+def test_optimal_site_endpoint_does_not_use_distance_tiebreak(monkeypatch):
     import asyncio
     import app as appmod
-
+    appmod._OPTIMAL_RESULT_CACHE.clear()
     empty = {"type":"FeatureCollection","features":[]}
-    # Include one distant polygon so the endpoint has valid airspace data, while both mocked paths remain clear.
     controlled = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
-    async def fake_airspace(layer, force=False):
-        return (controlled if layer=="controlled" else empty, None, "test")
+    async def fake_airspace(layer, force=False): return (controlled if layer=="controlled" else empty, None, "test")
     async def fake_run(req, meta=None):
         lon=req.launch.longitude;lat=req.launch.latitude
         return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[lon+0.01,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":lon+0.01,"latitude":lat},"ground_distance_m":1000}}
-    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace)
-    monkeypatch.setattr(appmod,"run_burst",fake_run)
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
     req=appmod.OptimalSiteRequest(
         launch_sites=[
             appmod.OptimalSiteCandidate(site_id="far",name="Far",latitude=39.7,longitude=-78.0),
             appmod.OptimalSiteCandidate(site_id="near",name="Near",latitude=39.05,longitude=-77.1),
-        ],
-        launch_datetime=datetime.now(timezone.utc),
-        airspace_layers=["controlled"],
+        ], launch_datetime=datetime.now(timezone.utc), airspace_layers=["controlled"], ascent_rate_sweep_ms=[5.5],
     )
     result=asyncio.run(appmod.optimal_site(req))
-    assert len(result["ranking"])==2
-    assert result["optimal_site_id"]=="near"
-    assert all(item["clear_of_airspace"] for item in result["ranking"])
+    assert [x["site_id"] for x in result["ranking"]] == ["far","near"]
+    assert result["optimal_site_id"] == "far"
+    assert result["gold_site_id"] is None
+    assert all(item["site_status"]=="viable" for item in result["ranking"])
+    assert all("umd_distance_m" not in item for item in result["ranking"])
 
 
 def test_ui_contract_has_optimal_site_and_sweep_clickability():
@@ -473,30 +474,32 @@ def test_high_risk_landing_detects_restricted_airspace():
     assert appmod.landing_in_high_risk_airspace(outside,idx) is False
 
 
-def test_optimal_site_marks_preferred_viable_blue_and_best_gold(monkeypatch):
+def test_optimal_site_reserves_gold_for_clear_spring_or_hancock(monkeypatch):
     import asyncio
     import app as appmod
+    appmod._OPTIMAL_RESULT_CACHE.clear()
     empty={"type":"FeatureCollection","features":[]}
-    controlled={"type":"FeatureCollection","features":[{"type":"Feature","properties":{"LOCAL_TYPE":"CLASS_B"},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
+    controlled={"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
     async def fake_airspace(layer,force=False): return (controlled if layer=="controlled" else empty,None,"test")
     async def fake_run(req,meta=None):
         lon,lat=req.launch.longitude,req.launch.latitude
         return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[lon+.01,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":lon+.01,"latitude":lat},"ground_distance_m":1000}}
     monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
     req=appmod.OptimalSiteRequest(launch_sites=[
-        appmod.OptimalSiteCandidate(site_id="clear",name="Clear Spring",latitude=39.66,longitude=-77.94,preferred=True),
+        appmod.OptimalSiteCandidate(site_id="win",name="Winchester",latitude=39.02,longitude=-76.94),
         appmod.OptimalSiteCandidate(site_id="hancock",name="Hancock",latitude=39.69,longitude=-78.19,preferred=True),
-        appmod.OptimalSiteCandidate(site_id="near",name="Near UMD",latitude=39.02,longitude=-76.94,preferred=False),
+        appmod.OptimalSiteCandidate(site_id="clear",name="Clear Spring",latitude=39.66,longitude=-77.94,preferred=True),
     ],launch_datetime=datetime.now(timezone.utc),airspace_layers=["controlled"],ascent_rate_sweep_ms=[5.5])
     result=asyncio.run(appmod.optimal_site(req))
     statuses={x["site_id"]:x["site_status"] for x in result["ranking"]}
-    assert list(statuses.values()).count("best")==1
-    for site in ("clear","hancock"):
-        if statuses[site]!="best": assert statuses[site]=="preferred"
-    assert result["viable_count"]==3
+    assert result["gold_site_id"] == "clear"
+    assert statuses["clear"] == "best"
+    assert statuses["hancock"] == "viable"
+    assert statuses["win"] == "viable"
+    assert "preferred" not in statuses.values()
 
 
-def test_ui_has_two_optimal_buttons_status_colors_and_legend():
+def test_ui_has_two_optimal_buttons_three_status_colors_and_no_blue():
     from pathlib import Path
     base=Path(__file__).resolve().parents[1]
     html=(base/"static"/"index.html").read_text(encoding="utf-8")
@@ -506,8 +509,10 @@ def test_ui_has_two_optimal_buttons_status_colors_and_legend():
     assert 'id="siteStatusLegend"' in html
     assert "selectedPresetSites(),...allCustomPointTargets()" in js
     assert "scope==='all'?[...state.launchLocations]" in js
-    for status in ["site-best","site-preferred","site-viable","site-nogo"]: assert status in css
-    for color in ["Gold — closest viable site to UMD","Blue — preferred + viable","Green — viable","Red — airspace conflict / no-go"]: assert color in html
+    for status in ["site-best","site-viable","site-nogo"]: assert status in css
+    assert "site-preferred" not in css
+    assert "status-blue" not in css and "Blue —" not in html
+    for color in ["Gold — preferred + viable (Clear Spring / Hancock)","Green — viable / clear at crossing altitude","Red — conflict at balloon altitude / landing no-go"]: assert color in html
 
 
 def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch):
@@ -529,12 +534,13 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
     result=asyncio.run(appmod.optimal_site(req));site=result["ranking"][0]
     assert site["viable"] is True
     assert site["best_ascent_rate_ms"] == 5.0
-    assert site["site_status"] == "best"
+    assert site["site_status"] == "viable"
+    assert result["gold_site_id"] is None
     assert site["tested_ascent_rates_ms"] == [5.0,5.5] or set(site["tested_ascent_rates_ms"]) == {5.0,5.5}
 
 
 
-def test_v28_altitude_aware_airspace_does_not_flag_path_above_class_d():
+def test_v29_altitude_aware_airspace_does_not_flag_path_above_class_d():
     import app as appmod
     airspace={"controlled":{"type":"FeatureCollection","features":[{
         "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":3000,"LOWER_UOM":"FT","UPPER_UOM":"FT"},
@@ -547,17 +553,17 @@ def test_v28_altitude_aware_airspace_does_not_flag_path_above_class_d():
     assert appmod.score_prediction_against_airspace(low,idx)["airspace_intrusion_m"] > 10000
 
 
-def test_v28_closest_viable_site_is_gold_even_if_it_needed_adjustment():
+def test_v29_distance_cannot_make_winchester_gold():
     import app as appmod
     candidates=[
-        {"site_id":"near","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":1.0,"umd_distance_m":10000},
-        {"site_id":"far","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0.0,"umd_distance_m":50000},
+        {"site_id":"win","site_name":"Winchester","viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0.0,"umd_distance_m":1},
+        {"site_id":"hancock","site_name":"Hancock","preferred":True,"viable":True,"best_airspace_intrusion_m":0,"ascent_rate_adjustment_ms":0.0,"umd_distance_m":999999},
     ]
     candidates.sort(key=appmod.optimal_site_sort_key)
-    assert candidates[0]["site_id"] == "near"
+    assert candidates[0]["site_id"] == "hancock"
 
 
-def test_v28_optimal_ui_has_speed_toggle_solid_status_and_restored_bottom_toolbar():
+def test_v29_optimal_ui_has_speed_toggle_solid_status_and_restored_bottom_toolbar():
     from pathlib import Path
     base=Path(__file__).resolve().parents[1]
     html=(base/"static"/"index.html").read_text(encoding="utf-8")
@@ -576,7 +582,7 @@ def test_v28_optimal_ui_has_speed_toggle_solid_status_and_restored_bottom_toolba
     assert ".site-status-legend{left:390px" in css
 
 
-def test_v28_current_rate_only_evaluates_one_scenario_per_site(monkeypatch):
+def test_v29_current_rate_only_evaluates_one_scenario_per_site(monkeypatch):
     import asyncio
     import app as appmod
     appmod._OPTIMAL_RESULT_CACHE.clear()
@@ -598,21 +604,24 @@ def test_v28_current_rate_only_evaluates_one_scenario_per_site(monkeypatch):
     assert result["ascent_rate_sweep_ms"] == [5.5]
 
 
-def test_v28_preserves_distinct_same_city_sites_except_canonical_clear_spring_cumberland():
+def test_v29_deduplicates_every_preset_city():
     import app as appmod
     a={"type":"FeatureCollection","features":[
         {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.0,39.0]},"properties":{"city":"Example City","name":"Site A"}},
         {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.1,39.1]},"properties":{"city":"Example City","name":"Site B"}},
         {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.94,39.66]},"properties":{"city":"Clear Spring","name":"Operational"}},
         {"type":"Feature","geometry":{"type":"Point","coordinates":[-77.95,39.67]},"properties":{"city":"Clear Spring","name":"Fallback"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-78.19,39.69]},"properties":{"city":"Hancock","name":"A"}},
+        {"type":"Feature","geometry":{"type":"Point","coordinates":[-78.20,39.70]},"properties":{"city":"Hancock","name":"B"}},
     ]}
     merged=appmod.merge_launch_collections(a)
-    names=[f["properties"]["name"] for f in merged["features"]]
-    assert "Site A" in names and "Site B" in names
-    assert sum(1 for f in merged["features"] if appmod.launch_city(f)=="Clear Spring") == 1
+    cities=[appmod.launch_city(f) for f in merged["features"]]
+    assert cities.count("Example City") == 1
+    assert cities.count("Clear Spring") == 1
+    assert cities.count("Hancock") == 1
 
 
-def test_v28_identical_optimal_request_uses_short_cache(monkeypatch):
+def test_v29_identical_optimal_request_uses_short_cache(monkeypatch):
     import asyncio
     import app as appmod
     appmod._OPTIMAL_RESULT_CACHE.clear()
@@ -628,3 +637,40 @@ def test_v28_identical_optimal_request_uses_short_cache(monkeypatch):
     first=asyncio.run(appmod.optimal_site(req));second=asyncio.run(appmod.optimal_site(req))
     assert first["cache_hit"] is False and second["cache_hit"] is True
     assert len(calls)==1
+
+
+def test_v29_crossing_altitude_uses_airspace_ceiling_not_2d_footprint():
+    import app as appmod
+    airspace={"controlled":{"type":"FeatureCollection","features":[{
+        "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":10000,"LOWER_UOM":"FT","UPPER_UOM":"FT","LOCAL_TYPE":"CLASS_D"},
+        "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-77.0,38.9],[-77.0,39.1],[-77.2,39.1],[-77.2,38.9]]]}
+    }]}}
+    idx=appmod.build_airspace_spatial_indexes(airspace)
+    # The line crosses the polygon horizontally at ~20,000 ft MSL: clear overflight.
+    above={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,6100],[-76.9,39.0,6100]]}}]}
+    # Same 2-D crossing at ~5,000 ft MSL: conflict.
+    inside={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,1524],[-76.9,39.0,1524]]}}]}
+    assert appmod.score_prediction_against_airspace(above,idx)["clear_of_airspace"] is True
+    assert appmod.score_prediction_against_airspace(inside,idx)["clear_of_airspace"] is False
+
+
+def test_v29_nonviable_preferred_site_is_red_and_no_blue(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._OPTIMAL_RESULT_CACHE.clear()
+    controlled={"type":"FeatureCollection","features":[{"type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":10000,"LOWER_UOM":"FT","UPPER_UOM":"FT","LOCAL_TYPE":"CLASS_D"},"geometry":{"type":"Polygon","coordinates":[[[-78.3,39.5],[-77.8,39.5],[-77.8,39.9],[-78.3,39.9],[-78.3,39.5]]]}}]}
+    async def fake_airspace(layer,force=False): return controlled,None,"test"
+    async def fake_run(req,meta=None):
+        if req.launch.name=="Hancock":
+            return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-78.25,39.7,100],[-77.9,39.7,100]]}}],"summary":{"landing":{"longitude":-77.9,"latitude":39.7},"ground_distance_m":1000}}
+        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-77.5,39.2,5000],[-77.4,39.2,5000]]}}],"summary":{"landing":{"longitude":-77.4,"latitude":39.2},"ground_distance_m":1000}}
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
+    req=appmod.OptimalSiteRequest(launch_sites=[
+        appmod.OptimalSiteCandidate(site_id="h",name="Hancock",latitude=39.7,longitude=-78.2,preferred=True),
+        appmod.OptimalSiteCandidate(site_id="w",name="Winchester",latitude=39.2,longitude=-77.5),
+    ],launch_datetime=datetime.now(timezone.utc),airspace_layers=["controlled"],ascent_rate_sweep_ms=[5.5])
+    result=asyncio.run(appmod.optimal_site(req))
+    byid={x["site_id"]:x for x in result["ranking"]}
+    assert byid["h"]["site_status"] == "no-go"
+    assert byid["w"]["site_status"] == "viable"
+    assert result["gold_site_id"] is None

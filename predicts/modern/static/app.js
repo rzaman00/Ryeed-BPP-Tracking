@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.8.0';
+const BUILD_VERSION = '2.9.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -207,9 +207,9 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-mcdonalds-layer',type:'circle',source:'ref-mcdonalds',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#ffc72c','circle-opacity':.9,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-dunkin-layer',type:'circle',source:'ref-dunkin',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#da1884','circle-opacity':.88,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-launch_locations-layer',type:'circle',source:'ref-launch_locations',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#0059ff'}});
-  const siteStatusColor=['match',['get','site_status'],'best','#d7a820','preferred','#2477d4','viable','#1f9d55','no-go','#d83a45','#8b949e'];
+  const siteStatusColor=['match',['get','site_status'],'best','#d7a820','viable','#1f9d55','no-go','#d83a45','#8b949e'];
   map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],18,14],'circle-color':siteStatusColor,'circle-opacity':.26,'circle-blur':.42}});
-  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],9.5,8],'circle-color':siteStatusColor,'circle-stroke-width':3,'circle-stroke-color':'#ffffff'}});
+  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','site_status'],'best'],10,8.5],'circle-color':siteStatusColor,'circle-stroke-width':3,'circle-stroke-color':siteStatusColor}});
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
@@ -287,11 +287,12 @@ function registerFeaturePopups() {
   map.on('mouseleave','sweep-hitbox',()=>{map.getCanvas().style.cursor='';});
   map.on('click','optimal-site-points',(e)=>{
     const f=e.features?.[0];if(!f)return;const p=f.properties||{};
-    const intrusion=Number(p.airspace_intrusion_m||0),umd=Number(p.umd_distance_m||0);
+    const intrusion=Number(p.airspace_intrusion_m||0);
     const viable=p.viable===true||p.viable==='true';
-    const status=p.site_status==='best'?(viable?'Overall Best + Viable':'Overall Best Available — Still No-Go'):p.site_status==='preferred'?'Preferred + Viable':p.site_status==='viable'?'Viable':'No-Go';
+    const status=p.site_status==='best'?'Preferred + Viable (Gold)':p.site_status==='viable'?'Viable':'No-Go';
     const bestRate=Number(p.best_ascent_rate_ms||0);
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>Airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div><div><b>Distance from UMD:</b> ${fmt(miles(umd),1)} mi</div>`).addTo(map);
+    const conflicts=String(p.conflict_layers||'').trim();
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>3-D airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div>${conflicts?`<div><b>Conflict layers:</b> ${esc(conflicts)}</div>`:''}`).addTo(map);
   });
   map.on('mouseenter','optimal-site-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','optimal-site-points',()=>{map.getCanvas().style.cursor='';});
@@ -380,10 +381,15 @@ function deriveSiteLabel(feature, idx) { return deriveCityLabel(feature, idx); }
 
 async function loadLaunchLocations() {
   const r = await api('/api/launch-locations');
-  const features = r.data?.features || [];
+  const rawFeatures = r.data?.features || [];
+  // Final UI guard: one preset row per city even if a stale cache or historical
+  // source contains multiple records for the same operational launch city.
+  const uniqueByCity=new Map();
+  rawFeatures.forEach((f,idx)=>{const label=deriveSiteLabel(f,idx).trim();const key=label.toLowerCase();if(!uniqueByCity.has(key))uniqueByCity.set(key,f);});
+  const features=[...uniqueByCity.values()];
   state.launchLocations = features.map((f,idx)=>{
     const label=deriveSiteLabel(f,idx);
-    return {...f,_id:`preset-${slug(label)}-${idx}`,_label:label};
+    return {...f,_id:`preset-${slug(label)}`,_label:label};
   });
   buildPredictSiteList();
   const allBtn=$('findOptimalAll');if(allBtn){const label=allBtn.querySelector('.optimal-label');if(label)label.textContent=`Find Optimal: All ${state.launchLocations.length} Sites`;}
@@ -424,25 +430,25 @@ function invalidateOptimalSiteAnalysis(){
   if(!state.optimalSiteAnalysis)return;
   state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();
 }
-function siteStatusClass(status){return status==='best'?'site-best':status==='preferred'?'site-preferred':status==='viable'?'site-viable':'site-nogo';}
+function siteStatusClass(status){return status==='best'?'site-best':status==='viable'?'site-viable':'site-nogo';}
 function showSiteStatusLegend(){ const el=$('siteStatusLegend');if(!el)return;el.classList.remove('hidden');el.classList.toggle('beside-summary',!$('predictionSummary').classList.contains('hidden')); }
 function refreshOptimalSiteHighlights(){
   const analysis=state.optimalSiteAnalysis;
   const ranking=analysis?.ranking||[];const byId=new Map(ranking.map(x=>[x.site_id,x]));
   qsa('[data-predict-site-row],[data-custom-predict-site-row]').forEach(row=>{
-    row.classList.remove('site-best','site-preferred','site-viable','site-nogo');
+    row.classList.remove('site-best','site-viable','site-nogo');
     const id=row.dataset.predictSiteRow||row.dataset.customPredictSiteRow;const result=byId.get(id);
-    if(result){row.classList.add(siteStatusClass(result.site_status));const adjust=Math.abs(Number(result.best_ascent_rate_ms)-Number(result.requested_ascent_rate_ms));row.title=`${result.site_name} · ${result.site_status} · best ascent ${fmt(result.best_ascent_rate_ms,1)} m/s${adjust?` (${adjust.toFixed(1)} m/s adjustment)`:''} · airspace ${miles(result.airspace_intrusion_m).toFixed(2)} mi · UMD ${miles(result.umd_distance_m).toFixed(1)} mi`;}
+    if(result){row.classList.add(siteStatusClass(result.site_status));const adjust=Math.abs(Number(result.best_ascent_rate_ms)-Number(result.requested_ascent_rate_ms));row.title=`${result.site_name} · ${result.site_status} · best ascent ${fmt(result.best_ascent_rate_ms,1)} m/s${adjust?` (${adjust.toFixed(1)} m/s adjustment)`:''} · 3-D airspace ${miles(result.airspace_intrusion_m).toFixed(2)} mi`;}
   });
   const features=ranking.map(result=>({type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties:{...result}}));
   map?.getSource?.('optimal-sites')?.setData({type:'FeatureCollection',features});
   const result=$('optimalResult');
   if(!result)return;
   if(!analysis){result.classList.add('hidden');result.textContent='';return;}
-  const best=ranking[0];if(!best)return;
-  const status=best.viable?'VIABLE':'NO-GO / airspace conflict';
-  const adjustment=Math.abs(Number(best.best_ascent_rate_ms)-Number(best.requested_ascent_rate_ms));
-  result.textContent=`Gold: ${best.site_name} · ${status} · best ascent ${fmt(best.best_ascent_rate_ms,1)} m/s${adjustment?` · adjust ${adjustment.toFixed(1)} m/s`:''} · ${fmt(miles(best.airspace_intrusion_m),2)} mi airspace${analysis.cache_hit?' · cached':''}`;
+  const gold=ranking.find(x=>x.site_status==='best');
+  if(gold){const adjustment=Math.abs(Number(gold.best_ascent_rate_ms)-Number(gold.requested_ascent_rate_ms));result.textContent=`Gold: ${gold.site_name} · preferred + viable · best ascent ${fmt(gold.best_ascent_rate_ms,1)} m/s${adjustment?` · adjust ${adjustment.toFixed(1)} m/s`:''}${analysis.cache_hit?' · cached':''}`;}
+  else if(Number(analysis.viable_count||0)>0){result.textContent=`No preferred gold site · ${analysis.viable_count}/${ranking.length} viable sites are green${analysis.cache_hit?' · cached':''}`;}
+  else{result.textContent=`No viable sites found · all evaluated sites are red/no-go${analysis.cache_hit?' · cached':''}`;}
   result.classList.remove('hidden');showSiteStatusLegend();
 }
 function setOptimalButton(which,running,detail=''){
@@ -451,7 +457,7 @@ function setOptimalButton(which,running,detail=''){
 }
 function candidateFromTarget(target){
   const [lon,lat]=target.geometry.coordinates;const city=String(target._label||'');
-  return {site_id:target._id,name:target._label,latitude:Number(lat),longitude:Number(lon),preferred:/^(clear spring|hancock)$/i.test(city.trim())};
+  return {site_id:target._id,name:target._label,latitude:Number(lat),longitude:Number(lon),preferred:String(target._id||'').startsWith('preset-')&&/^(clear spring|hancock)$/i.test(city.trim())};
 }
 function optimalSweepRates(){
   const current=Number($('ascentRate').value);
@@ -486,7 +492,7 @@ async function findOptimalSite(scope='current'){
   const rates=optimalSweepRates();setOptimalButton(scope,true,`${sites.length}×${rates.length}`);$('optimalResult').classList.add('hidden');
   try{
     const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
-    const best=result.ranking?.[0];if(best){const viable=result.viable_count||0;toast(`Best ${scope==='all'?'overall':'active'} site: ${best.site_name}. ${viable}/${result.ranking.length} viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}
+    const gold=result.ranking?.find(x=>x.site_status==='best');const viable=result.viable_count||0;if(gold){toast(`Preferred viable site: ${gold.site_name} (gold). ${viable}/${result.ranking.length} viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}else{toast(`No preferred gold site. ${viable}/${result.ranking.length} sites viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}
     if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
   }catch(e){state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
   finally{setOptimalButton(scope,false,'');}

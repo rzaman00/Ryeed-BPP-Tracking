@@ -1,31 +1,17 @@
-# Build report — BPP Predicts v2.8.0
+# Build report — BPP Predicts v2.9.0
 
-## Added in v2.8
-- Two optimal-site searches: **Current Sites** (selected presets + all manually drawn points) and **All Sites** (complete deduplicated preset list; normally 16 from the historical source).
-- Site viability testing across the current ascent rate and practical ±0.5 / ±1.0 m/s adjustments.
-- Automatic-burst searches recalculate the inflation-model burst altitude for each tested ascent rate.
-- Operational site colors: gold overall best, blue preferred viable Clear Spring/Hancock, green viable, red no-go/manual review.
-- Landing no-go check for restricted controlled airspace, SUA, and TFR polygons.
-- Launch-site city de-duplication so Clear Spring and Cumberland appear only once.
-- Launch-site status legend shown with prediction/optimal results.
+## Added/fixed in v2.9
+- Strict preset de-duplication: exactly one displayed preset per city; bundled canonical coordinates win for core BPP sites.
+- 3-D airspace scoring explicitly compares balloon altitude at each polygon crossing with the FAA floor/ceiling; overflight above the ceiling is not a conflict.
+- Removed University of Maryland/distance ranking entirely.
+- Gold is reserved exclusively for a viable Clear Spring or Hancock result (Clear Spring has first preference when both are viable).
+- All other viable sites are green. Any non-viable site, including Clear Spring/Hancock, is red. Blue status is removed.
+- Current-sites/all-sites optimal buttons, current-rate-only speed mode, optional ±0.5/±1.0 m/s sweep, short result cache, full-row status colors, separate legend, restored bottom toolbar, and clickable parameter sweeps are preserved.
 
-## Preserved
+## Preserved from prior builds
 - Standalone Predicts + Inflation Calculator tabs.
-- Burst/float predicts, automatic/manual burst altitude, multi-callsign APRS live predicts, FAA layers, custom points, oriented geofences, parameter sweeps, KML/GeoJSON exports, 2D/3D, and dark mode.
+- MATLAB-equivalent inflation model with automatic/manual burst altitude.
+- Burst/float predicts, custom launch points, oriented geofences, FAA layers/cache, multi-callsign APRS live predicts with altitude, KML/GeoJSON exports, 2D/3D, dark mode, and prediction summaries.
 
 ## Validation
-- Python compilation passed.
-- JavaScript syntax check passed.
-- Geometry and UI-helper Node tests passed.
-- 31 Python automated tests passed, including duplicate-city handling, ascent-rate viability adjustment, restricted-airspace landing checks, preferred-site coloring, and both optimal-site button contracts.
-- Local FastAPI health/config/launch/inflation smoke tests passed.
-
-
-## v2.8 regressions covered
-- current-rate-only fast mode
-- optional ±1 m/s ascent sweep
-- altitude-aware controlled-airspace scoring
-- closest viable gold ranking
-- full-fill status colors
-- status legend beside summary
-- bottom operational toolbar visibility
+See `tests/` for regression coverage of launch-site de-duplication, altitude-aware airspace overflight, preferred-only gold assignment, no-distance ranking, current/all optimal searches, sweep modes, live tracking, geometry, and the retained operational tools.

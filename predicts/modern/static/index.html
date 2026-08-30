@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.8.0" rel="stylesheet" />
+  <link href="static/styles.css?v=2.9.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -21,7 +21,7 @@
       <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.8.0</span>
+      <span class="build-badge" id="buildBadge">v2.9.0</span>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -77,10 +77,9 @@
   <main class="map-workspace">
     <section id="siteStatusLegend" class="site-status-legend hidden" aria-label="Launch site status legend">
       <strong>Launch Site Status</strong>
-      <span><i class="status-gold"></i>Gold — closest viable site to UMD</span>
-      <span><i class="status-blue"></i>Blue — preferred + viable (Clear Spring / Hancock)</span>
-      <span><i class="status-green"></i>Green — viable / clear of scored airspace</span>
-      <span><i class="status-red"></i>Red — airspace conflict / no-go</span>
+      <span><i class="status-gold"></i>Gold — preferred + viable (Clear Spring / Hancock)</span>
+      <span><i class="status-green"></i>Green — viable / clear at crossing altitude</span>
+      <span><i class="status-red"></i>Red — conflict at balloon altitude / landing no-go</span>
     </section>
     <div id="map" aria-label="Balloon prediction map"></div>
 
@@ -243,12 +242,12 @@
 
   <dialog id="aboutDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is BPP Predicts v2.8.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, dual-scope optimal-site ranking with optional ascent-rate sweep, restored bottom tools, and clickable parameter-sweep values.</p>
+    <p>This is BPP Predicts v2.9.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, dual-scope optimal-site ranking with optional ascent-rate sweep, crossing-altitude airspace scoring, preferred-site-only gold status, restored bottom tools, and clickable parameter-sweep values.</p>
     <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> select one or more APRS callsigns. Each live prediction starts from the station's latest reported latitude, longitude, altitude, and packet timestamp.</p>
     <p><strong>Launch sites:</strong> shown by city only and loaded from resolved BPP data with cache/offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.8.0"></script>
+  <script type="module" src="static/app.js?v=2.9.0"></script>
 </body>
 </html>

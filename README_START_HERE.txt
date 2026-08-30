@@ -1,4 +1,4 @@
-BPP Predicts v2.8.0 — standalone operational build
+BPP Predicts v2.9.0 — standalone operational build
 
 Run on Windows:
   Double-click START_BPP_PREDICTS.bat
@@ -6,7 +6,7 @@ Run on Windows:
 Or from PowerShell at the repository root:
   .\START_BPP_PREDICTS.bat
 
-The application opens at http://127.0.0.1:8000 only after /api/health confirms v2.8.0.
+The application opens at http://127.0.0.1:8000 only after /api/health confirms v2.9.0.
 
 Top-level application tabs:
   - Predicts
@@ -22,11 +22,11 @@ Burst altitude:
 Live APRS requires APRSFI_API_KEY in predicts\modern\.env.
 
 
-v2.8 highlights
+v2.9 highlights
 ---------------
 - Find Optimal: Current Sites = selected presets + every manually drawn launch point.
 - Find Optimal: All Sites = all loaded historical preset sites.
 - Optimal ascent sweep is OFF by default for speed. Turn it on to test current ±0.5/±1.0 m/s.
-- Gold = closest viable site to UMD; Blue = viable Clear Spring/Hancock; Green = other viable clear sites; Red = airspace conflict/no-go.
+- Gold = viable preferred Clear Spring/Hancock only; Green = other viable clear sites; Red = airspace conflict/no-go. No blue status and no distance ranking.
 - Airspace scoring is altitude-aware where FAA vertical limits are available.
 - Bottom Parameter Sweep / download toolbar is pinned on-screen.
