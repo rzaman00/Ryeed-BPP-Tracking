@@ -266,7 +266,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "2.4.0"
+    assert h["version"] == "2.6.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -278,7 +278,7 @@ def test_ui_contract_has_required_controls_and_wiring():
     html = (base / "static" / "index.html").read_text(encoding="utf-8")
     js = (base / "static" / "app.js").read_text(encoding="utf-8")
     required_ids = [
-        "runPredicts", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
+        "runPredicts", "findOptimalSite", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
         "saveCustomCallsign", "callsignChips", "predictSiteList", "customPredictSiteList",
         "drawingToggle", "deleteDrawing", "deleteAllDrawings", "downloadDrawings", "saveDrawingName",
         "zoomPredicts", "downloadKml", "downloadGeofence", "openSweep", "queryAddresses", "aboutMap",
@@ -303,3 +303,135 @@ def test_every_identified_ui_button_has_javascript_wiring():
     assert len(button_ids) >= 20
     for button_id in button_ids:
         assert button_id in js, f"Button {button_id} has no JS reference"
+
+
+def test_inflation_calculator_matches_matlab_reference_values():
+    import app as appmod
+    req = appmod.InflationRequest(
+        station_pressure_inhg=29.85, site_temperature_f=70,
+        balloon_neck_mass_kg=1.605 + 0.650, payload_mass_kg=7.238 - 0.650,
+        target_ascent_rate_ms=5.5,
+    )
+    r = appmod.calculate_inflation(req)
+    assert r["expected_ascent_rate_ms"] == pytest.approx(5.5, abs=1e-9)
+    assert r["required_scale_lift_lb"] == pytest.approx(20.716485, rel=1e-6)
+    assert r["required_psi"] == pytest.approx(4143.2970, rel=1e-6)
+    assert r["burst_altitude_m"] == pytest.approx(28826.4092, rel=1e-6)
+    assert r["burst_altitude_ft"] == pytest.approx(94574.8363, rel=1e-6)
+    assert r["burst_altitude_reference"] == "above launch site"
+
+
+def test_inflation_calculator_rejects_unachievable_rate():
+    import app as appmod
+    with pytest.raises(ValueError, match="outside the range achievable"):
+        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+
+
+def test_standalone_tabs_and_auto_manual_burst_contract():
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'id="predictsTab"' in html
+    assert 'id="inflationTab"' in html
+    assert 'id="inflationForm"' in html
+    assert 'id="burstAltitudeMode"' in html
+    assert '<option value="auto" selected>' in html
+    assert '<option value="manual">' in html
+    assert "calculateInflation" in js
+    assert "setBurstAltitudeMode" in js
+    assert "ensureAutomaticBurst" in js
+    assert "bpp.umd.edu" not in html.lower()
+
+
+def test_launch_labels_use_city_only():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[1] / "static" / "ui_helpers.mjs").read_text(encoding="utf-8")
+    assert "if (city) return city" in helper
+    assert " - ${location}" not in helper
+
+
+def test_original_matlab_source_is_bundled_for_traceability():
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    matlab = base / "reference" / "InflationCalculations2024.m"
+    assert matlab.exists()
+    text = matlab.read_text(encoding="utf-8")
+    assert "Burst_alt = 7238.3 * log(Rat)" in text
+    assert "Lift_required*200" in text
+
+
+
+def test_optimal_site_score_detects_airspace_intrusion_and_clear_path():
+    import app as appmod
+    airspace = {
+        "controlled": {"type":"FeatureCollection","features":[{
+            "type":"Feature","properties":{},
+            "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-76.9,38.9],[-76.9,39.1],[-77.2,39.1],[-77.2,38.9]]]}
+        }]},
+        "class_e": {"type":"FeatureCollection","features":[]},
+        "sua": {"type":"FeatureCollection","features":[]},
+        "tfr": {"type":"FeatureCollection","features":[]},
+    }
+    indexes = appmod.build_airspace_spatial_indexes(airspace)
+    crossing = {"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,0],[-76.8,39.0,1000]]}}]}
+    clear = {"features":[{"geometry":{"type":"LineString","coordinates":[[-78.0,39.5,0],[-77.8,39.5,1000]]}}]}
+    a = appmod.score_prediction_against_airspace(crossing,indexes)
+    b = appmod.score_prediction_against_airspace(clear,indexes)
+    assert a["airspace_intrusion_m"] > 10_000
+    assert a["clear_of_airspace"] is False
+    assert "controlled" in a["conflict_layers"]
+    assert b["airspace_intrusion_m"] == 0
+    assert b["clear_of_airspace"] is True
+
+
+def test_optimal_site_sort_priority_is_airspace_then_umd_distance():
+    import app as appmod
+    candidates = [
+        {"site_id":"far-clear","clear_of_airspace":True,"airspace_intrusion_m":0,"umd_distance_m":100000},
+        {"site_id":"near-conflict","clear_of_airspace":False,"airspace_intrusion_m":10,"umd_distance_m":1000},
+        {"site_id":"near-clear","clear_of_airspace":True,"airspace_intrusion_m":0,"umd_distance_m":50000},
+    ]
+    candidates.sort(key=appmod.optimal_site_sort_key)
+    assert [c["site_id"] for c in candidates] == ["near-clear","far-clear","near-conflict"]
+
+
+def test_optimal_site_endpoint_sweeps_all_sites_and_uses_distance_tiebreak(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    empty = {"type":"FeatureCollection","features":[]}
+    # Include one distant polygon so the endpoint has valid airspace data, while both mocked paths remain clear.
+    controlled = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-80,40],[-79.9,40],[-79.9,40.1],[-80,40.1],[-80,40]]]}}]}
+    async def fake_airspace(layer, force=False):
+        return (controlled if layer=="controlled" else empty, None, "test")
+    async def fake_run(req, meta=None):
+        lon=req.launch.longitude;lat=req.launch.latitude
+        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[lon+0.01,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":lon+0.01,"latitude":lat},"ground_distance_m":1000}}
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace)
+    monkeypatch.setattr(appmod,"run_burst",fake_run)
+    req=appmod.OptimalSiteRequest(
+        launch_sites=[
+            appmod.OptimalSiteCandidate(site_id="far",name="Far",latitude=39.7,longitude=-78.0),
+            appmod.OptimalSiteCandidate(site_id="near",name="Near",latitude=39.05,longitude=-77.1),
+        ],
+        launch_datetime=datetime.now(timezone.utc),
+        airspace_layers=["controlled"],
+    )
+    result=asyncio.run(appmod.optimal_site(req))
+    assert len(result["ranking"])==2
+    assert result["optimal_site_id"]=="near"
+    assert all(item["clear_of_airspace"] for item in result["ranking"])
+
+
+def test_ui_contract_has_optimal_site_and_sweep_clickability():
+    from pathlib import Path
+    base=Path(__file__).resolve().parents[1]
+    html=(base/"static"/"index.html").read_text(encoding="utf-8")
+    js=(base/"static"/"app.js").read_text(encoding="utf-8")
+    assert 'id="findOptimalSite"' in html
+    assert 'id="optimalResult"' in html
+    assert "findOptimalSite" in js
+    assert "sweep-hitbox" in js
+    assert "formatSweepParameter" in js
+    assert "optimal-choice" in (base/"static"/"styles.css").read_text(encoding="utf-8")

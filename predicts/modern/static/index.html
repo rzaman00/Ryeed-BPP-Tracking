@@ -8,32 +8,27 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.4.0" rel="stylesheet" />
+  <link href="static/styles.css?v=2.6.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
-    <a class="site-brand" href="https://bpp.umd.edu/" target="_blank" rel="noopener">
+    <div class="site-brand" aria-label="UMD Balloon Payload Program Predicts">
       <span class="program-mark" aria-hidden="true">◉</span>
       <span>UMD Balloon Payload Program</span>
-    </a>
-    <nav class="site-nav" aria-label="BPP website navigation">
-      <a href="https://bpp.umd.edu/" target="_blank" rel="noopener">home</a>
-      <a href="https://bpp.umd.edu/news/" target="_blank" rel="noopener">news</a>
-      <a href="https://bpp.umd.edu/payloads/" target="_blank" rel="noopener">payloads</a>
-      <a href="https://bpp.umd.edu/flights/" target="_blank" rel="noopener">past flights</a>
-      <a class="active" href="#">predicts</a>
-      <a href="https://bpp.umd.edu/develop/tracking/" target="_blank" rel="noopener">tracking</a>
-      <a href="https://bpp.umd.edu/wiki/" target="_blank" rel="noopener">wiki</a>
-      <a href="https://bpp.umd.edu/archives/" target="_blank" rel="noopener">archives</a>
+    </div>
+    <nav class="app-tabs" aria-label="Application sections">
+      <button class="app-tab active" id="predictsTab" type="button" data-app-view="predicts">Predicts</button>
+      <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.4.0</span>
+      <span class="build-badge" id="buildBadge">v2.6.0</span>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
     </div>
   </header>
 
+  <section id="predictsView" class="app-view">
   <section class="control-strip" aria-label="Prediction controls">
     <label class="control-field mode-field"><span>Mode</span>
       <select id="workspaceMode"><option value="predict">Predict</option><option value="live">Live Track</option></select>
@@ -49,7 +44,10 @@
     </div>
 
     <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
-    <label class="control-field burst-control"><span>Burst Altitude (m)</span><div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="1000" min="1000"><small id="burstFeet">91864 ft</small></div></label>
+    <div class="control-field burst-control burst-altitude-control"><span>Burst Altitude</span>
+      <select id="burstAltitudeMode" aria-label="Burst altitude source"><option value="auto" selected>Automatic (Inflation Calculator)</option><option value="manual">Manual</option></select>
+      <div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="100" min="1000" disabled><small id="burstFeet">Calculating…</small></div>
+    </div>
     <label class="control-field float-control hidden"><span>Float Altitude (m)</span><div class="input-with-note"><input id="floatAltitude" type="number" value="22000" step="1000" min="1000"><small id="floatFeet">72178 ft</small></div></label>
     <label class="control-field float-control hidden"><span>Float Rate (m/s)</span><input id="floatRate" type="number" value="1" step="0.5" min="0.1"></label>
     <label class="control-field float-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
@@ -69,8 +67,10 @@
     </label>
 
     <button id="runPredicts" class="run-button" type="button"><span class="run-label">Run Predicts</span><span class="run-state" id="runState"></span></button>
+    <button id="findOptimalSite" class="optimal-button predict-only" type="button"><span>Find Optimal Site</span><span class="run-state" id="optimalState"></span></button>
     <button id="refreshLive" class="utility-button live-only hidden" type="button">Refresh APRS</button>
   </section>
+  <div id="optimalResult" class="optimal-result hidden" aria-live="polite"></div>
 
   <main class="map-workspace">
     <div id="map" aria-label="Balloon prediction map"></div>
@@ -179,6 +179,44 @@
 
     <div class="status-toast hidden" id="toast"></div>
   </main>
+  </section>
+
+  <section id="inflationView" class="app-view inflation-page hidden" aria-labelledby="inflationHeading">
+    <div class="inflation-shell">
+      <div class="inflation-heading">
+        <div><span class="summary-kicker">Flight Preparation</span><h1 id="inflationHeading">Inflation Calculator</h1></div>
+        <p>Integrated directly from <code>InflationCalculations2024.m</code>. The automatic burst-altitude option in Predicts uses this calculator's output.</p>
+      </div>
+      <div class="inflation-layout">
+        <form id="inflationForm" class="inflation-card" novalidate>
+          <h2>Launch conditions</h2>
+          <div class="inflation-grid">
+            <label><span>Station pressure (inHg)</span><input id="inflationPressure" type="number" value="29.85" step="0.01" min="1"></label>
+            <label><span>Air temperature (°F)</span><input id="inflationTemperature" type="number" value="70" step="0.1"></label>
+            <label><span>Balloon + neck equipment (kg)</span><input id="inflationBalloonMass" type="number" value="2.255" step="0.001" min="0.001"></label>
+            <label><span>Suspended payload mass (kg)</span><input id="inflationPayloadMass" type="number" value="6.588" step="0.001" min="0"></label>
+            <label class="wide"><span>Desired ascent rate (m/s)</span><input id="inflationAscentRate" type="number" value="5.5" step="0.1" min="0.01"></label>
+          </div>
+          <button id="calculateInflation" class="run-button inflation-run" type="submit">Calculate Inflation</button>
+          <p class="calculator-note">Validated model constants remain fixed exactly as in the supplied MATLAB script: drag coefficient 0.25, 2–3 m launch-diameter range, and 10.5 m Hwoyee 1600 burst diameter.</p>
+        </form>
+        <section class="inflation-results" aria-live="polite">
+          <div class="inflation-result-head"><div><span class="summary-kicker">Calculated launch conditions</span><strong id="inflationStatus">Ready</strong></div><span class="auto-badge">Feeds Predicts</span></div>
+          <div class="inflation-result-grid">
+            <div><small>Expected ascent rate</small><b id="inflationExpectedAscent">—</b></div>
+            <div><small>Required scale lift</small><b id="inflationLift">—</b></div>
+            <div><small>Required PSI</small><b id="inflationPsi">—</b></div>
+            <div class="burst-result"><small>Approx. burst height</small><b id="inflationBurstM">—</b><span id="inflationBurstFt">—</span></div>
+          </div>
+          <div class="inflation-detail">
+            <span>Calculated burst height is above launch site, matching the MATLAB model.</span>
+            <button id="useInflationBurst" type="button">Use Automatic Burst Altitude</button>
+          </div>
+          <div id="inflationError" class="inflation-error hidden"></div>
+        </section>
+      </div>
+    </div>
+  </section>
 
   <dialog id="sweepDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>Parameter Sweep</strong><button value="cancel">×</button></form>
@@ -196,12 +234,12 @@
 
   <dialog id="aboutDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is BPP Predicts v2.4.0: the modern-only operational build with exact landing targets, light/dark themes, responsive layout, restored launch sites, live FAA airspace, custom launch points, oriented geofences, and multi-callsign APRS prediction.</p>
+    <p>This is BPP Predicts v2.6.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, optimal-site ranking, and clickable parameter-sweep values.</p>
     <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> select one or more APRS callsigns. Each live prediction starts from the station's latest reported latitude, longitude, altitude, and packet timestamp.</p>
-    <p><strong>Launch sites:</strong> loaded from resolved local BPP data when available, otherwise from the public repository and an offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
+    <p><strong>Launch sites:</strong> shown by city only and loaded from resolved BPP data with cache/offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.4.0"></script>
+  <script type="module" src="static/app.js?v=2.6.0"></script>
 </body>
 </html>

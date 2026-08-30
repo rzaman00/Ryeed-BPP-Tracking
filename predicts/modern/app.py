@@ -19,6 +19,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, model_validator
+from shapely.geometry import LineString, shape
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -35,7 +38,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.4.0"
+BUILD_VERSION = "2.6.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -84,6 +87,115 @@ class PredictRequest(BaseModel):
         return self
 
 
+class InflationRequest(BaseModel):
+    """Inputs exposed by the operational inflation calculator.
+
+    The equations and fixed model constants are a direct Python port of the
+    provided InflationCalculations2024.m MATLAB script.
+    """
+
+    station_pressure_inhg: float = Field(default=29.85, gt=0, le=40)
+    site_temperature_f: float = Field(default=70.0, gt=-459.67, le=160)
+    balloon_neck_mass_kg: float = Field(default=2.255, gt=0, le=20)
+    payload_mass_kg: float = Field(default=6.588, ge=0, le=100)
+    target_ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+
+
+def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
+    """Reproduce InflationCalculations2024.m without requiring MATLAB.
+
+    This intentionally keeps the validated constants from the MATLAB source:
+    cd=0.25, R_air=287.05, R_helium=2077.1, launch diameter range 2-3 m,
+    Hwoyee 1600 burst diameter 10.5 m, and the 7238.3 m exponential-density
+    approximation.
+    """
+    g = 9.80665
+    cd = 0.25
+    R_air = 287.05
+    R_helium = 2077.1
+    diameter_min = 2.0
+    diameter_max = 3.0
+    burst_diameter = 10.5
+
+    P_site_Pa = req.station_pressure_inhg * 3386.389
+    T_site_K = (req.site_temperature_f - 32.0) * (5.0 / 9.0) + 273.15
+    rho_air = P_site_Pa / (R_air * T_site_K)
+    rho_helium = P_site_Pa / (R_helium * T_site_K)
+    total_mass = req.balloon_neck_mass_kg + req.payload_mass_kg
+
+    def volume(diameter: float) -> float:
+        return math.pi * diameter ** 3 / 6.0
+
+    def net_lift_mass(diameter: float) -> float:
+        return (rho_air - rho_helium) * volume(diameter) - total_mass
+
+    def ascent_rate(diameter: float) -> float:
+        net = net_lift_mass(diameter)
+        if net <= 0:
+            return 0.0
+        return math.sqrt(8.0 * g * net / (cd * rho_air * math.pi * diameter ** 2))
+
+    liftoff_diameter = (6.0 * total_mass / (math.pi * (rho_air - rho_helium))) ** (1.0 / 3.0)
+    if liftoff_diameter >= diameter_max:
+        raise ValueError(
+            f"The balloon cannot produce positive free lift within the specified diameter range of {diameter_min:.2f} to {diameter_max:.2f} m."
+        )
+
+    diameter_lower_bound = max(diameter_min, liftoff_diameter * (1.0 + 1e-9))
+    minimum_ascent_rate = ascent_rate(diameter_lower_bound)
+    maximum_ascent_rate = ascent_rate(diameter_max)
+    target = req.target_ascent_rate_ms
+    if target < minimum_ascent_rate or target > maximum_ascent_rate:
+        raise ValueError(
+            "The requested ascent rate is outside the range achievable with diameters "
+            f"from {diameter_min:.2f} to {diameter_max:.2f} m. The available range is "
+            f"approximately {minimum_ascent_rate:.3f} to {maximum_ascent_rate:.3f} m/s."
+        )
+
+    # MATLAB uses fzero on the same monotonic bracket. Bisection gives the same
+    # physical root deterministically without adding a SciPy/MATLAB dependency.
+    lo, hi = diameter_lower_bound, diameter_max
+    for _ in range(100):
+        mid = (lo + hi) / 2.0
+        if ascent_rate(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    balloon_diameter = (lo + hi) / 2.0
+    actual_ascent_rate = ascent_rate(balloon_diameter)
+    vol = volume(balloon_diameter)
+
+    lift_required_kg = (rho_air - rho_helium) * vol - req.balloon_neck_mass_kg
+    lift_required_lb = lift_required_kg * 2.20462262185
+    required_psi = lift_required_lb * 200.0
+
+    vol_burst = (4.0 / 3.0) * math.pi * (burst_diameter / 2.0) ** 3
+    ratio = vol_burst / vol
+    burst_altitude_m = 7238.3 * math.log(ratio)
+    burst_altitude_ft = burst_altitude_m * 3.28084
+
+    return {
+        "expected_ascent_rate_ms": actual_ascent_rate,
+        "required_scale_lift_lb": lift_required_lb,
+        "required_psi": required_psi,
+        "burst_altitude_m": burst_altitude_m,
+        "burst_altitude_ft": burst_altitude_ft,
+        "burst_altitude_reference": "above launch site",
+        "balloon_diameter_m": balloon_diameter,
+        "helium_volume_m3": vol,
+        "air_density_kgm3": rho_air,
+        "helium_density_kgm3": rho_helium,
+        "minimum_ascent_rate_ms": minimum_ascent_rate,
+        "maximum_ascent_rate_ms": maximum_ascent_rate,
+        "model": "InflationCalculations2024.m direct equation port",
+        "constants": {
+            "g_ms2": g, "drag_coefficient": cd, "R_air": R_air, "R_helium": R_helium,
+            "diameter_min_m": diameter_min, "diameter_max_m": diameter_max,
+            "burst_diameter_m": burst_diameter, "density_scale_height_m": 7238.3,
+        },
+    }
+
+
 class LivePredictSettings(BaseModel):
     mode: Literal["burst", "float"] = "burst"
     phase: Literal["auto", "ascending", "descending"] = "auto"
@@ -101,6 +213,31 @@ class LivePredictRequest(LivePredictSettings):
 
 class LivePredictBatchRequest(LivePredictSettings):
     callsigns: list[str] = Field(min_length=1, max_length=MAX_LIVE_CALLSIGNS)
+
+
+class OptimalSiteCandidate(BaseModel):
+    site_id: str = Field(min_length=1, max_length=160)
+    name: str = Field(min_length=1, max_length=160)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    altitude_m: float | None = None
+
+
+class OptimalSiteRequest(BaseModel):
+    launch_sites: list[OptimalSiteCandidate] = Field(min_length=1, max_length=50)
+    mode: Literal["burst", "float"] = "burst"
+    launch_datetime: datetime
+    ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+    descent_rate_ms: float = Field(default=9.0, gt=0, le=50)
+    burst_altitude_m: float = Field(default=28000, gt=100)
+    float_altitude_m: float = Field(default=22000, gt=100)
+    float_ascent_rate_ms: float = Field(default=1.0, gt=0, le=10)
+    float_duration_min: float = Field(default=60, gt=0, le=24 * 60)
+    airspace_layers: list[Literal["controlled", "class_e", "sua", "tfr"]] = Field(
+        default_factory=lambda: ["controlled", "class_e", "sua", "tfr"],
+        min_length=1,
+        max_length=4,
+    )
 
 
 class ExternalServiceError(RuntimeError):
@@ -840,7 +977,7 @@ async def fetch_tfr_airspace() -> dict[str, Any]:
 
 
 async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[str, Any], str | None, str]:
-    # backwards-compatible alias from v2.4
+    # backwards-compatible alias from v2.5
     if dataset == "uncontrolled":
         dataset = "class_e"
     cache_path = AIRSPACE_CACHE_DIR / f"{dataset}.geojson"
@@ -867,6 +1004,147 @@ async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[
         return empty_fc(), f"Airspace could not be loaded: {exc}", "unavailable"
 
 
+UMD_COLLEGE_PARK_REFERENCE = (38.986918, -76.942554)  # central College Park campus reference
+OPTIMAL_AIRSPACE_LAYERS = ("controlled", "class_e", "sua", "tfr")
+
+
+def _polygon_geometries(collection: dict[str, Any]) -> list[Any]:
+    geometries: list[Any] = []
+    for feature in collection.get("features", []) if isinstance(collection, dict) else []:
+        geometry = feature.get("geometry") if isinstance(feature, dict) else None
+        if not geometry:
+            continue
+        try:
+            geom = shape(geometry)
+        except Exception:
+            continue
+        if geom.is_empty:
+            continue
+        if geom.geom_type in ("Polygon", "MultiPolygon"):
+            geometries.append(geom)
+    return geometries
+
+
+def build_airspace_spatial_indexes(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Build reusable R-trees once for a full optimal-site sweep."""
+    layers: dict[str, dict[str, Any]] = {}
+    all_geometries: list[Any] = []
+    for layer, collection in collections.items():
+        geoms = _polygon_geometries(collection)
+        layers[layer] = {"geometries": geoms, "tree": STRtree(geoms) if geoms else None}
+        all_geometries.extend(geoms)
+    return {
+        "layers": layers,
+        "all": {"geometries": all_geometries, "tree": STRtree(all_geometries) if all_geometries else None},
+    }
+
+
+def _queried_geometries(index: dict[str, Any], line: Any) -> list[Any]:
+    tree = index.get("tree")
+    geometries = index.get("geometries") or []
+    if tree is None or not geometries:
+        return []
+    try:
+        indices = tree.query(line, predicate="intersects")
+        return [geometries[int(i)] for i in indices]
+    except Exception:
+        # Defensive fallback for environments/backends that return geometries instead of indices.
+        raw = tree.query(line)
+        out = []
+        for item in raw:
+            if hasattr(item, "geom_type"):
+                geom = item
+            else:
+                geom = geometries[int(item)]
+            if line.intersects(geom):
+                out.append(geom)
+        return out
+
+
+def _geometry_haversine_length_m(geometry: Any) -> float:
+    if geometry is None or geometry.is_empty:
+        return 0.0
+    if geometry.geom_type in ("LineString", "LinearRing"):
+        coords = list(geometry.coords)
+        return sum(
+            haversine_m((float(a[1]), float(a[0])), (float(b[1]), float(b[0])))
+            for a, b in zip(coords, coords[1:])
+        )
+    if geometry.geom_type in ("MultiLineString", "GeometryCollection"):
+        return sum(_geometry_haversine_length_m(part) for part in geometry.geoms)
+    return 0.0
+
+
+def _prediction_lines(prediction: dict[str, Any]) -> list[Any]:
+    lines: list[Any] = []
+    for feature in prediction.get("features", []):
+        geometry = feature.get("geometry") or {}
+        if geometry.get("type") != "LineString":
+            continue
+        coords = geometry.get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        try:
+            lines.append(LineString([(float(c[0]), float(c[1])) for c in coords]))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return lines
+
+
+def _line_intrusion_m(line: Any, index: dict[str, Any]) -> float:
+    candidates = _queried_geometries(index, line)
+    if not candidates:
+        return 0.0
+    try:
+        airspace = unary_union(candidates)
+        return _geometry_haversine_length_m(line.intersection(airspace))
+    except Exception:
+        # A single malformed polygon should not make the whole site sweep unusable.
+        total = 0.0
+        for geom in candidates:
+            try:
+                total += _geometry_haversine_length_m(line.intersection(geom))
+            except Exception:
+                continue
+        return total
+
+
+def score_prediction_against_airspace(prediction: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
+    """Measure ground-track distance inside the configured FAA airspace polygons.
+
+    Ranking uses the union of all airspace layers, so overlap between two FAA layers
+    is not double-counted. Layer-specific lengths are returned for explainability.
+    """
+    lines = _prediction_lines(prediction)
+    if not lines:
+        raise ValueError("Prediction contained no trajectory to score against airspace")
+    by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
+    total = 0.0
+    for line in lines:
+        total += _line_intrusion_m(line, indexes.get("all", {}))
+        for layer, index in indexes.get("layers", {}).items():
+            by_layer[layer] += _line_intrusion_m(line, index)
+    # Ignore sub-meter geometry slivers caused by polygon-boundary precision.
+    total = 0.0 if total < 1.0 else total
+    by_layer = {layer: (0.0 if value < 1.0 else value) for layer, value in by_layer.items()}
+    conflicts = [layer for layer, value in by_layer.items() if value > 0]
+    return {
+        "airspace_intrusion_m": total,
+        "airspace_intrusion_by_layer_m": by_layer,
+        "conflict_layers": conflicts,
+        "clear_of_airspace": total == 0.0,
+    }
+
+
+def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, float, float]:
+    """Zero airspace conflict wins; then minimum intrusion; then distance to UMD."""
+    return (
+        0 if candidate.get("clear_of_airspace") else 1,
+        float(candidate.get("airspace_intrusion_m") or 0.0),
+        float(candidate.get("umd_distance_m") or 0.0),
+    )
+
+
 def validate_launch_window(value: datetime) -> None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -891,6 +1169,7 @@ async def health():
         "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
+        "optimal_site": "all launch sites ranked by airspace intrusion, then UMD distance",
     }
 
 
@@ -901,6 +1180,7 @@ async def config():
         "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
         "aprs_configured": bool(APRSFI_API_KEY), "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
+        "umd_reference": {"latitude": UMD_COLLEGE_PARK_REFERENCE[0], "longitude": UMD_COLLEGE_PARK_REFERENCE[1]},
     }
 
 
@@ -958,6 +1238,14 @@ async def national_addresses(
     return {"data": payload}
 
 
+@app.post("/api/inflation/calculate")
+async def inflation_calculate(req: InflationRequest):
+    try:
+        return calculate_inflation(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/predict")
 async def predict(req: PredictRequest):
     validate_launch_window(req.launch_datetime)
@@ -967,6 +1255,112 @@ async def predict(req: PredictRequest):
         return await run_burst(req)
     except ExternalServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/optimal-site")
+async def optimal_site(req: OptimalSiteRequest):
+    """Sweep every supplied launch site and choose the operationally best option.
+
+    Priority is exactly: (1) zero airspace intrusion, (2) least airspace intrusion
+    when none are clear, and (3) shortest distance to UMD College Park as the tie-break.
+    """
+    validate_launch_window(req.launch_datetime)
+    layers = list(dict.fromkeys(req.airspace_layers))
+    airspace_results = await asyncio.gather(
+        *(operational_airspace(layer) for layer in layers),
+        return_exceptions=True,
+    )
+    collections: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    sources: dict[str, str] = {}
+    for layer, outcome in zip(layers, airspace_results):
+        if isinstance(outcome, Exception):
+            warnings.append(f"{layer}: {outcome}")
+            collections[layer] = empty_fc()
+            sources[layer] = "unavailable"
+            continue
+        data, warning, source = outcome
+        collections[layer] = data
+        sources[layer] = source
+        if warning:
+            warnings.append(f"{layer}: {warning}")
+
+    if not any(collection.get("features") for collection in collections.values()):
+        raise HTTPException(
+            status_code=503,
+            detail="No FAA airspace data is available, so an optimal site cannot be ranked safely.",
+        )
+
+    indexes = build_airspace_spatial_indexes(collections)
+    semaphore = asyncio.Semaphore(4)
+
+    async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
+        async with semaphore:
+            pred_req = PredictRequest(
+                mode=req.mode,
+                launch=LaunchPoint(
+                    name=site.name, latitude=site.latitude, longitude=site.longitude, altitude_m=site.altitude_m
+                ),
+                launch_datetime=req.launch_datetime,
+                ascent_rate_ms=req.ascent_rate_ms,
+                descent_rate_ms=req.descent_rate_ms,
+                burst_altitude_m=req.burst_altitude_m,
+                float_altitude_m=req.float_altitude_m,
+                float_ascent_rate_ms=req.float_ascent_rate_ms,
+                float_duration_min=req.float_duration_min,
+            )
+            prediction = await (run_float(pred_req) if req.mode == "float" else run_burst(pred_req))
+        score = score_prediction_against_airspace(prediction, indexes)
+        umd_distance = haversine_m(
+            (site.latitude, site.longitude), UMD_COLLEGE_PARK_REFERENCE
+        )
+        summary = prediction.get("summary") or {}
+        return {
+            "site_id": site.site_id,
+            "site_name": site.name,
+            "latitude": site.latitude,
+            "longitude": site.longitude,
+            **score,
+            "umd_distance_m": umd_distance,
+            "landing": summary.get("landing"),
+            "ground_distance_m": summary.get("ground_distance_m"),
+        }
+
+    outcomes = await asyncio.gather(*(evaluate(site) for site in req.launch_sites), return_exceptions=True)
+    ranking: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    for site, outcome in zip(req.launch_sites, outcomes):
+        if isinstance(outcome, Exception):
+            errors[site.site_id] = str(outcome)
+        else:
+            ranking.append(outcome)
+    if not ranking:
+        raise HTTPException(status_code=502, detail=f"Every launch-site prediction failed: {errors}")
+
+    ranking.sort(key=optimal_site_sort_key)
+    for rank, candidate in enumerate(ranking, start=1):
+        candidate["rank"] = rank
+        candidate["optimal"] = rank == 1
+    optimal = ranking[0]
+    if optimal["clear_of_airspace"]:
+        reason = "No airspace intrusion; shortest UMD distance among the clear sites."
+    else:
+        reason = "No site was fully clear; this site has the least airspace intrusion, with UMD distance as the tie-break."
+    return {
+        "optimal_site_id": optimal["site_id"],
+        "optimal_site_name": optimal["site_name"],
+        "reason": reason,
+        "ranking": ranking,
+        "errors": errors,
+        "airspace_layers": layers,
+        "airspace_sources": sources,
+        "warnings": warnings,
+        "umd_reference": {
+            "name": "University of Maryland College Park",
+            "latitude": UMD_COLLEGE_PARK_REFERENCE[0],
+            "longitude": UMD_COLLEGE_PARK_REFERENCE[1],
+        },
+    }
 
 
 @app.get("/api/live")

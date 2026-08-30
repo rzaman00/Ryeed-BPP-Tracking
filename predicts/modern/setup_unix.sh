@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-echo "[BPP Predicts v2.4.0] Setting up local Python environment..."
+echo "[BPP Predicts v2.5.0] Setting up local Python environment..."
 if [ ! -x .venv/bin/python ]; then
   python3 -m venv .venv
 fi

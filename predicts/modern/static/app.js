@@ -1,9 +1,10 @@
 import { orientedRectangle, haversineMeters } from './geometry.mjs';
+import { deriveCityLabel, formatSweepParameter } from './ui_helpers.mjs';
 const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.4.0';
+const BUILD_VERSION = '2.6.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -35,6 +36,12 @@ const state = {
   rectangleEnd: null,
   rectanglePreview: null,
   addressRequest: null,
+  appView: 'predicts',
+  burstAltitudeMode: 'auto',
+  manualBurstAltitude: 28000,
+  inflationResult: null,
+  inflationTimer: null,
+  optimalSiteAnalysis: null,
 };
 
 let map;
@@ -160,7 +167,7 @@ function addSource(id) {
 function addOperationalLayers() {
   ['prediction', 'prediction-3d', 'prediction-launch-points', 'prediction-landing-points', 'sweep', 'live-track', 'drawings', 'addresses',
    'airspace-controlled', 'airspace-class_e', 'airspace-sua', 'airspace-tfr',
-   'ref-schools', 'ref-mcdonalds', 'ref-dunkin', 'ref-launch_locations', 'ref-poi'].forEach(addSource);
+   'ref-schools', 'ref-mcdonalds', 'ref-dunkin', 'ref-launch_locations', 'ref-poi', 'optimal-sites'].forEach(addSource);
 
   // Airspace stays useful but visually secondary to the flight path.
   map.addLayer({ id:'airspace-controlled-fill', type:'fill', source:'airspace-controlled', layout:{visibility:'visible'}, paint:{
@@ -200,6 +207,8 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-mcdonalds-layer',type:'circle',source:'ref-mcdonalds',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#ffc72c','circle-opacity':.9,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-dunkin-layer',type:'circle',source:'ref-dunkin',layout:{visibility:'none'},paint:{'circle-radius':4,'circle-color':'#da1884','circle-opacity':.88,'circle-stroke-width':1,'circle-stroke-color':'#111'}});
   map.addLayer({id:'ref-launch_locations-layer',type:'circle',source:'ref-launch_locations',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#0059ff'}});
+  map.addLayer({id:'optimal-site-halo',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','optimal_status'],'optimal'],16,12],'circle-color':['case',['==',['get','optimal_status'],'optimal'],'#21a35b','#d83a45'],'circle-opacity':['case',['==',['get','optimal_status'],'optimal'],.24,.12],'circle-blur':.35}});
+  map.addLayer({id:'optimal-site-points',type:'circle',source:'optimal-sites',paint:{'circle-radius':['case',['==',['get','optimal_status'],'optimal'],8,6.5],'circle-color':'#ffffff','circle-stroke-width':4,'circle-stroke-color':['case',['==',['get','optimal_status'],'optimal'],'#16894a','#c92d39']}});
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
@@ -211,6 +220,7 @@ function addOperationalLayers() {
 
   // Parameter sweep is deliberately quieter than the primary trajectories.
   map.addLayer({id:'sweep-lines',type:'line',source:'sweep',paint:{'line-color':['match',['get','stage'],'ascent',COLORS.ascent,'float',COLORS.float,'descent',COLORS.descent,'#777'],'line-width':2,'line-opacity':.38,'line-dasharray':[2,2]}});
+  map.addLayer({id:'sweep-hitbox',type:'line',source:'sweep',paint:{'line-color':'#000000','line-width':12,'line-opacity':.001}});
 
   // Primary flight path casing + bright stage colors keep trajectory visually dominant.
   map.addLayer({id:'prediction-casing',type:'line',source:'prediction',paint:{'line-color':'#ffffff','line-width':['interpolate',['linear'],['zoom'],5,7,10,10],'line-opacity':.92}});
@@ -266,6 +276,22 @@ function registerFeaturePopups() {
     map.on('click',layer,(e)=>{const f=e.features?.[0];if(!f)return;const p=f.properties||{};const title=p.bpp_airspace_layer||p.LOCAL_TYPE||p.TYPE_CODE||p.type||'Airspace';const fields=[['Name',p.NAME||p.NAME_TXT||p.description||p.TITLE],['Class',p.CLASS||p.LOCAL_TYPE],['Lower',p.LOWER_VAL?`${p.LOWER_VAL} ${p.LOWER_UOM||'ft'}`:null],['Upper',p.UPPER_VAL?`${p.UPPER_VAL} ${p.UPPER_UOM||'ft'}`:null],['NOTAM',p.notam_id||p.NOTAM_KEY]].filter(x=>x[1]!=null&&String(x[1]).trim());new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(title)}</strong>${fields.map(([k,v])=>`<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('')}`).addTo(map);});
     map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
   }
+  map.on('click','sweep-hitbox',(e)=>{
+    const feature=e.features?.[0];if(!feature)return;const props=feature.properties||{};
+    const label=formatSweepParameter(props.sweep_parameter,props.sweep_value);
+    const stage=props.stage?String(props.stage).replace(/^./,x=>x.toUpperCase()):'Trajectory';
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>Parameter Sweep</strong><div>${esc(label)}</div><div><b>Stage:</b> ${esc(stage)}</div>`).addTo(map);
+  });
+  map.on('mouseenter','sweep-hitbox',()=>{map.getCanvas().style.cursor='pointer';});
+  map.on('mouseleave','sweep-hitbox',()=>{map.getCanvas().style.cursor='';});
+  map.on('click','optimal-site-points',(e)=>{
+    const f=e.features?.[0];if(!f)return;const p=f.properties||{};
+    const intrusion=Number(p.airspace_intrusion_m||0),umd=Number(p.umd_distance_m||0);
+    const status=p.optimal_status==='optimal'?'Optimal Site':'Evaluated Site';
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div><div><b>Distance from UMD:</b> ${fmt(miles(umd),1)} mi</div>`).addTo(map);
+  });
+  map.on('mouseenter','optimal-site-points',()=>{map.getCanvas().style.cursor='pointer';});
+  map.on('mouseleave','optimal-site-points',()=>{map.getCanvas().style.cursor='';});
   map.on('click','ref-schools-layer',(e)=>{
     const f=e.features?.[0]; if(!f)return;
     const props=f.properties||{}; const coord=e.lngLat;
@@ -347,20 +373,13 @@ function setReferenceVisibility(key, visible) {
   if (visible) loadReference(key);
 }
 
-function deriveSiteLabel(feature, idx) {
-  const p=feature.properties||{};
-  if(String(p.name||'').trim())return String(p.name).trim();
-  if(String(p.city||'').trim())return String(p.city).trim();
-  const address=String(p.address||'').trim();if(address)return address.split(',')[0].trim();
-  return `Launch ${idx+1}`;
-}
+function deriveSiteLabel(feature, idx) { return deriveCityLabel(feature, idx); }
 
 async function loadLaunchLocations() {
   const r = await api('/api/launch-locations');
   const features = r.data?.features || [];
-  const seen = new Map();
   state.launchLocations = features.map((f,idx)=>{
-    let label=deriveSiteLabel(f,idx); const n=(seen.get(label)||0)+1;seen.set(label,n);if(n>1)label=`${label} ${n}`;
+    const label=deriveSiteLabel(f,idx);
     return {...f,_id:`preset-${slug(label)}-${idx}`,_label:label};
   });
   buildPredictSiteList();
@@ -374,7 +393,7 @@ function buildPredictSiteList() {
   const root=$('predictSiteList');root.innerHTML='';
   const clearSpringIndex=Math.max(0,state.launchLocations.findIndex(site=>/clear spring|fairview/i.test(`${site._label} ${site.properties?.address||''}`)));
   state.launchLocations.forEach((site,idx)=>{
-    const label=document.createElement('label');label.className='predict-site';
+    const label=document.createElement('label');label.className='predict-site';label.dataset.predictSiteRow=site._id;
     const span=document.createElement('span');span.textContent=site._label;span.title=site.properties?.address||site.properties?.name||site._label;
     const input=document.createElement('input');input.type='checkbox';input.dataset.predictSite=site._id;input.checked=idx===clearSpringIndex;
     input.addEventListener('change',()=>{refreshPredictionSources();renderSummary();refreshMarkers();});
@@ -382,6 +401,7 @@ function buildPredictSiteList() {
   });
   if(!state.launchLocations.length)root.innerHTML='<p class="loading-text">No launch locations available.</p>';
   refreshSweepSites();
+  refreshOptimalSiteHighlights();
 }
 
 function buildCustomPredictSiteList(){
@@ -396,14 +416,110 @@ function selectedPresetSites() {
 }
 function isSiteVisible(id){const input=qs(`input[data-predict-site="${CSS.escape(id)}"]`);if(input)return input.checked;if(id.startsWith('custom-')){const c=qs(`input[data-custom-predict-site="${CSS.escape(id)}"]`);return $('customPredictEnabled').checked&&(c?c.checked:true);}return true;}
 
+function invalidateOptimalSiteAnalysis(){
+  if(!state.optimalSiteAnalysis)return;
+  state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();
+}
+function refreshOptimalSiteHighlights(){
+  const analysis=state.optimalSiteAnalysis;
+  const ranking=analysis?.ranking||[];const byId=new Map(ranking.map(x=>[x.site_id,x]));
+  qsa('[data-predict-site-row]').forEach(row=>{
+    const result=byId.get(row.dataset.predictSiteRow);row.classList.toggle('optimal-choice',!!result?.optimal);row.classList.toggle('nonoptimal-choice',!!result&&!result.optimal);
+    if(result){row.title=`${result.site_name} · airspace ${miles(result.airspace_intrusion_m).toFixed(2)} mi · UMD ${miles(result.umd_distance_m).toFixed(1)} mi`;}
+  });
+  const features=ranking.map(result=>({type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties:{...result,optimal_status:result.optimal?'optimal':'nonoptimal'}}));
+  map?.getSource?.('optimal-sites')?.setData({type:'FeatureCollection',features});
+  const result=$('optimalResult');
+  if(!result)return;
+  if(!analysis){result.classList.add('hidden');result.textContent='';return;}
+  const best=ranking[0];if(!best)return;
+  const air=best.clear_of_airspace?'Clear of scored airspace':`${fmt(miles(best.airspace_intrusion_m),2)} mi airspace intrusion`;
+  result.textContent=`Optimal: ${best.site_name} · ${air} · ${fmt(miles(best.umd_distance_m),1)} mi from UMD`;
+  result.classList.remove('hidden');
+}
+function setOptimalButton(running,detail=''){
+  const btn=$('findOptimalSite');if(!btn)return;btn.disabled=running;btn.classList.toggle('running',running);$('optimalState').textContent=detail;
+}
+async function findOptimalSite(){
+  if(state.workspaceMode!=='predict'){toast('Optimal-site search is available in Predict mode.',true);return;}
+  if(!state.launchLocations.length){toast('No launch sites are loaded.',true);return;}
+  if(!(await ensureAutomaticBurst()))return;
+  const template=predictionBody(state.launchLocations[0]);
+  const body={
+    launch_sites:state.launchLocations.map(site=>{const [lon,lat]=site.geometry.coordinates;return{site_id:site._id,name:site._label,latitude:Number(lat),longitude:Number(lon)};}),
+    mode:template.mode,launch_datetime:template.launch_datetime,ascent_rate_ms:template.ascent_rate_ms,descent_rate_ms:template.descent_rate_ms,
+    burst_altitude_m:template.burst_altitude_m,float_altitude_m:template.float_altitude_m,float_ascent_rate_ms:template.float_ascent_rate_ms,float_duration_min:template.float_duration_min,
+    airspace_layers:['controlled','class_e','sua','tfr'],
+  };
+  setOptimalButton(true,`${body.launch_sites.length} sites`);$('optimalResult').classList.add('hidden');
+  try{
+    const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
+    const best=result.ranking?.[0];if(best){const air=best.clear_of_airspace?'no airspace intrusion':`${fmt(miles(best.airspace_intrusion_m),2)} mi airspace intrusion`;toast(`Optimal site: ${best.site_name} — ${air}; ${fmt(miles(best.umd_distance_m),1)} mi from UMD.`,false,7200);}
+    if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
+  }catch(e){state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
+  finally{setOptimalButton(false,'');}
+}
+
 function setPredictionType(type) {
+  if(state.predictType!==type)invalidateOptimalSiteAnalysis();
   state.predictType = type;
   qsa('.burst-control').forEach(el=>el.classList.toggle('hidden',type!=='burst'));
   qsa('.float-control').forEach(el=>el.classList.toggle('hidden',type!=='float'));
   $('predictType').value=type;
   updateAltitudeLabels();
 }
-function updateAltitudeLabels(){ $('burstFeet').textContent=`${fmt(feet($('burstAltitude').value))} ft`; $('floatFeet').textContent=`${fmt(feet($('floatAltitude').value))} ft`; }
+function updateAltitudeLabels(){
+  const auto=state.burstAltitudeMode==='auto';
+  $('burstFeet').textContent=auto&&state.inflationResult?`${fmt(feet($('burstAltitude').value))} ft · auto`:`${fmt(feet($('burstAltitude').value))} ft${auto?' · calculating…':''}`;
+  $('floatFeet').textContent=`${fmt(feet($('floatAltitude').value))} ft`;
+}
+
+function setAppView(view){
+  state.appView=view==='inflation'?'inflation':'predicts';
+  $('predictsView').classList.toggle('hidden',state.appView!=='predicts');
+  $('inflationView').classList.toggle('hidden',state.appView!=='inflation');
+  qsa('[data-app-view]').forEach(b=>{const active=b.dataset.appView===state.appView;b.classList.toggle('active',active);b.setAttribute('aria-selected',active?'true':'false');});
+  if(state.appView==='predicts')setTimeout(()=>map?.resize?.(),40);
+}
+
+function inflationRequestBody(){
+  return {
+    station_pressure_inhg:Number($('inflationPressure').value),
+    site_temperature_f:Number($('inflationTemperature').value),
+    balloon_neck_mass_kg:Number($('inflationBalloonMass').value),
+    payload_mass_kg:Number($('inflationPayloadMass').value),
+    target_ascent_rate_ms:Number($('inflationAscentRate').value),
+  };
+}
+function renderInflationResult(r){
+  state.inflationResult=r;$('inflationError').classList.add('hidden');$('inflationStatus').textContent='Calculated';
+  $('inflationExpectedAscent').textContent=`${fmt(r.expected_ascent_rate_ms,3)} m/s`;
+  $('inflationLift').textContent=`${fmt(r.required_scale_lift_lb,3)} lb`;
+  $('inflationPsi').textContent=`${fmt(r.required_psi,3)} PSI`;
+  $('inflationBurstM').textContent=`${fmt(r.burst_altitude_m)} m`;
+  $('inflationBurstFt').textContent=`${fmt(r.burst_altitude_ft)} ft above launch site`;
+  if(state.burstAltitudeMode==='auto'){ $('burstAltitude').value=String(Math.round(r.burst_altitude_m)); $('burstAltitude').disabled=true; updateAltitudeLabels(); }
+}
+async function calculateInflation(silent=false){
+  $('inflationStatus').textContent='Calculating…';
+  try{
+    const r=await api('/api/inflation/calculate',{method:'POST',body:JSON.stringify(inflationRequestBody())});
+    renderInflationResult(r);return r;
+  }catch(e){
+    state.inflationResult=null;$('inflationStatus').textContent='Check inputs';$('inflationError').textContent=e.message;$('inflationError').classList.remove('hidden');
+    if(!silent)toast(`Inflation calculator: ${e.message}`,true,6500);throw e;
+  }
+}
+function scheduleInflationCalculation(){clearTimeout(state.inflationTimer);state.inflationTimer=setTimeout(()=>calculateInflation(true).catch(()=>{}),220);}
+function setBurstAltitudeMode(mode){
+  state.burstAltitudeMode=mode==='manual'?'manual':'auto';$('burstAltitudeMode').value=state.burstAltitudeMode;
+  if(state.burstAltitudeMode==='manual'){ $('burstAltitude').disabled=false;$('burstAltitude').value=String(state.manualBurstAltitude);updateAltitudeLabels(); }
+  else { $('burstAltitude').disabled=true;if(state.inflationResult){$('burstAltitude').value=String(Math.round(state.inflationResult.burst_altitude_m));updateAltitudeLabels();}else calculateInflation(true).catch(()=>{}); }
+}
+async function ensureAutomaticBurst(){
+  if(state.predictType!=='burst'||state.burstAltitudeMode!=='auto')return true;
+  try{await calculateInflation(true);return true;}catch(e){toast(`Cannot run automatic burst prediction: ${e.message}`,true,6500);return false;}
+}
 
 function setWorkspaceMode(mode) {
   state.workspaceMode=mode;
@@ -452,6 +568,7 @@ function setRunButton(status, detail='') {
 
 async function runPredicts() {
   if(state.workspaceMode==='live'){await runLivePrediction(false);return;}
+  if(!(await ensureAutomaticBurst()))return;
   const targets=[...selectedPresetSites(),...customPointTargets()];
   if(!targets.length){toast('Select at least one preset launch site or draw a custom point.',true);return;}
   state.predictions.clear();state.activePredictionId=null;clearPredictionMarkers();refreshPredictionSources();renderSummary();
@@ -639,6 +756,7 @@ function renderLiveStation(p,phase,history,center,updateTrack=true){
 }
 
 async function runLivePrediction(silent=false){
+  if(!(await ensureAutomaticBurst()))return;
   if(!state.config?.aprs_configured){if(!silent)toast('Add APRSFI_API_KEY to predicts/modern/.env to use live tracking.',true,5500);return;}
   let callsigns;try{callsigns=selectedLiveCallsigns();}catch(e){if(!silent)toast(e.message,true,5200);return;}
   if(!silent)setRunButton('running',`0/${callsigns.length}`);
@@ -691,11 +809,18 @@ function toggleTheme(){applyTheme(state.theme==='dark'?'light':'dark');}
 
 function wireControls(){
   $('themeToggle')?.addEventListener('click',toggleTheme);
+  $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
-  ['burstAltitude','floatAltitude'].forEach(id=>$(id).addEventListener('input',updateAltitudeLabels));
-  $('runPredicts').addEventListener('click',runPredicts);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('burstAltitudeMode').addEventListener('change',e=>{invalidateOptimalSiteAnalysis();setBurstAltitudeMode(e.target.value);});
+  $('burstAltitude').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();});$('floatAltitude').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();updateAltitudeLabels();});
+  $('ascentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();});
+  $('inflationAscentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
+  ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
+  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',invalidateOptimalSiteAnalysis));
+  $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
+  $('runPredicts').addEventListener('click',runPredicts);$('findOptimalSite').addEventListener('click',findOptimalSite);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
@@ -711,7 +836,8 @@ function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTi
 async function init() {
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
-  setDefaultDate();wireControls();setPredictionType('burst');setWorkspaceMode('predict');
+  setDefaultDate();wireControls();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
+  await calculateInflation(true).catch(()=>{});
   try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);renderCallsignControls();}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
