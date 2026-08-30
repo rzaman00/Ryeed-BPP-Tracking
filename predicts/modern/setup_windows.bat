@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-echo [BPP Predicts v2.2.0] Setting up local Python environment...
+echo [BPP Predicts v2.3.0] Setting up local Python environment...
 if not exist ".venv\Scripts\python.exe" (
   where py >nul 2>nul
   if not errorlevel 1 (

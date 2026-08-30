@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.2.0" rel="stylesheet" />
+  <link href="static/styles.css?v=2.3.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -27,7 +27,7 @@
       <a href="https://bpp.umd.edu/archives/" target="_blank" rel="noopener">archives</a>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.2.0</span>
+      <span class="build-badge" id="buildBadge">v2.3.0</span>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -55,8 +55,8 @@
     <label class="control-field float-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
     <label class="control-field"><span>S.L. Descent Rate (m/s)</span><input id="descentRate" type="number" value="9" step="0.5" min="0.1"></label>
 
-    <label class="control-field live-only hidden"><span>Callsign</span>
-      <select id="callsign"><option>KC3SKW-8</option><option>KC3SKW-9</option><option>KC3SKW-10</option></select>
+    <label class="control-field live-only hidden live-callsign-field"><span>Callsign(s)</span>
+      <div class="input-with-note live-callsign-input"><input id="callsign" type="text" value="KC3SKW-8, KC3SKW-9, KC3SKW-10" spellcheck="false" autocomplete="off" aria-label="APRS callsigns"><small>Comma/space separated · uses APRS position + altitude</small></div>
     </label>
     <label class="control-field live-only hidden"><span>Flight Phase</span>
       <select id="livePhase"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select>
@@ -130,6 +130,7 @@
         <div><small>Phase</small><b id="livePhaseValue">—</b></div>
       </div>
       <div class="live-coords" id="liveCoords">—</div>
+      <div class="live-station-list" id="liveStationList" aria-label="Tracked APRS callsigns"></div>
       <label class="inline-check"><input id="autoRefresh" type="checkbox" checked> Auto-refresh APRS every 30 s</label>
       <label class="inline-check"><input id="autoRepredict" type="checkbox"> Auto re-predict every 2 min</label>
     </section>
@@ -185,12 +186,12 @@
 
   <dialog id="aboutDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is the current BPP Predicts interface (v2.2.0), with updated rendering, exact georeferenced landing targets, light/dark themes, responsive behavior, and live APRS tracking.</p>
-    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> aprs.fi for KC3SKW-8, KC3SKW-9, and KC3SKW-10.</p>
+    <p>This is the current BPP Predicts interface (v2.3.0), with updated rendering, exact georeferenced landing targets, light/dark themes, responsive behavior, and multi-callsign live APRS prediction.</p>
+    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> aprs.fi for typed APRS callsigns (defaults: KC3SKW-8, KC3SKW-9, KC3SKW-10). Live predictions start from each station's latest reported latitude, longitude, and altitude.</p>
     <p>Airspace, school, restaurant, launch-location, and POI overlays are loaded from the existing BPP repository data. Run <code>git lfs pull</code> from the repository root if a layer is unavailable locally.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.2.0"></script>
+  <script type="module" src="static/app.js?v=2.3.0"></script>
 </body>
 </html>

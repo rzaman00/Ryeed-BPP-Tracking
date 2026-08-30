@@ -1,37 +1,31 @@
-BPP Predicts — current modern build v2.2.0
+BPP Predicts — current modern build v2.3.0
 ==========================================
 
 WINDOWS QUICK START
-1. Extract this ZIP.
+1. Extract this ZIP into the Ryeed-BPP-Tracking repository (or use it standalone).
 2. Double-click START_BPP_PREDICTS.bat.
 3. On the first run, the launcher creates the Python environment and installs requirements.
-4. The browser opens only after the backend verifies that v2.2.0 is running.
+4. The browser opens only after the backend verifies that v2.3.0 is running.
+
+LIVE APRS IN v2.3
+- Switch Mode to Live Track.
+- Type one or more APRS callsigns into Callsign(s). Separate them with commas or spaces.
+- Defaults: KC3SKW-8, KC3SKW-9, KC3SKW-10.
+- Run Live Predict creates a prediction for every callsign with a current APRS packet.
+- Every live prediction starts from the latest APRS latitude, longitude, AND altitude.
+- If a station has no reported altitude, that callsign is skipped with an error instead of
+  producing an inaccurate ground-level prediction.
 
 IMPORTANT IF YOU USE THE EXISTING GITHUB REPOSITORY
-For the complete preset launch-site and reference-layer data, use this package's
-predicts\modern folder as the repository's one and only modern application folder:
+Use this package's predicts\modern folder as the repository's one and only runnable
+Predicts application folder:
 
   Ryeed-BPP-Tracking\predicts\modern
 
 Keep the sibling BalloonPredictionMap folder only because the modern backend reads its
-GeoJSON data. You do NOT need to run or open BalloonPredictionMap. The v2.2 interface
-has no legacy-predictor navigation link, and run_windows.bat stops older BPP Predicts
-servers before starting the current build.
-
-WHAT CHANGED IN v2.2.0
-- Updated modern interface styling with rounded/translucent controls and cleaner typography.
-- Light/dark theme toggle; dark mode also starts with the dark map basemap.
-- Predicted landing targets are now native MapLibre WebGL point layers, not HTML markers.
-  This keeps the red target centered on the exact final prediction coordinate at every zoom.
-- Legacy preset coordinates prefer explicit latitude/longitude properties when available.
-- Frontend assets are served with no-cache headers and versioned URLs to prevent stale UI.
-- New current-build launcher verifies v2.2.0 before opening the browser and avoids running
-  an older BPP Predicts server at the same time.
-- The old "legacy predicts" navigation item was removed from the modern UI.
+GeoJSON data. You do NOT need to run or open BalloonPredictionMap. The v2.3 launcher
+stops older BPP Predicts servers and verifies the current build before opening a browser.
 
 VERIFY THE BUILD
 Open http://127.0.0.1:8000/api/health while the app is running. It should report:
-  "version": "2.2.0"
-
-If port 8000 is occupied by an unrelated program, the launcher automatically picks a free
-nearby port and opens the correct URL for you.
+  "version": "2.3.0"

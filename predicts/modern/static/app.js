@@ -2,9 +2,9 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.2.0';
+const BUILD_VERSION = '2.3.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
-const CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
+const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
   workspaceMode: 'predict',
   predictType: 'burst',
@@ -21,6 +21,7 @@ const state = {
   launchMarkers: new Map(),
   liveMarkers: new Map(),
   liveHistory: [],
+  liveCallsigns: [...DEFAULT_CALLSIGNS],
   liveTimer: null,
   livePredictTimer: null,
   referenceLoaded: new Set(),
@@ -78,6 +79,25 @@ function localTime(value) {
 }
 function slug(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site'; }
 function esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function parseLiveCallsigns() {
+  const raw = $('callsign')?.value || '';
+  const maxCount = Number(state.config?.max_live_callsigns || 8);
+  const tokens = raw.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
+  const callsigns = [...new Set(tokens)];
+  if (!callsigns.length) throw new Error('Enter at least one APRS callsign.');
+  const invalid = callsigns.find(x=>!/^[A-Z0-9][A-Z0-9-]{0,14}$/.test(x));
+  if (invalid) throw new Error(`Invalid APRS callsign: ${invalid}`);
+  if (callsigns.length > maxCount) throw new Error(`Live tracking is limited to ${maxCount} callsigns at a time.`);
+  state.liveCallsigns = callsigns;
+  return callsigns;
+}
+
+function packetAgeText(point) {
+  if (!point?.time) return 'latest';
+  const age = Math.max(0, Math.round(Date.now()/1000 - point.time));
+  return age < 60 ? `${age}s` : `${Math.round(age/60)} min`;
+}
 
 function baseStyle() {
   return {
@@ -441,7 +461,7 @@ function renderSummary() {
   if(!state.activePredictionId||!entries.some(x=>x.site_id===state.activePredictionId))state.activePredictionId=entries[0].site_id;
   $('summaryTitle').textContent=entries.length===1?entries[0].site_name:`${entries.length} launch sites`;
   list.innerHTML='';
-  entries.forEach(pred=>{const s=pred.summary;const btn=document.createElement('button');btn.className=`summary-row ${pred.site_id===state.activePredictionId?'active':''}`;btn.type='button';btn.innerHTML=`<div><strong>${esc(pred.site_name)}</strong><small>${esc(localTime(s?.landing_time))} · ${fmt(miles(s?.ground_distance_m),1)} mi track</small></div><div class="landing-mini">⌖ ${s?.landing?.latitude?.toFixed(3)??'—'}, ${s?.landing?.longitude?.toFixed(3)??'—'}</div>`;btn.onclick=()=>{state.activePredictionId=pred.site_id;renderSummary();refreshPredictionSources();focusPrediction(pred.site_id);};list.appendChild(btn);});
+  entries.forEach(pred=>{const s=pred.summary;const btn=document.createElement('button');btn.className=`summary-row ${pred.site_id===state.activePredictionId?'active':''}`;btn.type='button';const liveStart=pred.live?.used_altitude_m!=null?`Start ${fmt(feet(pred.live.used_altitude_m))} ft · `:'';btn.innerHTML=`<div><strong>${esc(pred.site_name)}</strong><small>${esc(liveStart)}${esc(localTime(s?.landing_time))} · ${fmt(miles(s?.ground_distance_m),1)} mi track</small></div><div class="landing-mini">⌖ ${s?.landing?.latitude?.toFixed(3)??'—'}, ${s?.landing?.longitude?.toFixed(3)??'—'}</div>`;btn.onclick=()=>{state.activePredictionId=pred.site_id;renderSummary();refreshPredictionSources();focusPrediction(pred.site_id);};list.appendChild(btn);});
   const pred=state.predictions.get(state.activePredictionId);const s=pred?.summary;const active=$('activeSummary');
   if(!s){active.classList.add('hidden');return;}active.classList.remove('hidden');
   $('landingCoords').textContent=`${s.landing.latitude.toFixed(5)}°, ${s.landing.longitude.toFixed(5)}°`;$('landingTime').textContent=`Landing ${localTime(s.landing_time)}`;$('flightDuration').textContent=duration(s.flight_duration_s);$('maxAltitude').textContent=`${fmt(feet(s.max_altitude_m))} ft`;$('groundDistance').textContent=`${fmt(miles(s.ground_distance_m),1)} mi`;$('modelDataset').textContent=s.dataset?String(s.dataset).slice(0,16):'Latest';
@@ -493,18 +513,81 @@ async function queryAddresses(){
 
 // Live APRS ------------------------------------------------------------------
 function scheduleLive(){clearInterval(state.liveTimer);clearInterval(state.livePredictTimer);if(state.workspaceMode!=='live')return;if($('autoRefresh').checked)state.liveTimer=setInterval(()=>refreshLive(false),30000);if($('autoRepredict').checked)state.livePredictTimer=setInterval(()=>runLivePrediction(true),120000);}
+
 async function refreshLive(center=false){
   if(!state.config?.aprs_configured){$('liveAge').textContent='API key needed';return;}
-  const callsign=$('callsign').value;$('liveCallsign').textContent=callsign;
-  try{const r=await api('/api/live');renderLiveMarkers(r,callsign);const p=r.stations?.[callsign];if(!p){$('liveAge').textContent='No recent packet';return;}const phase=r.phase?.[callsign]||'unknown';renderLiveStation(p,phase,r.history?.[callsign]||[],center);}catch(e){toast(e.message,true,5200);$('liveAge').textContent='Unavailable';}
+  let callsigns;
+  try{callsigns=parseLiveCallsigns();}catch(e){toast(e.message,true,5200);$('liveAge').textContent='Check callsigns';return;}
+  $('liveCallsign').textContent=callsigns.length===1?callsigns[0]:`${callsigns.length} callsigns`;
+  try{
+    const params=new URLSearchParams({callsigns:callsigns.join(',')});
+    const r=await api(`/api/live?${params}`);
+    renderLiveMarkers(r,new Set(callsigns));
+    renderLiveStations(r,callsigns,center);
+  }catch(e){toast(e.message,true,5200);$('liveAge').textContent='Unavailable';}
 }
-function renderLiveMarkers(r,selected){for(const m of state.liveMarkers.values())m.remove();state.liveMarkers.clear();for(const [cs,p] of Object.entries(r.stations||{})){const el=document.createElement('div');el.className=`live-marker ${cs===selected?'':'secondary'}`;const popup=new maplibregl.Popup({offset:15}).setHTML(`<strong>${esc(cs)}</strong><br>${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}<br>${p.altitude_m==null?'':fmt(feet(p.altitude_m))+' ft'}<br><a href="https://aprs.fi/${encodeURIComponent(cs)}" target="_blank" rel="noopener">Open on aprs.fi</a>`);state.liveMarkers.set(cs,new maplibregl.Marker({element:el}).setLngLat([p.longitude,p.latitude]).setPopup(popup).addTo(map));}}
-function renderLiveStation(p,phase,history,center){const age=p.time?Math.max(0,Math.round(Date.now()/1000-p.time)):null;$('liveAge').textContent=age==null?'Latest':age<60?`${age}s`:`${Math.round(age/60)} min`;$('liveAltitude').textContent=p.altitude_m==null?'—':`${fmt(feet(p.altitude_m))} ft`;$('liveSpeed').textContent=p.speed_kmh==null?'—':`${fmt(p.speed_kmh*.621371)} mph`;$('livePhaseValue').textContent=String(phase).replace(/^./,x=>x.toUpperCase());$('liveCoords').textContent=`${p.latitude.toFixed(6)}, ${p.longitude.toFixed(6)}`;const coords=(history||[]).filter(x=>Number.isFinite(x.longitude)&&Number.isFinite(x.latitude)).map(x=>[x.longitude,x.latitude]);state.liveHistory=coords;map.getSource('live-track').setData({type:'FeatureCollection',features:coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords},properties:{callsign:p.callsign}}]:[]});if(center)map.easeTo({center:[p.longitude,p.latitude],zoom:9,duration:600});}
+
+function renderLiveMarkers(r,selected){
+  for(const m of state.liveMarkers.values())m.remove();state.liveMarkers.clear();
+  for(const [cs,p] of Object.entries(r.stations||{})){
+    const el=document.createElement('div');el.className=`live-marker ${selected.has(cs)?'':'secondary'}`;
+    const altitude=p.altitude_m==null?'No altitude':`${fmt(feet(p.altitude_m))} ft`;
+    const popup=new maplibregl.Popup({offset:15}).setHTML(`<strong>${esc(cs)}</strong><br>${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)}<br>${altitude}<br><a href="https://aprs.fi/${encodeURIComponent(cs)}" target="_blank" rel="noopener">Open on aprs.fi</a>`);
+    state.liveMarkers.set(cs,new maplibregl.Marker({element:el}).setLngLat([p.longitude,p.latitude]).setPopup(popup).addTo(map));
+  }
+}
+
+function renderLiveStations(r,callsigns,center){
+  const list=$('liveStationList');list.innerHTML='';
+  const trackFeatures=[];
+  let primary=null;
+  for(const cs of callsigns){
+    const p=r.stations?.[cs];const phase=r.phase?.[cs]||'unknown';const history=r.history?.[cs]||[];
+    if(p&&!primary)primary={p,phase,history};
+    const row=document.createElement('button');row.type='button';row.className=`live-station-row ${p?'':'missing'}`;
+    const altitude=p?.altitude_m==null?'No altitude':`${fmt(feet(p.altitude_m))} ft`;
+    const detail=p?`${packetAgeText(p)} · ${String(phase).replace(/^./,x=>x.toUpperCase())}`:'No recent APRS packet';
+    row.innerHTML=`<strong>${esc(cs)}</strong><span>${esc(altitude)}</span><small>${esc(detail)}</small>`;
+    if(p)row.onclick=()=>{renderLiveStation(p,phase,history,true,false);};
+    list.appendChild(row);
+    const coords=history.filter(x=>Number.isFinite(x.longitude)&&Number.isFinite(x.latitude)).map(x=>[x.longitude,x.latitude]);
+    if(coords.length>1)trackFeatures.push({type:'Feature',geometry:{type:'LineString',coordinates:coords},properties:{callsign:cs}});
+  }
+  map.getSource('live-track').setData({type:'FeatureCollection',features:trackFeatures});
+  if(primary)renderLiveStation(primary.p,primary.phase,primary.history,center,false);
+  else{$('liveAge').textContent='No recent packet';$('liveAltitude').textContent='—';$('liveSpeed').textContent='—';$('livePhaseValue').textContent='—';$('liveCoords').textContent='—';}
+}
+
+function renderLiveStation(p,phase,history,center,updateTrack=true){
+  $('liveAge').textContent=packetAgeText(p);
+  $('liveAltitude').textContent=p.altitude_m==null?'—':`${fmt(feet(p.altitude_m))} ft`;
+  $('liveSpeed').textContent=p.speed_kmh==null?'—':`${fmt(p.speed_kmh*.621371)} mph`;
+  $('livePhaseValue').textContent=String(phase).replace(/^./,x=>x.toUpperCase());
+  $('liveCoords').textContent=`${p.callsign} · ${p.latitude.toFixed(6)}, ${p.longitude.toFixed(6)}`;
+  const coords=(history||[]).filter(x=>Number.isFinite(x.longitude)&&Number.isFinite(x.latitude)).map(x=>[x.longitude,x.latitude]);state.liveHistory=coords;
+  if(updateTrack)map.getSource('live-track').setData({type:'FeatureCollection',features:coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords},properties:{callsign:p.callsign}}]:[]});
+  if(center)map.easeTo({center:[p.longitude,p.latitude],zoom:9,duration:600});
+}
+
 async function runLivePrediction(silent=false){
   if(!state.config?.aprs_configured){if(!silent)toast('Add APRSFI_API_KEY to predicts/modern/.env to use live tracking.',true,5500);return;}
-  if(!silent)setRunButton('running','APRS');
-  const body={callsign:$('callsign').value,mode:state.predictType,phase:$('livePhase').value,ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value)};
-  try{const result=await api('/api/live/predict',{method:'POST',body:JSON.stringify(body)});state.predictions.clear();const id=`live-${body.callsign}`;state.predictions.set(id,decoratePrediction(id,`${body.callsign} live`,result));state.activePredictionId=id;refreshPredictionSources();refreshMarkers();renderSummary();fitPredictions();if(!silent){setRunButton('success','updated');toast(`Live prediction updated for ${body.callsign}.`);}}catch(e){if(!silent){setRunButton('idle','');toast(e.message,true,5500);}else console.warn(e);}
+  let callsigns;try{callsigns=parseLiveCallsigns();}catch(e){if(!silent)toast(e.message,true,5200);return;}
+  if(!silent)setRunButton('running',`0/${callsigns.length}`);
+  const body={callsigns,mode:state.predictType,phase:$('livePhase').value,ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value)};
+  try{
+    const batch=await api('/api/live/predict-batch',{method:'POST',body:JSON.stringify(body)});
+    state.predictions.clear();state.activePredictionId=null;
+    for(const cs of callsigns){const result=batch.results?.[cs];if(!result)continue;const id=`live-${cs}`;state.predictions.set(id,decoratePrediction(id,`${cs} live`,result));if(!state.activePredictionId)state.activePredictionId=id;}
+    refreshPredictionSources();refreshMarkers();renderSummary();
+    const completed=state.predictions.size;const failures=Object.keys(batch.errors||{});
+    if(completed)fitPredictions();
+    if(!silent){
+      setRunButton(completed?'success':'idle',failures.length?`${completed} ok, ${failures.length} failed`:`${completed} updated`);
+      if(completed)toast(`${completed} live prediction${completed===1?'':'s'} started from APRS latitude, longitude, and altitude.`);
+      if(failures.length)toast(failures.map(cs=>`${cs}: ${batch.errors[cs]}`).join(' | '),true,7000);
+    }
+    if(!completed&&silent)console.warn('No live predictions succeeded',batch.errors);
+  }catch(e){if(!silent){setRunButton('idle','');toast(e.message,true,5500);}else console.warn(e);}
 }
 
 // Parameter sweep ------------------------------------------------------------
@@ -542,7 +625,7 @@ function wireControls(){
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
   ['burstAltitude','floatAltitude'].forEach(id=>$(id).addEventListener('input',updateAltitudeLabels));
-  $('runPredicts').addEventListener('click',runPredicts);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('callsign').addEventListener('change',()=>refreshLive(true));$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('callsign').addEventListener('change',()=>refreshLive(true));$('callsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();refreshLive(true);}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','uncontrolled','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
@@ -559,7 +642,7 @@ async function init() {
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
   setDefaultDate();wireControls();setPredictionType('burst');setWorkspaceMode('predict');
-  try{state.config=await api('/api/config');if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);}
+  try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length)$('callsign').value=state.config.default_callsigns.join(', ');if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
   map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('controlled'),loadAirspace('tfr')]);syncAirspaceVisibility();await loadLaunchLocations();});

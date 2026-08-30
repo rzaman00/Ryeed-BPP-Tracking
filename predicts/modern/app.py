@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -26,9 +27,10 @@ load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
 APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
-CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
+DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
+MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.2.0"
+BUILD_VERSION = "2.3.0"
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -77,8 +79,7 @@ class PredictRequest(BaseModel):
         return self
 
 
-class LivePredictRequest(BaseModel):
-    callsign: Literal["KC3SKW-8", "KC3SKW-9", "KC3SKW-10"]
+class LivePredictSettings(BaseModel):
     mode: Literal["burst", "float"] = "burst"
     phase: Literal["auto", "ascending", "descending"] = "auto"
     ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
@@ -89,8 +90,43 @@ class LivePredictRequest(BaseModel):
     float_duration_min: float = Field(default=60, gt=0, le=24 * 60)
 
 
+class LivePredictRequest(LivePredictSettings):
+    callsign: str = Field(min_length=1, max_length=20)
+
+
+class LivePredictBatchRequest(LivePredictSettings):
+    callsigns: list[str] = Field(min_length=1, max_length=MAX_LIVE_CALLSIGNS)
+
+
 class ExternalServiceError(RuntimeError):
     pass
+
+
+def normalize_callsigns(values: str | list[str] | tuple[str, ...], max_count: int = MAX_LIVE_CALLSIGNS) -> list[str]:
+    """Normalize typed APRS callsigns while preserving user order.
+
+    Users may separate callsigns with commas, semicolons, spaces, or newlines.
+    APRS SSIDs such as KC3SKW-8 are accepted.
+    """
+    raw_values = [values] if isinstance(values, str) else list(values)
+    tokens: list[str] = []
+    for value in raw_values:
+        tokens.extend(part for part in re.split(r"[,;\s]+", str(value).strip()) if part)
+
+    callsigns: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        callsign = token.upper()
+        if not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{0,14}", callsign):
+            raise ValueError(f"Invalid APRS callsign: {token}")
+        if callsign not in seen:
+            callsigns.append(callsign)
+            seen.add(callsign)
+    if not callsigns:
+        raise ValueError("Enter at least one APRS callsign")
+    if len(callsigns) > max_count:
+        raise ValueError(f"Live tracking is limited to {max_count} callsigns at a time")
+    return callsigns
 
 
 def utc_iso(dt: datetime) -> str:
@@ -291,17 +327,22 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
 
 # APRS live tracking ---------------------------------------------------------
 _live_history: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
-_aprs_cache: dict[str, Any] = {"time": 0.0, "data": None}
+_aprs_cache: dict[tuple[str, ...], dict[str, Any]] = {}
 
 
-async def fetch_aprs_all(force: bool = False) -> dict[str, Any]:
+async def fetch_aprs(callsigns: str | list[str] | tuple[str, ...], force: bool = False) -> dict[str, Any]:
     if not APRSFI_API_KEY:
         raise ExternalServiceError("APRS.fi API key is not configured. Add APRSFI_API_KEY to predicts/modern/.env")
+
+    requested = normalize_callsigns(callsigns)
+    cache_key = tuple(sorted(requested))
     now = time.monotonic()
-    if not force and _aprs_cache["data"] is not None and now - _aprs_cache["time"] < 20:
-        return _aprs_cache["data"]
+    cached = _aprs_cache.get(cache_key)
+    if not force and cached is not None and now - cached["time"] < 20:
+        return cached["data"]
+
     params = {
-        "name": ",".join(CALLSIGNS),
+        "name": ",".join(requested),
         "what": "loc",
         "apikey": APRSFI_API_KEY,
         "format": "json",
@@ -316,10 +357,11 @@ async def fetch_aprs_all(force: bool = False) -> dict[str, Any]:
     if payload.get("result") != "ok":
         raise ExternalServiceError(payload.get("description", "APRS.fi returned an error"))
 
+    requested_set = set(requested)
     normalized: dict[str, dict[str, Any]] = {}
     for entry in payload.get("entries", []):
-        name = entry.get("name")
-        if name not in CALLSIGNS or "lat" not in entry or "lng" not in entry:
+        name = str(entry.get("name") or "").upper()
+        if name not in requested_set or "lat" not in entry or "lng" not in entry:
             continue
         point = {
             "callsign": name,
@@ -342,9 +384,10 @@ async def fetch_aprs_all(force: bool = False) -> dict[str, Any]:
         "source": "aprs.fi",
         "source_url": "https://aprs.fi/",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "requested_callsigns": requested,
         "stations": normalized,
     }
-    _aprs_cache.update({"time": now, "data": data})
+    _aprs_cache[cache_key] = {"time": now, "data": data}
     return data
 
 
@@ -361,6 +404,95 @@ def infer_phase(callsign: str) -> str:
     if rate < -0.5:
         return "descending"
     return "level"
+
+
+def station_observation_datetime(station: dict[str, Any]) -> datetime:
+    timestamp = station.get("time") or station.get("lasttime")
+    if timestamp:
+        try:
+            return datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+    return datetime.now(timezone.utc)
+
+
+async def build_live_prediction(settings: LivePredictSettings, callsign: str, station: dict[str, Any]) -> dict[str, Any]:
+    """Run a prediction from the latest APRS 3D position.
+
+    Live predictions intentionally require altitude. Falling back to zero/ground level
+    would make the remaining ascent/descent timing and landing location misleading.
+    """
+    alt = station.get("altitude_m")
+    if alt is None:
+        raise ExternalServiceError(
+            f"The latest APRS packet for {callsign} has no altitude. "
+            "Live prediction was not run because it must start from the balloon's reported altitude."
+        )
+
+    phase = settings.phase
+    inferred = infer_phase(callsign)
+    if phase == "auto":
+        phase = inferred if inferred in ("ascending", "descending") else "ascending"
+
+    launch = LaunchPoint(
+        name=f"{callsign} live position",
+        latitude=station["latitude"],
+        longitude=station["longitude"],
+        altitude_m=float(alt),
+    )
+    approximation = None
+    burst_alt = settings.burst_altitude_m
+    float_alt = settings.float_altitude_m
+    ascent_rate = settings.ascent_rate_ms
+
+    if phase == "descending":
+        current_alt = float(alt)
+        # Tawhiri's standard profile begins with ascent. A short, fast ascent to a point
+        # just above the current altitude produces an immediate transition to descent.
+        burst_alt = current_alt + 20
+        ascent_rate = 20
+        approximation = "Live descending prediction uses a near-immediate burst approximation from the latest APRS 3D position."
+
+    if burst_alt <= alt:
+        burst_alt = float(alt) + 100
+    if float_alt <= alt:
+        float_alt = float(alt) + 100
+
+    observation_time = station_observation_datetime(station)
+    pred = PredictRequest(
+        mode=settings.mode,
+        launch=launch,
+        launch_datetime=observation_time,
+        ascent_rate_ms=ascent_rate,
+        descent_rate_ms=settings.descent_rate_ms,
+        burst_altitude_m=burst_alt,
+        float_altitude_m=float_alt,
+        float_ascent_rate_ms=settings.float_ascent_rate_ms,
+        float_duration_min=settings.float_duration_min,
+    )
+    meta = {
+        "live_callsign": callsign,
+        "live_phase": phase,
+        "live_start_altitude_m": float(alt),
+        "live_observation_time": utc_iso(observation_time),
+        "approximation": approximation,
+    }
+    result = await (run_float(pred, meta) if settings.mode == "float" and phase != "descending" else run_burst(pred, meta))
+    packet_age_s = max(0, int((datetime.now(timezone.utc) - observation_time).total_seconds()))
+    result["live"] = {
+        "station": station,
+        "phase": phase,
+        "inferred_phase": inferred,
+        "used_position": {
+            "latitude": station["latitude"],
+            "longitude": station["longitude"],
+            "altitude_m": float(alt),
+        },
+        "used_altitude_m": float(alt),
+        "observation_time": utc_iso(observation_time),
+        "packet_age_s": packet_age_s,
+    }
+    return result
 
 
 # Existing BPP data ----------------------------------------------------------
@@ -481,7 +613,9 @@ async def health():
 @app.get("/api/config")
 async def config():
     return {
-        "callsigns": CALLSIGNS,
+        "callsigns": DEFAULT_CALLSIGNS,
+        "default_callsigns": DEFAULT_CALLSIGNS,
+        "max_live_callsigns": MAX_LIVE_CALLSIGNS,
         "prediction_modes": ["burst", "float"],
         "aprs_configured": bool(APRSFI_API_KEY),
         "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
@@ -579,87 +713,88 @@ async def predict(req: PredictRequest):
 
 
 @app.get("/api/live")
-async def live(callsign: str | None = Query(default=None)):
-    if callsign is not None and callsign not in CALLSIGNS:
-        raise HTTPException(status_code=400, detail="Unknown BPP callsign")
+async def live(
+    callsign: str | None = Query(default=None),
+    callsigns: str | None = Query(default=None),
+):
     try:
-        data = await fetch_aprs_all()
+        requested = normalize_callsigns(callsigns or callsign or list(DEFAULT_CALLSIGNS))
+        data = await fetch_aprs(requested)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ExternalServiceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if callsign:
-        station = data["stations"].get(callsign)
+
+    # Keep the single-callsign response shape for backwards compatibility.
+    if callsign is not None and callsigns is None and len(requested) == 1:
+        name = requested[0]
+        station = data["stations"].get(name)
         return {
             "source": data["source"],
             "source_url": data["source_url"],
             "fetched_at": data["fetched_at"],
             "station": station,
-            "phase": infer_phase(callsign),
-            "history": list(_live_history[callsign]),
+            "phase": infer_phase(name),
+            "history": list(_live_history[name]),
         }
+
     return {
         **data,
-        "phase": {name: infer_phase(name) for name in CALLSIGNS},
-        "history": {name: list(_live_history[name]) for name in CALLSIGNS},
+        "phase": {name: infer_phase(name) for name in requested},
+        "history": {name: list(_live_history[name]) for name in requested},
     }
 
 
 @app.post("/api/live/predict")
 async def live_predict(req: LivePredictRequest):
     try:
-        data = await fetch_aprs_all(force=True)
-        station = data["stations"].get(req.callsign)
+        callsign = normalize_callsigns(req.callsign, max_count=1)[0]
+        data = await fetch_aprs([callsign], force=True)
+        station = data["stations"].get(callsign)
         if not station:
-            raise ExternalServiceError(f"No APRS.fi position was found for {req.callsign}")
-        alt = station.get("altitude_m")
-        phase = req.phase
-        inferred = infer_phase(req.callsign)
-        if phase == "auto":
-            phase = inferred if inferred in ("ascending", "descending") else "ascending"
-
-        launch = LaunchPoint(
-            name=f"{req.callsign} live position",
-            latitude=station["latitude"],
-            longitude=station["longitude"],
-            altitude_m=alt,
-        )
-        approximation = None
-        burst_alt = req.burst_altitude_m
-        float_alt = req.float_altitude_m
-        ascent_rate = req.ascent_rate_ms
-
-        if phase == "descending":
-            if alt is None:
-                raise ExternalServiceError("A live descending prediction needs APRS altitude data, but the latest packet has no altitude.")
-            current_alt = alt
-            # Tawhiri's standard profile begins with ascent. A short, fast ascent to a point just
-            # above the current altitude produces an immediate transition into its descent model.
-            burst_alt = current_alt + 20
-            ascent_rate = 20
-            approximation = "Live descending prediction uses a near-immediate burst approximation from the latest APRS position."
-
-        if alt is not None:
-            if burst_alt <= alt:
-                burst_alt = alt + 100
-            if float_alt <= alt:
-                float_alt = alt + 100
-
-        pred = PredictRequest(
-            mode=req.mode,
-            launch=launch,
-            launch_datetime=datetime.now(timezone.utc),
-            ascent_rate_ms=ascent_rate,
-            descent_rate_ms=req.descent_rate_ms,
-            burst_altitude_m=burst_alt,
-            float_altitude_m=float_alt,
-            float_ascent_rate_ms=req.float_ascent_rate_ms,
-            float_duration_min=req.float_duration_min,
-        )
-        meta = {"live_callsign": req.callsign, "live_phase": phase, "approximation": approximation}
-        result = await (run_float(pred, meta) if req.mode == "float" and phase != "descending" else run_burst(pred, meta))
-        result["live"] = {"station": station, "phase": phase, "inferred_phase": inferred}
-        return result
-    except (ExternalServiceError, ValueError) as exc:
+            raise ExternalServiceError(f"No APRS.fi position was found for {callsign}")
+        return await build_live_prediction(req, callsign, station)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExternalServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/live/predict-batch")
+async def live_predict_batch(req: LivePredictBatchRequest):
+    try:
+        callsigns = normalize_callsigns(req.callsigns)
+        data = await fetch_aprs(callsigns, force=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExternalServiceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    errors: dict[str, str] = {}
+    jobs: list[tuple[str, Any]] = []
+    for callsign in callsigns:
+        station = data["stations"].get(callsign)
+        if not station:
+            errors[callsign] = f"No APRS.fi position was found for {callsign}"
+            continue
+        jobs.append((callsign, build_live_prediction(req, callsign, station)))
+
+    outcomes = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True) if jobs else []
+    results: dict[str, dict[str, Any]] = {}
+    for (callsign, _), outcome in zip(jobs, outcomes):
+        if isinstance(outcome, Exception):
+            errors[callsign] = str(outcome)
+        else:
+            results[callsign] = outcome
+
+    return {
+        "source": data["source"],
+        "source_url": data["source_url"],
+        "fetched_at": data["fetched_at"],
+        "requested_callsigns": callsigns,
+        "results": results,
+        "errors": errors,
+    }
 
 
 if __name__ == "__main__":

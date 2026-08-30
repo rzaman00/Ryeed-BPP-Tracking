@@ -1,4 +1,4 @@
-# Integration plan — v2.2.0
+# Integration plan — v2.3.0
 
 Use this folder as the only runnable Predicts application:
 
@@ -6,13 +6,13 @@ Use this folder as the only runnable Predicts application:
 Ryeed-BPP-Tracking/predicts/modern
 ```
 
-The sibling `predicts/BalloonPredictionMap` directory may remain in the repository **only as a source of legacy GeoJSON data**. The modern UI no longer links to it, and the launch scripts never start it.
+The sibling `predicts/BalloonPredictionMap` directory may remain only as a source of legacy GeoJSON data. The launch scripts never start it.
 
-1. Delete or rename the old `predicts/modern` folder.
-2. Copy this `predicts/modern` folder into its place.
-3. From the repository root run `git lfs pull` once so the existing large GeoJSON data files are materialized.
-4. Run `predicts\modern\run_windows.bat` (or the top-level `START_BPP_PREDICTS.bat`). First-run setup is automatic.
-5. Verify `/api/health` reports version `2.2.0`.
-6. Test preset-site Burst/Float predictions, custom points, geofences, layers, KML, parameter sweep, and APRS if configured.
+1. Replace the old `predicts/modern` folder with this one.
+2. From the repository root run `git lfs pull` once.
+3. Run `predicts\modern\run_windows.bat` or top-level `START_BPP_PREDICTS.bat`.
+4. Verify `/api/health` reports version `2.3.0`.
+5. Add `APRSFI_API_KEY` to `.env` for live operation.
+6. In Live Track, enter one or more callsigns and confirm the displayed latitude/longitude/altitude match aprs.fi before running live predicts.
 
-The v2.2 launcher checks for older BPP Predicts servers before launch and opens the browser only after v2.2.0 is verified healthy.
+The v2.3 launcher checks for older BPP Predicts servers before launch and opens the browser only after v2.3.0 is verified healthy.

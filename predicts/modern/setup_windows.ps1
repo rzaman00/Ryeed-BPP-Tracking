@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
-Write-Host "[BPP Predicts v2.2.0] Setting up local Python environment..." -ForegroundColor Cyan
+Write-Host "[BPP Predicts v2.3.0] Setting up local Python environment..." -ForegroundColor Cyan
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     if (Get-Command py -ErrorAction SilentlyContinue) {
         py -m venv .venv

@@ -1,45 +1,42 @@
-# Build report — BPP Predicts v2.2.0
+# Build report — BPP Predicts v2.3.0
 
 ## Changes in this build
 
-- Refreshed the existing operational interface rather than replacing its workflow.
-- Added persistent light/dark UI themes; dark theme starts with the dark map basemap.
-- Removed the legacy-predictor link from the modern header.
-- Replaced HTML landing markers with MapLibre GeoJSON circle layers rendered at the exact final trajectory coordinate.
-- Added an active landing halo/center target while keeping the geospatial center fixed.
-- Changed preset launch-site normalization to prefer explicit latitude/longitude properties over stale or rounded geometry when available.
-- Added versioned frontend asset URLs plus `Cache-Control: no-store` headers.
-- Added `run_latest.py`; launch scripts stop older BPP Predicts instances, verify v2.2.0, avoid duplicate current servers, and open only the verified current build.
-- Windows launch now performs first-run setup automatically.
+- Preserved the v2.2 UI and operational workflow; no major visual redesign.
+- Replaced the fixed live callsign selector with a typed multi-callsign field.
+- Added callsign normalization/deduplication and a configurable maximum of 8 live stations.
+- Added query-scoped APRS caching so arbitrary callsign groups do not reuse unrelated cached station data.
+- Added multi-callsign APRS status/history rendering.
+- Added `/api/live/predict-batch` so all entered callsigns are fetched from APRS once and predicted together.
+- Live predictions require APRS altitude and use latitude + longitude + altitude as the Tawhiri launch state.
+- APRS packet time is used as the live prediction start time and returned metadata records the exact 3D position used.
+- Partial batch failures are supported: a station with missing data/altitude does not prevent other callsigns from predicting.
+- Bumped the modern-only launcher/build verification to v2.3.0.
 
-## Preserved operational functionality
+## Preserved functionality
 
-- Burst and stitched Float prediction workflows
-- Explicit Run Predicts action
-- Multi-site preset checklist
-- Custom point and geofence drawing
-- 2D / 3D map modes
-- Esri Topography, World Imagery Hybrid, USGS Topo, and Esri Dark Gray
-- Controlled / uncontrolled / TFR airspace
-- School / restaurant / launch-location / POI reference layers
-- National Address Database query
-- KML and GeoJSON exports
-- Parameter sweep
-- APRS.fi live tracking and live re-prediction
+- v2.2 modern light/dark UI
+- Exact georeferenced landing targets
+- Burst and stitched Float
+- Multi-site preset predictions and custom launch drawings
+- 2D/3D map modes, airspace/reference layers, geofences, KML/GeoJSON export
+- Parameter sweep and National Address Database query
+- Auto APRS refresh and auto live re-predict
 
 ## Validation completed
 
 - `python -m py_compile app.py`: pass
 - `python -m py_compile run_latest.py`: pass
 - `node --check static/app.js`: pass
-- Python unit tests: 5 passed
-- `/api/health`: reports `2.2.0`
-- Static frontend responses: `X-BPP-Build: 2.2.0` and no-cache headers present
-- Index contains theme toggle and v2.2.0 build badge
+- Python unit tests: **9 passed**
+- FastAPI health/config/static-header smoke check: pass
+- `/api/health` reports `2.3.0`
+- Mock live prediction confirms reported APRS latitude, longitude, altitude, and packet time are used as the prediction seed
+- Mock multi-callsign batch confirms arbitrary callsigns and partial station failures are handled independently
 
-## Real-machine checks still recommended
+## Real-machine checks recommended
 
-- Compare a few preset-site predictions against Tawhiri directly.
-- Confirm materialized Git LFS reference layers on the target machine.
-- Test APRS.fi with the team's API key.
-- Confirm the Windows launcher can terminate any previously running older BPP Predicts process on port 8000.
+- Add the team's `APRSFI_API_KEY` to `.env`.
+- Test with one callsign and with KC3SKW-8, KC3SKW-9, KC3SKW-10 together.
+- Confirm each live status row shows the same altitude as aprs.fi.
+- Confirm prediction summary rows show the live start altitude and all successful trajectories are visible simultaneously.

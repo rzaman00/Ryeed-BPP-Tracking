@@ -1,17 +1,17 @@
-# BPP Predicts — Current Modern Build v2.2.0
+# BPP Predicts — Current Modern Build v2.3.0
 
-This folder is the current local BPP Predicts application. It keeps the familiar operational prediction workflow while modernizing the interface and fixing the landing-target alignment issue.
+This folder is the current local BPP Predicts application. v2.3.0 keeps the v2.2 visual design and operational workflow, while making live APRS prediction fully multi-callsign and explicitly altitude-aware.
 
-## What changed in v2.2.0
+## What changed in v2.3.0
 
-- Refreshed modern interface with cleaner typography, rounded panels, improved spacing, and translucent map controls.
-- Light/dark theme toggle. The selected theme is remembered; dark mode also starts with the dark map basemap.
-- **Landing alignment fix:** predicted landing targets are rendered as native MapLibre GeoJSON circle layers at the exact final trajectory coordinate. They no longer use DOM/HTML markers that can visually drift from the line as map scale changes.
-- Launch-location normalization now prefers explicit legacy `latitude`/`longitude` properties when they exist, avoiding stale or rounded geometry for preset launch sites.
-- The modern header no longer links to the legacy predictor.
-- Static frontend files use versioned URLs and no-cache response headers so an old browser cache cannot masquerade as the newest build.
-- `run_windows.bat` now uses `run_latest.py`, which checks for running BPP Predicts instances, stops older builds, verifies **v2.2.0**, and only then opens the browser.
-- First run is automatic: `run_windows.bat` runs setup if the virtual environment does not exist.
+- **Typed live callsigns:** the Live Track control is now a text field. Enter one or more APRS callsigns separated by commas, spaces, semicolons, or new lines.
+- The default field is pre-filled with `KC3SKW-8, KC3SKW-9, KC3SKW-10`, but live tracking is no longer hard-coded to only those three stations.
+- **Multi-callsign live predicts:** one Run Live Predict action can create predictions for every callsign entered. Successful stations are plotted together and listed separately in the prediction summary.
+- **3D APRS seed position:** every live prediction starts from the latest APRS latitude, longitude, **and altitude**. If the latest packet has no altitude, the app refuses to run a misleading ground-level prediction for that callsign and reports the issue.
+- The APRS packet timestamp is used as the prediction start time, and the returned live metadata records the exact position/altitude used.
+- The live status card now shows all requested callsigns with packet age, phase, and altitude while preserving the existing compact layout.
+- The previous v2.2 modern UI, dark mode, landing-marker alignment fix, responsive layout, airspace rendering, drawing tools, parameter sweep, KML export, Burst mode, and stitched Float mode are retained.
+- `run_latest.py` now verifies **v2.3.0** before opening the browser and continues to stop older BPP Predicts servers so only the newest modern build runs.
 
 ## Windows — recommended
 
@@ -29,14 +29,6 @@ If this package is extracted with its top-level launcher, you can instead double
 START_BPP_PREDICTS.bat
 ```
 
-The launcher normally uses:
-
-```text
-http://127.0.0.1:8000
-```
-
-If an unrelated program owns port 8000, it chooses a nearby free port and opens the correct URL automatically.
-
 ### Verify that the newest build is running
 
 Open:
@@ -48,16 +40,26 @@ http://127.0.0.1:8000/api/health
 The response should contain:
 
 ```json
-"version": "2.2.0"
+"version": "2.3.0"
 ```
 
-## macOS / Linux
+## APRS live tracking
 
-```bash
-./run_unix.sh
+Edit `.env` and set:
+
+```text
+APRSFI_API_KEY=your_key_here
 ```
 
-It also performs setup automatically when `.venv` is missing.
+Then choose **Live Track**. Type callsigns such as:
+
+```text
+KC3SKW-8, KC3SKW-9, KC3SKW-10
+```
+
+or any other valid APRS callsign(s) you need to follow. Up to 8 callsigns can be tracked/predicted in one request. The backend sends the callsigns to aprs.fi, records each latest packet, and seeds Tawhiri from that packet's latitude, longitude, altitude, and timestamp.
+
+A live prediction is intentionally not run when APRS.fi returns a location without altitude. This prevents the predictor from silently treating a balloon already in flight as if it were at ground level.
 
 ## Existing BPP data
 
@@ -73,19 +75,7 @@ and keep the existing sibling data directory at:
 Ryeed-BPP-Tracking/predicts/BalloonPredictionMap/BalloonBaseMap/assets/data/
 ```
 
-The modern app reads the GeoJSON files from that location, but **you do not need to run or open the legacy BalloonPredictionMap application**. If the repository was freshly cloned, run `git lfs pull` once from the repository root so the large GeoJSON files are materialized.
-
-Without those legacy data files, the app still runs and supports custom launch points, but it uses a small fallback launch-site list and omits unavailable reference layers.
-
-## APRS live tracking
-
-Edit `.env` and set:
-
-```text
-APRSFI_API_KEY=your_key_here
-```
-
-The key remains server-side. APRS.fi requests are proxied through the local FastAPI backend.
+The modern app reads GeoJSON data from that location, but the legacy BalloonPredictionMap application is never launched. From a fresh clone, run `git lfs pull` once from the repository root.
 
 ## Prediction behavior
 
@@ -95,14 +85,7 @@ Uses SondeHub-hosted Tawhiri's standard profile.
 
 ### Float
 
-Uses the BPP stitched-float approach:
-
-1. Predict ascent to the requested float altitude.
-2. Start a second standard prediction at that point.
-3. Treat the second prediction's slow ascent as the float segment for the requested duration.
-4. Keep the normal descent from that second prediction.
-
-The result is ascent + float + descent.
+Uses the BPP stitched-float approach: ascent to float altitude, a second slow-ascent segment treated as float, then normal descent.
 
 ## Tests
 
@@ -112,4 +95,4 @@ From this directory:
 PYTHONPATH=. pytest -q
 ```
 
-The core tests cover longitude conversion, distance calculations, final landing summarization, launch-location normalization, and the stitched-float workflow.
+The tests cover coordinate conversion, landing summarization, launch-site normalization, stitched Float behavior, callsign parsing, and altitude-aware live prediction seeding.
