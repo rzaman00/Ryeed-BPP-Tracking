@@ -1,8 +1,9 @@
+import { orientedRectangle, haversineMeters } from './geometry.mjs';
 const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.3.0';
+const BUILD_VERSION = '2.4.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -22,6 +23,7 @@ const state = {
   liveMarkers: new Map(),
   liveHistory: [],
   liveCallsigns: [...DEFAULT_CALLSIGNS],
+  knownCallsigns: [...DEFAULT_CALLSIGNS],
   liveTimer: null,
   livePredictTimer: null,
   referenceLoaded: new Set(),
@@ -30,6 +32,7 @@ const state = {
   drawMode: null,
   selectedDrawingId: null,
   rectangleStart: null,
+  rectangleEnd: null,
   rectanglePreview: null,
   addressRequest: null,
 };
@@ -80,17 +83,46 @@ function localTime(value) {
 function slug(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site'; }
 function esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-function parseLiveCallsigns() {
-  const raw = $('callsign')?.value || '';
-  const maxCount = Number(state.config?.max_live_callsigns || 8);
-  const tokens = raw.split(/[,;\s]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
-  const callsigns = [...new Set(tokens)];
-  if (!callsigns.length) throw new Error('Enter at least one APRS callsign.');
-  const invalid = callsigns.find(x=>!/^[A-Z0-9][A-Z0-9-]{0,14}$/.test(x));
-  if (invalid) throw new Error(`Invalid APRS callsign: ${invalid}`);
-  if (callsigns.length > maxCount) throw new Error(`Live tracking is limited to ${maxCount} callsigns at a time.`);
-  state.liveCallsigns = callsigns;
+function normalizeCallsign(value) {
+  const cs=String(value||'').trim().toUpperCase();
+  if(!/^[A-Z0-9][A-Z0-9-]{0,14}$/.test(cs))throw new Error(`Invalid APRS callsign: ${value}`);
+  return cs;
+}
+function selectedLiveCallsigns(){
+  const maxCount=Number(state.config?.max_live_callsigns||8);
+  const callsigns=[...new Set(state.liveCallsigns.map(normalizeCallsign))];
+  if(!callsigns.length)throw new Error('Add at least one APRS callsign.');
+  if(callsigns.length>maxCount)throw new Error(`Live tracking is limited to ${maxCount} callsigns at a time.`);
   return callsigns;
+}
+function renderCallsignControls(){
+  const picker=$('callsignPicker');if(!picker)return;
+  const current=picker.value;
+  const known=[...new Set([...DEFAULT_CALLSIGNS,...state.knownCallsigns])];
+  picker.innerHTML='';
+  for(const cs of known){const o=document.createElement('option');o.value=cs;o.textContent=cs;picker.appendChild(o);}
+  const custom=document.createElement('option');custom.value='__custom__';custom.textContent='Add another callsign…';picker.appendChild(custom);
+  if([...picker.options].some(o=>o.value===current))picker.value=current;
+  const chips=$('callsignChips');chips.innerHTML='';
+  for(const cs of state.liveCallsigns){
+    const chip=document.createElement('span');chip.className='callsign-chip';chip.innerHTML=`<b>${esc(cs)}</b>`;
+    const remove=document.createElement('button');remove.type='button';remove.setAttribute('aria-label',`Remove ${cs}`);remove.textContent='×';remove.onclick=()=>{state.liveCallsigns=state.liveCallsigns.filter(x=>x!==cs);renderCallsignControls();if(state.workspaceMode==='live')refreshLive(false);};chip.appendChild(remove);chips.appendChild(chip);
+  }
+}
+function addLiveCallsign(value){
+  const cs=normalizeCallsign(value);const maxCount=Number(state.config?.max_live_callsigns||8);
+  if(!state.liveCallsigns.includes(cs)&&state.liveCallsigns.length>=maxCount)throw new Error(`Live tracking is limited to ${maxCount} callsigns at a time.`);
+  if(!state.knownCallsigns.includes(cs))state.knownCallsigns.push(cs);
+  if(!state.liveCallsigns.includes(cs))state.liveCallsigns.push(cs);
+  renderCallsignControls();return cs;
+}
+function addCallsignFromPicker(){
+  const value=$('callsignPicker').value;
+  if(value==='__custom__'){$('customCallsignRow').classList.remove('hidden');$('customCallsign').focus();return;}
+  try{addLiveCallsign(value);if(state.workspaceMode==='live')refreshLive(false);}catch(e){toast(e.message,true);}
+}
+function addCustomCallsign(){
+  try{const cs=addLiveCallsign($('customCallsign').value);$('customCallsign').value='';$('customCallsignRow').classList.add('hidden');$('callsignPicker').value=cs;if(state.workspaceMode==='live')refreshLive(false);}catch(e){toast(e.message,true,5200);}
 }
 
 function packetAgeText(point) {
@@ -127,7 +159,7 @@ function addSource(id) {
 
 function addOperationalLayers() {
   ['prediction', 'prediction-3d', 'prediction-launch-points', 'prediction-landing-points', 'sweep', 'live-track', 'drawings', 'addresses',
-   'airspace-controlled', 'airspace-uncontrolled', 'airspace-tfr',
+   'airspace-controlled', 'airspace-class_e', 'airspace-sua', 'airspace-tfr',
    'ref-schools', 'ref-mcdonalds', 'ref-dunkin', 'ref-launch_locations', 'ref-poi'].forEach(addSource);
 
   // Airspace stays useful but visually secondary to the flight path.
@@ -139,8 +171,10 @@ function addOperationalLayers() {
     'line-color':['match',['get','LOCAL_TYPE'],'R','#d5192f','CLASS_B','#0d58bd','CLASS_C','#6f329f','CLASS_D','#0d58bd','#5f6874'],
     'line-width':['interpolate',['linear'],['zoom'],5,.7,10,1.25], 'line-opacity':.72,
   }});
-  map.addLayer({ id:'airspace-uncontrolled-fill', type:'fill', source:'airspace-uncontrolled', layout:{visibility:'none'}, paint:{'fill-color':'#6f1e51','fill-opacity':.10} });
-  map.addLayer({ id:'airspace-uncontrolled-line', type:'line', source:'airspace-uncontrolled', layout:{visibility:'none'}, paint:{'line-color':'#6f1e51','line-width':.9,'line-opacity':.55} });
+  map.addLayer({ id:'airspace-class_e-fill', type:'fill', source:'airspace-class_e', layout:{visibility:'none'}, paint:{'fill-color':'#2f7f9d','fill-opacity':.075} });
+  map.addLayer({ id:'airspace-class_e-line', type:'line', source:'airspace-class_e', layout:{visibility:'none'}, paint:{'line-color':'#28718d','line-width':.75,'line-opacity':.48,'line-dasharray':[3,2]} });
+  map.addLayer({ id:'airspace-sua-fill', type:'fill', source:'airspace-sua', layout:{visibility:'none'}, paint:{'fill-color':'#b52b4a','fill-opacity':.10} });
+  map.addLayer({ id:'airspace-sua-line', type:'line', source:'airspace-sua', layout:{visibility:'none'}, paint:{'line-color':'#a51f3d','line-width':1.05,'line-opacity':.68,'line-dasharray':[3,2]} });
   map.addLayer({ id:'airspace-tfr-fill', type:'fill', source:'airspace-tfr', layout:{visibility:'visible'}, paint:{'fill-color':'#7f11e0','fill-opacity':.16} });
   map.addLayer({ id:'airspace-tfr-line', type:'line', source:'airspace-tfr', layout:{visibility:'visible'}, paint:{'line-color':'#6f08c6','line-width':1.3,'line-opacity':.85} });
 
@@ -150,8 +184,13 @@ function addOperationalLayers() {
     'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
     'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
   }});
-  map.addLayer({ id:'airspace-uncontrolled-3d', type:'fill-extrusion', source:'airspace-uncontrolled', layout:{visibility:'none'}, paint:{
-    'fill-extrusion-color':'#6f1e51','fill-extrusion-opacity':.12,
+  map.addLayer({ id:'airspace-class_e-3d', type:'fill-extrusion', source:'airspace-class_e', layout:{visibility:'none'}, paint:{
+    'fill-extrusion-color':'#2f7f9d','fill-extrusion-opacity':.08,
+    'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
+    'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
+  }});
+  map.addLayer({ id:'airspace-sua-3d', type:'fill-extrusion', source:'airspace-sua', layout:{visibility:'none'}, paint:{
+    'fill-extrusion-color':'#b52b4a','fill-extrusion-opacity':.11,
     'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
     'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
   }});
@@ -167,6 +206,7 @@ function addOperationalLayers() {
   // Drawings.
   map.addLayer({id:'drawing-fill',type:'fill',source:'drawings',filter:['==',['geometry-type'],'Polygon'],paint:{'fill-color':['case',['boolean',['get','selected'],false],'#f2b84b','#9254d6'],'fill-opacity':['case',['boolean',['get','preview'],false],.12,.18]}});
   map.addLayer({id:'drawing-line',type:'line',source:'drawings',filter:['==',['geometry-type'],'Polygon'],paint:{'line-color':['case',['boolean',['get','selected'],false],'#b86e00','#7626c5'],'line-width':['case',['boolean',['get','selected'],false],3,2]}});
+  map.addLayer({id:'drawing-guide',type:'line',source:'drawings',filter:['==',['geometry-type'],'LineString'],paint:{'line-color':'#f2b84b','line-width':3,'line-dasharray':[2,1.5],'line-opacity':.95}});
   map.addLayer({id:'drawing-point',type:'circle',source:'drawings',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':['case',['boolean',['get','selected'],false],7,6],'circle-color':'#9254d6','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
 
   // Parameter sweep is deliberately quieter than the primary trajectories.
@@ -221,6 +261,11 @@ function registerFeaturePopups() {
       new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${title}</strong>${body}`).addTo(map);
     });
   });
+  const airspaceLayers=['airspace-controlled-fill','airspace-class_e-fill','airspace-sua-fill','airspace-tfr-fill'];
+  for(const layer of airspaceLayers){
+    map.on('click',layer,(e)=>{const f=e.features?.[0];if(!f)return;const p=f.properties||{};const title=p.bpp_airspace_layer||p.LOCAL_TYPE||p.TYPE_CODE||p.type||'Airspace';const fields=[['Name',p.NAME||p.NAME_TXT||p.description||p.TITLE],['Class',p.CLASS||p.LOCAL_TYPE],['Lower',p.LOWER_VAL?`${p.LOWER_VAL} ${p.LOWER_UOM||'ft'}`:null],['Upper',p.UPPER_VAL?`${p.UPPER_VAL} ${p.UPPER_UOM||'ft'}`:null],['NOTAM',p.notam_id||p.NOTAM_KEY]].filter(x=>x[1]!=null&&String(x[1]).trim());new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(title)}</strong>${fields.map(([k,v])=>`<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('')}`).addTo(map);});
+    map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
+  }
   map.on('click','ref-schools-layer',(e)=>{
     const f=e.features?.[0]; if(!f)return;
     const props=f.properties||{}; const coord=e.lngLat;
@@ -266,7 +311,7 @@ function layerChecked(key) { return !!checkboxForLayer(key)?.checked; }
 
 function syncAirspaceVisibility() {
   const is3d = state.dimension === '3d';
-  for (const key of ['controlled','uncontrolled']) {
+  for (const key of ['controlled','class_e','sua']) {
     const visible = layerChecked(key);
     for (const suffix of ['fill','line']) {
       const id=`airspace-${key}-${suffix}`; if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',visible&&!is3d?'visible':'none');
@@ -303,9 +348,11 @@ function setReferenceVisibility(key, visible) {
 }
 
 function deriveSiteLabel(feature, idx) {
-  const p=feature.properties||{}; const address=String(p.address||'').trim();
-  if(address){const parts=address.split(',').map(x=>x.trim()).filter(Boolean); if(parts.length>=3)return parts[1]; if(parts.length)return parts[0];}
-  return p.city || p.name || `Launch ${idx+1}`;
+  const p=feature.properties||{};
+  if(String(p.name||'').trim())return String(p.name).trim();
+  if(String(p.city||'').trim())return String(p.city).trim();
+  const address=String(p.address||'').trim();if(address)return address.split(',')[0].trim();
+  return `Launch ${idx+1}`;
 }
 
 async function loadLaunchLocations() {
@@ -319,15 +366,17 @@ async function loadLaunchLocations() {
   buildPredictSiteList();
   map.getSource('ref-launch_locations')?.setData({type:'FeatureCollection',features});
   state.referenceLoaded.add('launch_locations');
-  if(r.warning) toast(`Launch locations: ${r.warning}. Run git lfs pull from the repository root.`,true,6000);
+  if(r.warning) toast(`Launch locations: ${r.warning}`,true,6000);
+  if(features.length) console.info(`Loaded ${features.length} launch sites from`,r.sources||[]);
 }
 
 function buildPredictSiteList() {
   const root=$('predictSiteList');root.innerHTML='';
+  const clearSpringIndex=Math.max(0,state.launchLocations.findIndex(site=>/clear spring|fairview/i.test(`${site._label} ${site.properties?.address||''}`)));
   state.launchLocations.forEach((site,idx)=>{
     const label=document.createElement('label');label.className='predict-site';
     const span=document.createElement('span');span.textContent=site._label;span.title=site.properties?.address||site.properties?.name||site._label;
-    const input=document.createElement('input');input.type='checkbox';input.dataset.predictSite=site._id;input.checked=idx<5;
+    const input=document.createElement('input');input.type='checkbox';input.dataset.predictSite=site._id;input.checked=idx===clearSpringIndex;
     input.addEventListener('change',()=>{refreshPredictionSources();renderSummary();refreshMarkers();});
     label.append(span,input);root.appendChild(label);
   });
@@ -335,11 +384,17 @@ function buildPredictSiteList() {
   refreshSweepSites();
 }
 
+function buildCustomPredictSiteList(){
+  const root=$('customPredictSiteList');if(!root)return;root.innerHTML='';
+  const points=state.drawings.filter(d=>d.properties?.kind==='point');
+  for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
+  if(!points.length)root.innerHTML='<p class="loading-text">Draw a point to add a custom launch site.</p>';
+}
 function selectedPresetSites() {
   const checked=new Set(qsa('input[data-predict-site]:checked').map(x=>x.dataset.predictSite));
   return state.launchLocations.filter(s=>checked.has(s._id));
 }
-function isSiteVisible(id){const input=qs(`input[data-predict-site="${CSS.escape(id)}"]`);if(input)return input.checked;if(id.startsWith('custom-'))return $('customPredictEnabled').checked;return true;}
+function isSiteVisible(id){const input=qs(`input[data-predict-site="${CSS.escape(id)}"]`);if(input)return input.checked;if(id.startsWith('custom-')){const c=qs(`input[data-custom-predict-site="${CSS.escape(id)}"]`);return $('customPredictEnabled').checked&&(c?c.checked:true);}return true;}
 
 function setPredictionType(type) {
   state.predictType = type;
@@ -382,7 +437,8 @@ function predictionBody(target) {
 
 function customPointTargets() {
   if(!$('customPredictEnabled').checked)return[];
-  return state.drawings.filter(d=>d.properties?.kind==='point').map(d=>({
+  const enabled=new Set(qsa('input[data-custom-predict-site]:checked').map(x=>x.dataset.customPredictSite));
+  return state.drawings.filter(d=>d.properties?.kind==='point'&&enabled.has(`custom-${d.properties.drawing_id}`)).map(d=>({
     type:'Feature',geometry:d.geometry,properties:d.properties,_id:`custom-${d.properties.drawing_id}`,_label:d.properties.name||'Custom Launch Location'
   }));
 }
@@ -487,20 +543,33 @@ function downloadBlob(content,type,name){const blob=content instanceof Blob?cont
 
 // Drawing and geofence workflow ------------------------------------------------
 function drawingFeatureCollection(includePreview=true){const features=state.drawings.map(d=>({...d,properties:{...(d.properties||{}),selected:d.properties?.drawing_id===state.selectedDrawingId}}));if(includePreview&&state.rectanglePreview)features.push(state.rectanglePreview);return{type:'FeatureCollection',features};}
-function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureCollection());refreshSweepSites();}
+function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureCollection());buildCustomPredictSiteList();refreshSweepSites();}
 function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:`Geofence ${n}`;}
-function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point')}});state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();toast('Custom launch point added. It will run when Custom Launch Location is checked.');}
-function rectangleFeature(a,b,preview=false){const west=Math.min(a.lng,b.lng),east=Math.max(a.lng,b.lng),south=Math.min(a.lat,b.lat),north=Math.max(a.lat,b.lat);return{type:'Feature',geometry:{type:'Polygon',coordinates:[[[west,south],[east,south],[east,north],[west,north],[west,south]]]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview}};}
-function setDrawMode(mode){state.drawMode=mode;state.rectangleStart=null;state.rectanglePreview=null;qsa('[data-draw-mode]').forEach(b=>b.classList.toggle('active',b.dataset.drawMode===mode));refreshDrawings();if(mode==='point')toast('Draw point: click the map to add a custom launch location.');if(mode==='rectangle')toast('Draw rectangle: click two opposite corners of the geofence.');if(mode==='select')toast('Select drawing: click a point or rectangle.');}
-function handleMapDrawClick(e){if(!state.drawMode)return false;if(state.drawMode==='point'){addPointDrawing(e.lngLat.lng,e.lngLat.lat);return true;}if(state.drawMode==='rectangle'){if(!state.rectangleStart){state.rectangleStart=e.lngLat;toast('Now click the opposite corner.');}else{const f=rectangleFeature(state.rectangleStart,e.lngLat,false);state.drawings.push(f);state.selectedDrawingId=f.properties.drawing_id;state.rectangleStart=null;state.rectanglePreview=null;refreshDrawings();showSelectedDrawing();toast('Geofence rectangle created.');}return true;}if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;}return true;}return false;}
-function handleDrawMouseMove(e){if(state.drawMode==='rectangle'&&state.rectangleStart){state.rectanglePreview=rectangleFeature(state.rectangleStart,e.lngLat,true);refreshDrawings();}}
+function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
+function rectangleBaselinePreview(a,b){return{type:'Feature',geometry:{type:'LineString',coordinates:[[a.lng,a.lat],[b.lng,b.lat]]},properties:{kind:'rectangle-guide',preview:true}};}
+function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2}};}
+function cancelRectangleDraft(message='Rectangle drawing cancelled.'){state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();if(message)toast(message);}
+function setDrawMode(mode){state.drawMode=mode;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;qsa('[data-draw-mode]').forEach(b=>b.classList.toggle('active',b.dataset.drawMode===mode));refreshDrawings();if(mode==='point')toast('Draw point: click once to create a working custom launch site.');if(mode==='rectangle')toast('Oriented rectangle: click the START of the first edge, then its END, then click to set the width.');if(mode==='select')toast('Select drawing: click a custom launch point or rectangle.');}
+function handleMapDrawClick(e){
+  if(!state.drawMode)return false;
+  if(state.drawMode==='point'){addPointDrawing(e.lngLat.lng,e.lngLat.lat);return true;}
+  if(state.drawMode==='rectangle'){
+    if(!state.rectangleStart){state.rectangleStart={lng:e.lngLat.lng,lat:e.lngLat.lat};state.rectanglePreview=null;toast('Baseline started. Move in any direction and click to set its direction and length.');}
+    else if(!state.rectangleEnd){const next={lng:e.lngLat.lng,lat:e.lngLat.lat};if(haversineMeters(state.rectangleStart,next)<1){toast('Make the baseline at least 1 meter long.',true);return true;}state.rectangleEnd=next;state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);toast('Baseline locked. Move to either side and click to set the rectangle width.');}
+    else{try{const f=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},false);state.drawings.push(f);state.selectedDrawingId=f.properties.drawing_id;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast(`Oriented geofence created: ${fmt(f.properties.baseline_length_m)} m × ${fmt(f.properties.width_m)} m.`);}catch(err){toast(err.message,true);}}
+    refreshDrawings();return true;
+  }
+  if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;}return true;}return false;
+}
+function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}refreshDrawings();}
 function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_id===state.selectedDrawingId);}
-function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})`;}const ring=d.geometry.coordinates?.[0]||[];return 'Geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n');}
-function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('deleteDrawing').disabled=false;}
+function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
+function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';$('deleteDrawing').disabled=false;}
+function saveDrawingName(){const d=selectedDrawing();if(!d)return;const name=$('drawingName').value.trim();if(!name){toast('Enter a name first.',true);return;}d.properties.name=name;refreshDrawings();showSelectedDrawing();toast('Drawing name saved.');}
 function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
-function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
+function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
 function downloadDrawings(){if(!state.drawings.length){toast('No drawings to download.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:state.drawings},null,2),'application/geo+json','BPP_map_drawings.geojson');}
-function downloadGeofence(){const rectangles=state.drawings.filter(d=>d.properties?.kind==='rectangle');if(!rectangles.length){toast('Draw a rectangle first.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:rectangles},null,2),'application/geo+json','BPP_geofence.geojson');}
+function downloadGeofence(){const rectangles=state.drawings.filter(d=>d.properties?.kind==='rectangle');if(!rectangles.length){toast('Draw an oriented rectangle first.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:rectangles},null,2),'application/geo+json','BPP_geofence.geojson');}
 async function copyDrawing(){const d=selectedDrawing();if(!d)return;await navigator.clipboard.writeText(drawingCoordinateText(d));toast('Drawing coordinates copied.');}
 
 // National Address Database --------------------------------------------------
@@ -517,7 +586,7 @@ function scheduleLive(){clearInterval(state.liveTimer);clearInterval(state.liveP
 async function refreshLive(center=false){
   if(!state.config?.aprs_configured){$('liveAge').textContent='API key needed';return;}
   let callsigns;
-  try{callsigns=parseLiveCallsigns();}catch(e){toast(e.message,true,5200);$('liveAge').textContent='Check callsigns';return;}
+  try{callsigns=selectedLiveCallsigns();}catch(e){toast(e.message,true,5200);$('liveAge').textContent='Check callsigns';return;}
   $('liveCallsign').textContent=callsigns.length===1?callsigns[0]:`${callsigns.length} callsigns`;
   try{
     const params=new URLSearchParams({callsigns:callsigns.join(',')});
@@ -571,7 +640,7 @@ function renderLiveStation(p,phase,history,center,updateTrack=true){
 
 async function runLivePrediction(silent=false){
   if(!state.config?.aprs_configured){if(!silent)toast('Add APRSFI_API_KEY to predicts/modern/.env to use live tracking.',true,5500);return;}
-  let callsigns;try{callsigns=parseLiveCallsigns();}catch(e){if(!silent)toast(e.message,true,5200);return;}
+  let callsigns;try{callsigns=selectedLiveCallsigns();}catch(e){if(!silent)toast(e.message,true,5200);return;}
   if(!silent)setRunButton('running',`0/${callsigns.length}`);
   const body={callsigns,mode:state.predictType,phase:$('livePhase').value,ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value)};
   try{
@@ -622,15 +691,16 @@ function toggleTheme(){applyTheme(state.theme==='dark'?'light':'dark');}
 
 function wireControls(){
   $('themeToggle')?.addEventListener('click',toggleTheme);
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
   ['burstAltitude','floatAltitude'].forEach(id=>$(id).addEventListener('input',updateAltitudeLabels));
-  $('runPredicts').addEventListener('click',runPredicts);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('callsign').addEventListener('change',()=>refreshLive(true));$('callsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();refreshLive(true);}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
-  qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','uncontrolled','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
+  qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
   $('collapseLayers').addEventListener('click',()=>{$('layerPanel').classList.add('collapsed');$('reopenLayers').classList.remove('hidden');});$('reopenLayers').addEventListener('click',()=>{$('layerPanel').classList.remove('collapsed');$('reopenLayers').classList.add('hidden');});
-  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);
+  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);
   $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>$('aboutDialog').showModal());
   $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('sweepDialog').showModal();});$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
   $('closeSummary').addEventListener('click',()=>$('predictionSummary').classList.add('hidden'));$('centerLanding').addEventListener('click',centerLanding);$('copyLanding').addEventListener('click',copyLanding);
@@ -642,7 +712,7 @@ async function init() {
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
   setDefaultDate();wireControls();setPredictionType('burst');setWorkspaceMode('predict');
-  try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length)$('callsign').value=state.config.default_callsigns.join(', ');if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);}
+  try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);renderCallsignControls();}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
   map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('controlled'),loadAirspace('tfr')]);syncAirspaceVisibility();await loadLaunchLocations();});

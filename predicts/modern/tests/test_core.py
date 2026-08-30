@@ -198,3 +198,108 @@ def test_live_batch_supports_arbitrary_callsigns_and_partial_errors(monkeypatch)
     assert result["requested_callsigns"] == ["TEST1-1", "TEST2-2"]
     assert result["results"]["TEST1-1"]["live"]["used_altitude_m"] == 1000.0
     assert "TEST2-2" in result["errors"]
+
+
+def test_bundled_launch_sites_include_operational_fallbacks():
+    import app as appmod
+    data, warning = appmod.load_geojson(appmod.BUNDLED_LAUNCH_FILE)
+    out = appmod.normalize_launch_locations(data)
+    names = {f["properties"]["name"] for f in out["features"]}
+    assert len(out["features"]) >= 5
+    assert "Claud E. Kitchens Outdoor School at Fairview" in names
+    assert "Allegany College of Maryland" in names
+    assert warning is None
+
+
+def test_operational_launch_locations_survive_remote_failure(monkeypatch, tmp_path):
+    import asyncio
+    import app as appmod
+
+    async def fail_remote(*args, **kwargs):
+        raise appmod.ExternalServiceError("offline")
+
+    monkeypatch.setattr(appmod, "fetch_json_url", fail_remote)
+    monkeypatch.setattr(appmod, "LEGACY_DATA", tmp_path / "missing")
+    monkeypatch.setattr(appmod, "LAUNCH_CACHE_FILE", tmp_path / "launch_cache.geojson")
+    data, warnings, sources = asyncio.run(appmod.operational_launch_locations())
+    assert len(data["features"]) >= 5
+    assert "bundled" in sources
+    assert any("online" in w.lower() or "not found" in w.lower() for w in warnings)
+
+
+def test_controlled_airspace_combines_b_c_d(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    async def fake_fetch(where, layer_name):
+        return {"type": "FeatureCollection", "features": [{"type":"Feature","geometry":{"type":"Polygon","coordinates":[]},"properties":{"bpp_airspace_layer":layer_name}}]}
+
+    monkeypatch.setattr(appmod, "fetch_arcgis_airspace", fake_fetch)
+    data = asyncio.run(appmod.fetch_controlled_airspace())
+    assert len(data["features"]) == 3
+    assert {f["properties"]["bpp_airspace_layer"] for f in data["features"]} == {"Class B", "Class C", "Class D"}
+
+
+def test_airspace_uses_stale_cache_when_faa_unavailable(monkeypatch, tmp_path):
+    import asyncio
+    import json
+    import app as appmod
+
+    cache_dir = tmp_path / "airspace"
+    cache_dir.mkdir()
+    cached = {"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Polygon","coordinates":[]},"properties":{"LOCAL_TYPE":"CLASS_B"}}]}
+    (cache_dir / "controlled.geojson").write_text(json.dumps(cached), encoding="utf-8")
+
+    async def fail():
+        raise appmod.ExternalServiceError("FAA offline")
+
+    monkeypatch.setattr(appmod, "AIRSPACE_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(appmod, "fetch_controlled_airspace", fail)
+    data, warning, source = asyncio.run(appmod.operational_airspace("controlled", force=True))
+    assert len(data["features"]) == 1
+    assert "cache" in source.lower()
+    assert "refresh failed" in warning.lower()
+
+
+def test_health_and_config_report_final_build():
+    import asyncio
+    import app as appmod
+    h = asyncio.run(appmod.health())
+    c = asyncio.run(appmod.config())
+    assert h["version"] == "2.4.0"
+    assert h["airspace"] == "FAA live services with disk cache"
+    assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
+    assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
+
+
+def test_ui_contract_has_required_controls_and_wiring():
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    required_ids = [
+        "runPredicts", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
+        "saveCustomCallsign", "callsignChips", "predictSiteList", "customPredictSiteList",
+        "drawingToggle", "deleteDrawing", "deleteAllDrawings", "downloadDrawings", "saveDrawingName",
+        "zoomPredicts", "downloadKml", "downloadGeofence", "openSweep", "queryAddresses", "aboutMap",
+    ]
+    for item in required_ids:
+        assert f'id="{item}"' in html
+        assert f"$('{item}')" in js or item in js
+    for layer in ["controlled", "class_e", "sua", "tfr"]:
+        assert f'data-layer="{layer}"' in html
+    assert "orientedRectangle" in js
+    assert "addPointDrawing" in js
+    assert "predict_enabled:true" in js
+
+
+def test_every_identified_ui_button_has_javascript_wiring():
+    import re
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    button_ids = re.findall(r'<button[^>]+id="([^"]+)"', html)
+    assert len(button_ids) >= 20
+    for button_id in button_ids:
+        assert button_id in js, f"Button {button_id} has no JS reference"

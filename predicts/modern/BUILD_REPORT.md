@@ -1,42 +1,28 @@
-# Build report — BPP Predicts v2.3.0
+# Build report — BPP Predicts v2.4.0 final operational package
 
-## Changes in this build
+## Functional changes
 
-- Preserved the v2.2 UI and operational workflow; no major visual redesign.
-- Replaced the fixed live callsign selector with a typed multi-callsign field.
-- Added callsign normalization/deduplication and a configurable maximum of 8 live stations.
-- Added query-scoped APRS caching so arbitrary callsign groups do not reuse unrelated cached station data.
-- Added multi-callsign APRS status/history rendering.
-- Added `/api/live/predict-batch` so all entered callsigns are fetched from APRS once and predicted together.
-- Live predictions require APRS altitude and use latitude + longitude + altitude as the Tawhiri launch state.
-- APRS packet time is used as the live prediction start time and returned metadata records the exact 3D position used.
-- Partial batch failures are supported: a station with missing data/altitude does not prevent other callsigns from predicting.
-- Bumped the modern-only launcher/build verification to v2.3.0.
+- Restored preset launch locations using local data, GitHub LFS-media retrieval/cache, and an offline fallback.
+- Replaced fragile legacy airspace dependence with current FAA Class B/C/D/E, Special Use Airspace, and TFR services plus disk caching and stale-cache fallback.
+- Made custom map points first-class launch sites with individual enable/disable controls and rename support.
+- Reworked rectangle drawing into an arbitrary-orientation three-click workflow: baseline start, baseline end, width.
+- Replaced free-text primary callsign entry with a dropdown/chip workflow plus an explicit **Add another callsign…** path.
+- Preserved multi-callsign APRS fetching/prediction and mandatory live altitude seeding.
+- Kept the v2.2/v2.3 page layout, dark mode, landing-target fix, strong trajectory rendering, responsive controls, prediction summary, Burst, stitched Float, KML/GeoJSON export, reference overlays, parameter sweep, and address lookup.
+- Package contains only the modern runnable application; no legacy predictor is included.
 
-## Preserved functionality
+## Automated validation completed
 
-- v2.2 modern light/dark UI
-- Exact georeferenced landing targets
-- Burst and stitched Float
-- Multi-site preset predictions and custom launch drawings
-- 2D/3D map modes, airspace/reference layers, geofences, KML/GeoJSON export
-- Parameter sweep and National Address Database query
-- Auto APRS refresh and auto live re-predict
+- Python syntax/compile: pass
+- JavaScript syntax (`node --check`): pass
+- Oriented-rectangle Node geometry tests: pass
+- Python tests: **16 passed**
+- UI contract test checks all identified button IDs are referenced by the JavaScript controller.
+- Mock tests verify live APRS latitude + longitude + altitude + packet time seed Tawhiri.
+- Mock tests verify partial multi-callsign failures do not block valid callsigns.
+- Mock tests verify launch sites retain an offline fallback when remote/local LFS data is unavailable.
+- Mock tests verify controlled FAA airspace combines Class B/C/D and falls back to cached data on upstream failure.
 
-## Validation completed
+## Real service requirement
 
-- `python -m py_compile app.py`: pass
-- `python -m py_compile run_latest.py`: pass
-- `node --check static/app.js`: pass
-- Python unit tests: **9 passed**
-- FastAPI health/config/static-header smoke check: pass
-- `/api/health` reports `2.3.0`
-- Mock live prediction confirms reported APRS latitude, longitude, altitude, and packet time are used as the prediction seed
-- Mock multi-callsign batch confirms arbitrary callsigns and partial station failures are handled independently
-
-## Real-machine checks recommended
-
-- Add the team's `APRSFI_API_KEY` to `.env`.
-- Test with one callsign and with KC3SKW-8, KC3SKW-9, KC3SKW-10 together.
-- Confirm each live status row shows the same altitude as aprs.fi.
-- Confirm prediction summary rows show the live start altitude and all successful trajectories are visible simultaneously.
+Actual APRS.fi live calls require the user's APRS.fi API key in `.env`. Actual Tawhiri, FAA, map tile, GitHub-media refresh, and other public-data calls require internet access. The code paths and failure/cache behavior are tested locally with mocks because this build environment does not have general outbound network access.

@@ -1,98 +1,58 @@
-# BPP Predicts — Current Modern Build v2.3.0
+# BPP Predicts — Final Operational Build v2.4.0
 
-This folder is the current local BPP Predicts application. v2.3.0 keeps the v2.2 visual design and operational workflow, while making live APRS prediction fully multi-callsign and explicitly altitude-aware.
+This is the modern-only local BPP prediction application. It preserves the v2.2/v2.3 interface while closing the operational gaps around launch sites, airspace, drawing tools, and live APRS tracking.
 
-## What changed in v2.3.0
+## Highlights
 
-- **Typed live callsigns:** the Live Track control is now a text field. Enter one or more APRS callsigns separated by commas, spaces, semicolons, or new lines.
-- The default field is pre-filled with `KC3SKW-8, KC3SKW-9, KC3SKW-10`, but live tracking is no longer hard-coded to only those three stations.
-- **Multi-callsign live predicts:** one Run Live Predict action can create predictions for every callsign entered. Successful stations are plotted together and listed separately in the prediction summary.
-- **3D APRS seed position:** every live prediction starts from the latest APRS latitude, longitude, **and altitude**. If the latest packet has no altitude, the app refuses to run a misleading ground-level prediction for that callsign and reports the issue.
-- The APRS packet timestamp is used as the prediction start time, and the returned live metadata records the exact position/altitude used.
-- The live status card now shows all requested callsigns with packet age, phase, and altitude while preserving the existing compact layout.
-- The previous v2.2 modern UI, dark mode, landing-marker alignment fix, responsive layout, airspace rendering, drawing tools, parameter sweep, KML export, Burst mode, and stitched Float mode are retained.
-- `run_latest.py` now verifies **v2.3.0** before opening the browser and continues to stop older BPP Predicts servers so only the newest modern build runs.
+- **Preset launch sites restored:** local resolved BPP GeoJSON is preferred. If it is not present, the backend retrieves the public BPP launch-location file through GitHub's LFS media service, caches it, and merges an offline fallback so the UI never collapses to a single site.
+- **Current airspace:** Class B/C/D, Class E, Special Use Airspace, and TFR data are proxied from FAA services and cached to disk. A stale cache is used if the FAA feed is temporarily unavailable.
+- **Custom launch sites work end-to-end:** draw a point and it is immediately listed as an enabled custom prediction site. Custom sites can be individually selected, renamed, predicted, included in parameter sweeps, exported, and deleted.
+- **Oriented rectangles:** rectangle drawing is a three-click workflow: baseline start → baseline end (direction + length) → width. The result is a rotated GeoJSON polygon with length, width, and area metadata. `Esc` cancels a draft.
+- **Callsign dropdown:** defaults are `KC3SKW-8`, `KC3SKW-9`, `KC3SKW-10`. Select from the dropdown, remove chips, or choose **Add another callsign…** for any valid APRS station. Up to 8 can be active.
+- **Altitude-aware live predicts:** every live prediction starts from the latest APRS latitude, longitude, altitude, and APRS packet timestamp. A station with no altitude is rejected instead of silently assuming 0 m.
+- **Modern-only launcher:** `run_latest.py` verifies `2.4.0` before opening the browser and stops older BPP Predicts servers it finds on the normal local ports.
 
-## Windows — recommended
+## Run on Windows
 
-From this folder:
+From the package root, double-click `START_BPP_PREDICTS.bat`, or from this folder run:
 
 ```powershell
 .\run_windows.bat
 ```
 
-That is the normal command for every run. On the first run it automatically creates `.venv` and installs the Python requirements.
+The first run creates `.venv` and installs the Python requirements automatically.
 
-If this package is extracted with its top-level launcher, you can instead double-click:
+## APRS setup
 
-```text
-START_BPP_PREDICTS.bat
-```
-
-### Verify that the newest build is running
-
-Open:
-
-```text
-http://127.0.0.1:8000/api/health
-```
-
-The response should contain:
-
-```json
-"version": "2.3.0"
-```
-
-## APRS live tracking
-
-Edit `.env` and set:
+Copy `.env.example` to `.env` if setup has not already done so, then set:
 
 ```text
 APRSFI_API_KEY=your_key_here
 ```
 
-Then choose **Live Track**. Type callsigns such as:
+Restart the app. In **Live Track**, use the callsign dropdown to add the stations you want, then **Refresh APRS** or **Run Live Predict**.
 
-```text
-KC3SKW-8, KC3SKW-9, KC3SKW-10
+## Data behavior
+
+The application does not run or require the old BalloonPredictionMap frontend. Historical/reference GeoJSON can be read from a resolved sibling checkout when one exists, but missing LFS data is transparently resolved from public repository media or an internal fallback/cache. FAA airspace is refreshed independently from authoritative services.
+
+## Verify the current build
+
+Open `http://127.0.0.1:8000/api/health`. It should report:
+
+```json
+"version": "2.4.0"
 ```
 
-or any other valid APRS callsign(s) you need to follow. Up to 8 callsigns can be tracked/predicted in one request. The backend sends the callsigns to aprs.fi, records each latest packet, and seeds Tawhiri from that packet's latitude, longitude, altitude, and timestamp.
+## Validation
 
-A live prediction is intentionally not run when APRS.fi returns a location without altitude. This prevents the predictor from silently treating a balloon already in flight as if it were at ground level.
-
-## Existing BPP data
-
-For the full preset launch-site and reference-layer set, keep this modern folder at:
-
-```text
-Ryeed-BPP-Tracking/predicts/modern
-```
-
-and keep the existing sibling data directory at:
-
-```text
-Ryeed-BPP-Tracking/predicts/BalloonPredictionMap/BalloonBaseMap/assets/data/
-```
-
-The modern app reads GeoJSON data from that location, but the legacy BalloonPredictionMap application is never launched. From a fresh clone, run `git lfs pull` once from the repository root.
-
-## Prediction behavior
-
-### Burst
-
-Uses SondeHub-hosted Tawhiri's standard profile.
-
-### Float
-
-Uses the BPP stitched-float approach: ascent to float altitude, a second slow-ascent segment treated as float, then normal descent.
-
-## Tests
-
-From this directory:
+Run:
 
 ```bash
 PYTHONPATH=. pytest -q
+node tests/test_geometry.mjs
+node --check static/app.js
+python -m compileall -q .
 ```
 
-The tests cover coordinate conversion, landing summarization, launch-site normalization, stitched Float behavior, callsign parsing, and altitude-aware live prediction seeding.
+The test suite covers prediction math, stitched Float behavior, live APRS 3D seeding, multi-callsign partial failures, launch-site fallback/merge behavior, FAA airspace composition/cache fallback, required UI controls, all identified UI button wiring, and arbitrary-orientation rectangle geometry.

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.3.0" rel="stylesheet" />
+  <link href="static/styles.css?v=2.4.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -27,7 +27,7 @@
       <a href="https://bpp.umd.edu/archives/" target="_blank" rel="noopener">archives</a>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.3.0</span>
+      <span class="build-badge" id="buildBadge">v2.4.0</span>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -55,9 +55,15 @@
     <label class="control-field float-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
     <label class="control-field"><span>S.L. Descent Rate (m/s)</span><input id="descentRate" type="number" value="9" step="0.5" min="0.1"></label>
 
-    <label class="control-field live-only hidden live-callsign-field"><span>Callsign(s)</span>
-      <div class="input-with-note live-callsign-input"><input id="callsign" type="text" value="KC3SKW-8, KC3SKW-9, KC3SKW-10" spellcheck="false" autocomplete="off" aria-label="APRS callsigns"><small>Comma/space separated · uses APRS position + altitude</small></div>
-    </label>
+    <div class="control-field live-only hidden live-callsign-field"><span>Tracked Callsigns</span>
+      <div class="callsign-picker-row">
+        <select id="callsignPicker" aria-label="Choose APRS callsign"><option value="KC3SKW-8">KC3SKW-8</option><option value="KC3SKW-9">KC3SKW-9</option><option value="KC3SKW-10">KC3SKW-10</option><option value="__custom__">Add another callsign…</option></select>
+        <button id="addCallsignButton" class="callsign-add" type="button">Add</button>
+      </div>
+      <div id="customCallsignRow" class="callsign-custom-row hidden"><input id="customCallsign" type="text" placeholder="e.g. W3ABC-11" maxlength="15" spellcheck="false"><button id="saveCustomCallsign" type="button">Add callsign</button></div>
+      <div id="callsignChips" class="callsign-chips" aria-label="Selected live callsigns"></div>
+      <small class="callsign-help">Each live predict uses the latest APRS latitude, longitude, altitude, and packet time.</small>
+    </div>
     <label class="control-field live-only hidden"><span>Flight Phase</span>
       <select id="livePhase"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select>
     </label>
@@ -73,7 +79,7 @@
       <button class="drawing-toggle" id="drawingToggle" type="button"><span class="tool-icon">✎</span> Open/Close Drawing Tools</button>
       <div class="drawing-menu hidden" id="drawingMenu">
         <button data-draw-mode="point" type="button"><span class="draw-symbol point"></span>Draw point</button>
-        <button data-draw-mode="rectangle" type="button"><span class="draw-symbol rectangle"></span>Draw rectangle</button>
+        <button data-draw-mode="rectangle" type="button"><span class="draw-symbol rectangle"></span>Draw oriented rectangle</button>
         <button data-draw-mode="select" type="button"><span class="tool-icon">↖</span>Select drawing</button>
         <button id="deleteDrawing" type="button" disabled><span class="tool-icon">⌫</span>Delete selection</button>
         <button id="deleteAllDrawings" type="button"><span class="tool-icon">🗑</span>Delete all drawings</button>
@@ -97,8 +103,9 @@
       </section>
       <section class="layer-group">
         <h3>Reference</h3>
-        <label><span>Controlled Airspace</span><input type="checkbox" data-layer="controlled" checked></label>
-        <label><span>Uncontrolled Airspace</span><input type="checkbox" data-layer="uncontrolled"></label>
+        <label><span>Controlled Airspace (B/C/D)</span><input type="checkbox" data-layer="controlled" checked></label>
+        <label><span>Class E Airspace</span><input type="checkbox" data-layer="class_e"></label>
+        <label><span>Special Use Airspace</span><input type="checkbox" data-layer="sua"></label>
         <label><span>TFR Airspace</span><input type="checkbox" data-layer="tfr" checked></label>
         <label><span>National Address DB</span><input type="checkbox" data-layer="addresses"></label>
         <label><span>Public School Locations</span><input type="checkbox" data-layer="schools"></label>
@@ -110,7 +117,9 @@
       <section class="layer-group predicts-group">
         <h3>Predicts</h3>
         <div id="predictSiteList"><p class="loading-text">Loading launch sites…</p></div>
-        <label class="custom-predict-label"><span>Custom Launch Location</span><input id="customPredictEnabled" type="checkbox" checked></label>
+        <div class="custom-sites-heading">Custom launch sites</div>
+        <div id="customPredictSiteList"><p class="loading-text">Draw a point to add a custom launch site.</p></div>
+        <label class="custom-predict-label"><span>Enable custom launch sites</span><input id="customPredictEnabled" type="checkbox" checked></label>
       </section>
     </aside>
     <button class="layers-reopen hidden" id="reopenLayers" type="button">Layers</button>
@@ -118,6 +127,7 @@
     <section class="drawing-info hidden" id="drawingInfo">
       <div><strong id="drawingInfoTitle">Selected drawing</strong><button id="closeDrawingInfo" type="button">×</button></div>
       <pre id="drawingCoordinates"></pre>
+      <div class="drawing-name-row"><input id="drawingName" type="text" placeholder="Drawing name"><button id="saveDrawingName" type="button">Save name</button></div>
       <button id="copyDrawingCoordinates" type="button">Copy coordinates</button>
     </section>
 
@@ -186,12 +196,12 @@
 
   <dialog id="aboutDialog" class="classic-dialog">
     <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is the current BPP Predicts interface (v2.3.0), with updated rendering, exact georeferenced landing targets, light/dark themes, responsive behavior, and multi-callsign live APRS prediction.</p>
-    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> aprs.fi for typed APRS callsigns (defaults: KC3SKW-8, KC3SKW-9, KC3SKW-10). Live predictions start from each station's latest reported latitude, longitude, and altitude.</p>
-    <p>Airspace, school, restaurant, launch-location, and POI overlays are loaded from the existing BPP repository data. Run <code>git lfs pull</code> from the repository root if a layer is unavailable locally.</p>
+    <p>This is BPP Predicts v2.4.0: the modern-only operational build with exact landing targets, light/dark themes, responsive layout, restored launch sites, live FAA airspace, custom launch points, oriented geofences, and multi-callsign APRS prediction.</p>
+    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> select one or more APRS callsigns. Each live prediction starts from the station's latest reported latitude, longitude, altitude, and packet timestamp.</p>
+    <p><strong>Launch sites:</strong> loaded from resolved local BPP data when available, otherwise from the public repository and an offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
   </dialog>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.3.0"></script>
+  <script type="module" src="static/app.js?v=2.4.0"></script>
 </body>
 </html>

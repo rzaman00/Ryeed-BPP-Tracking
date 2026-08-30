@@ -197,7 +197,7 @@ html[data-theme="dark"] .maplibregl-ctrl-attrib a{color:#8fc1ff}
 
 
 /* --------------------------------------------------------------------------
-   v2.3 multi-callsign live APRS controls
+   v2.4 multi-callsign live APRS controls
    -------------------------------------------------------------------------- */
 .live-callsign-field{min-width:270px}
 .live-callsign-input{flex-direction:column;align-items:stretch;gap:2px}
@@ -212,3 +212,26 @@ html[data-theme="dark"] .maplibregl-ctrl-attrib a{color:#8fc1ff}
 .live-station-row.missing{cursor:default;opacity:.68}
 .live-station-row.missing:hover{background:var(--surface-2);border-color:var(--ui-border)}
 @media(max-width:600px){.live-callsign-field{min-width:250px}.live-callsign-field .live-callsign-input input{min-width:228px}.live-status{width:270px;max-width:calc(100% - 8px)}}
+
+/* --------------------------------------------------------------------------
+   v2.4 operational controls: callsign selector, custom launch sites, drawing
+   -------------------------------------------------------------------------- */
+.live-callsign-field{min-width:310px;gap:3px}
+.callsign-picker-row{display:grid;grid-template-columns:minmax(126px,1fr) auto;gap:5px;align-items:center}
+.live-callsign-field select,.callsign-custom-row input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.callsign-add,.callsign-custom-row button{height:30px;border:1px solid var(--ui-border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);font-size:10px;font-weight:800;padding:0 9px}
+.callsign-add:hover,.callsign-custom-row button:hover{background:var(--hover);border-color:#5e97d6}
+.callsign-custom-row{display:grid;grid-template-columns:minmax(120px,1fr) auto;gap:5px;margin-top:3px}
+.callsign-custom-row input{height:29px;border:1px solid var(--ui-border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:3px 7px;font-size:11px}
+.callsign-chips{display:flex;gap:4px;flex-wrap:wrap;max-width:295px;margin-top:2px}
+.callsign-chip{display:inline-flex;align-items:center;gap:3px;border:1px solid color-mix(in srgb,var(--ui-border) 65%,#3688e8 35%);background:var(--active);border-radius:999px;padding:2px 4px 2px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9px;line-height:1}
+.callsign-chip button{border:0;background:transparent;color:var(--text-muted);width:17px;height:17px;padding:0;border-radius:50%;font-size:14px;line-height:15px}
+.callsign-chip button:hover{background:color-mix(in srgb,var(--surface) 65%,#e2262f 35%);color:var(--text)}
+.callsign-help{font-size:8.5px;color:var(--text-muted);line-height:1.15;max-width:295px;white-space:normal}
+.custom-sites-heading{font-size:9px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;color:var(--text-muted);margin:8px 0 3px;padding-top:6px;border-top:1px solid var(--ui-border)}
+.custom-predict-site span{font-weight:650;color:var(--text)}
+.drawing-name-row{display:grid;grid-template-columns:1fr auto;gap:5px;margin:6px 0}
+.drawing-name-row input{min-width:0;height:29px;border:1px solid var(--ui-border-strong);border-radius:7px;background:var(--surface-2);color:var(--text);padding:4px 7px;font-size:11px}
+.drawing-name-row button{white-space:nowrap}
+#drawing-guide{pointer-events:none}
+@media(max-width:600px){.live-callsign-field{min-width:280px}.callsign-chips,.callsign-help{max-width:265px}}
