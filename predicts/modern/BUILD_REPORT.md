@@ -1,17 +1,18 @@
-# Build report — BPP Predicts v2.9.0
+# Build report — BPP Predicts v3.2.0
 
-## Added/fixed in v2.9
-- Strict preset de-duplication: exactly one displayed preset per city; bundled canonical coordinates win for core BPP sites.
-- 3-D airspace scoring explicitly compares balloon altitude at each polygon crossing with the FAA floor/ceiling; overflight above the ceiling is not a conflict.
-- Removed University of Maryland/distance ranking entirely.
-- Gold is reserved exclusively for a viable Clear Spring or Hancock result (Clear Spring has first preference when both are viable).
-- All other viable sites are green. Any non-viable site, including Clear Spring/Hancock, is red. Blue status is removed.
-- Current-sites/all-sites optimal buttons, current-rate-only speed mode, optional ±0.5/±1.0 m/s sweep, short result cache, full-row status colors, separate legend, restored bottom toolbar, and clickable parameter sweeps are preserved.
+This build is a UI-stability release based on v3.0.1. It intentionally does not redesign the operational predictor.
 
-## Preserved from prior builds
-- Standalone Predicts + Inflation Calculator tabs.
-- MATLAB-equivalent inflation model with automatic/manual burst altitude.
-- Burst/float predicts, custom launch points, oriented geofences, FAA layers/cache, multi-callsign APRS live predicts with altitude, KML/GeoJSON exports, 2D/3D, dark mode, and prediction summaries.
+## Fixes
+- Replaced native `<dialog>` elements with explicit contained modal panels for Launch Theme and Parameter Sweep.
+- Added a dedicated Info tab and routed About Map there.
+- Removed the History control-strip badge.
+- Kept Launch Weather as a map mode with its own compact legend/card; it does not invoke any modal.
+- Added robust close behavior (close button, backdrop, Escape) and guarantees only one modal can be visible.
+- Updated dependency setup to rebuild a corrupted virtual environment/pip automatically.
 
-## Validation
-See `tests/` for regression coverage of launch-site de-duplication, altitude-aware airspace overflight, preferred-only gold assignment, no-distance ranking, current/all optimal searches, sweep modes, live tracking, geometry, and the retained operational tools.
+## Regression checks
+- No native `<dialog>` tags remain in the page.
+- Launch Theme and Parameter Sweep are hidden until explicitly opened.
+- Info, Predicts, and Inflation Calculator are mutually exclusive application views.
+- Launch Weather changes map mode without opening a modal.
+- Historical replay, 3D geofences, themes, optimal-site logic, live APRS, and inflation behavior remain present.

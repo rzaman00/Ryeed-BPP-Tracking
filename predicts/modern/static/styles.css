@@ -294,3 +294,60 @@ body{display:flex;flex-direction:column;min-height:0}
 @media(max-width:900px){.site-status-legend,.site-status-legend.beside-summary{left:8px;bottom:calc(52px + 38%);max-width:calc(100% - 16px)}.optimal-sweep-toggle{min-width:145px}}
 
 .predict-site.site-best input{accent-color:#6f5900}.predict-site.site-viable input,.predict-site.site-nogo input{accent-color:#fff}
+
+/* --------------------------------------------------------------------------
+   v3.0 historical replay, launch weather, launch themes, 3-D geofences
+   -------------------------------------------------------------------------- */
+:root{
+  --launch-primary:#d71920;
+  --launch-secondary:#ffd200;
+  --launch-accent:#6f2da8;
+}
+.site-header{border-bottom-color:var(--launch-primary)}
+.program-mark{box-shadow:0 0 0 1px color-mix(in srgb,var(--launch-secondary) 60%,transparent),0 3px 12px rgba(0,0,0,.3)}
+.app-tab.active{box-shadow:inset 0 -3px 0 var(--launch-secondary)}
+.launch-theme-button{height:34px;border:1px solid rgba(255,255,255,.18);background:linear-gradient(135deg,color-mix(in srgb,var(--launch-primary) 72%,#111 28%),color-mix(in srgb,var(--launch-accent) 72%,#111 28%));color:#fff;border-radius:10px;padding:0 10px;font-size:11px;font-weight:780;white-space:nowrap;transition:filter .15s ease,transform .15s ease}
+.launch-theme-button:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.historical-hint{display:flex;min-width:92px;padding:5px 9px;flex-direction:column;justify-content:center;border-right:1px solid var(--ui-border);background:color-mix(in srgb,var(--surface) 90%,var(--launch-accent) 10%);white-space:nowrap}
+.historical-hint span{font-size:10px;font-weight:800;color:var(--text)}.historical-hint small{font-size:9px;color:var(--text-muted)}
+
+.launch-theme-dialog{width:min(520px,calc(100vw - 28px))}.theme-preset-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:12px 16px 4px}.theme-preset-grid button{min-height:42px;border:1px solid var(--ui-border-strong);border-radius:10px;background:var(--surface-2);color:var(--text);font-weight:750}.theme-preset-grid button:hover,.theme-preset-grid button.active{border-color:var(--launch-primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--launch-primary) 25%,transparent)}.theme-custom-grid input[type="color"]{height:38px;padding:3px;cursor:pointer}
+/* Theme colors intentionally decorate chrome only. Safety/status, airspace and
+   trajectory colors remain fixed so operational meaning never changes. */
+.run-button{border-top:2px solid color-mix(in srgb,var(--launch-primary) 70%,transparent)}
+.drawing-toggle.active{border-color:var(--launch-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--launch-accent) 22%,transparent)}
+
+.drawing-altitude-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;align-items:end;margin:7px 0}.drawing-altitude-row label{display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--text-muted)}.drawing-altitude-row input{width:100%;min-width:0;border:1px solid var(--ui-border-strong);background:var(--surface-2);color:var(--text);border-radius:7px;padding:6px 7px}.drawing-altitude-row button{height:31px;white-space:nowrap}
+
+.weather-panel{position:absolute;left:322px;top:10px;z-index:19;width:280px;max-width:calc(100% - 340px);padding:10px;border:1px solid var(--ui-border);border-radius:13px;background:var(--surface-glass);color:var(--text);box-shadow:var(--control-shadow);backdrop-filter:blur(14px)}.weather-panel-head{display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:8px}.weather-panel-head>div{display:flex;flex-direction:column;gap:2px}.weather-panel-head strong{font-size:13px}.weather-panel-head button{border:0;background:transparent;color:var(--text-muted);font-size:18px;padding:0 3px}.weather-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.weather-grid div{display:flex;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--ui-border);border-radius:8px;padding:7px}.weather-grid small,.weather-source{font-size:9px;color:var(--text-muted)}.weather-grid b{font-size:12px}.weather-source{display:block;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.weather-map-legend{position:absolute;left:12px;top:52px;z-index:18;display:flex;align-items:center;gap:9px;flex-wrap:wrap;max-width:390px;padding:8px 10px;border:1px solid var(--ui-border);border-radius:10px;background:var(--surface-glass);box-shadow:var(--soft-shadow);backdrop-filter:blur(10px);font-size:10px;color:var(--text)}.weather-map-legend strong{width:100%;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.weather-map-legend span{display:flex;align-items:center;gap:5px}.weather-map-legend i{width:10px;height:10px;border-radius:50%;border:2px solid #fff}.weather-map-legend i.dry{background:#1f9d55}.weather-map-legend i.rain{background:#2788ff}.weather-map-legend small{color:var(--text-muted)}
+.summary-weather{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:7px 0}.summary-weather span{display:flex;min-width:0;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--ui-border);border-radius:8px;padding:7px}.summary-weather small{font-size:9px;color:var(--text-muted)}.summary-weather b{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+@media(max-width:900px){.launch-theme-button{height:30px;font-size:10px}.weather-panel{left:8px;top:48px;max-width:calc(100% - 252px)}.theme-preset-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:620px){.launch-theme-button{padding:0 7px}.weather-panel{left:8px;right:8px;top:48px;width:auto;max-width:none}.weather-map-legend{right:8px;max-width:none}.summary-weather{grid-template-columns:1fr}.historical-hint{min-width:82px}}
+
+
+/* --------------------------------------------------------------------------
+   v3.1 stable panels: no native <dialog> usage
+   -------------------------------------------------------------------------- */
+body.modal-open{overflow:hidden}
+.app-modal-backdrop{position:fixed;inset:0;z-index:200;background:rgba(4,8,14,.68);backdrop-filter:blur(3px)}
+.app-modal{position:fixed;inset:0;z-index:201;display:grid;place-items:center;padding:20px;pointer-events:none}
+.app-modal-card{pointer-events:auto;width:min(560px,calc(100vw - 32px));max-height:min(720px,calc(100vh - 40px));overflow:auto;border:1px solid var(--ui-border-strong);border-radius:16px;background:var(--surface);color:var(--text);box-shadow:0 26px 90px rgba(0,0,0,.48)}
+.app-modal-card>p{margin:0;padding:12px 16px 4px;font-size:11px;line-height:1.5;color:var(--text-muted)}
+.app-modal-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--ui-border);background:var(--surface-2)}
+.app-modal-head strong{font-size:16px}.app-modal-head button{width:32px;height:32px;border:1px solid var(--ui-border);border-radius:9px;background:var(--surface);color:var(--text);font-size:20px;line-height:1;cursor:pointer}
+.app-modal .dialog-grid{padding:12px 16px}.app-modal .dialog-actions{padding:4px 16px 16px;flex-wrap:wrap}.app-modal .dialog-progress{padding:0 16px 16px}
+.theme-preset-grid button{display:flex;align-items:center;justify-content:center;gap:7px}.theme-swatch{width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.8);box-shadow:0 0 0 1px rgba(0,0,0,.22)}
+.theme-swatch.standard{background:linear-gradient(135deg,#d71920 0 50%,#ffd200 50%)}.theme-swatch.maryland{background:linear-gradient(135deg,#e21833 0 50%,#111 50%)}.theme-swatch.night{background:linear-gradient(135deg,#5b78ff 0 50%,#7b4ce0 50%)}.theme-swatch.aurora{background:linear-gradient(135deg,#16b889 0 50%,#8b5cf6 50%)}
+.info-page{flex:1 1 auto;min-height:0;overflow:auto;background:var(--page-bg,#f4f6f8);padding:34px clamp(18px,4vw,56px) 60px;color:var(--text,#161a20)}
+.info-shell{max-width:1180px;margin:0 auto}.info-heading{display:flex;justify-content:space-between;gap:28px;align-items:end;margin-bottom:22px}.info-heading h1{font-size:clamp(28px,4vw,44px);margin:4px 0 0;letter-spacing:-.035em}.info-heading p{max-width:600px;color:var(--text-muted);line-height:1.55;margin:0}.info-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.info-card{background:var(--surface);border:1px solid var(--ui-border);border-radius:16px;padding:18px;box-shadow:var(--soft-shadow)}.info-card h2{font-size:15px;margin:0 0 7px}.info-card p{font-size:12px;line-height:1.55;color:var(--text-muted);margin:0}
+@media(max-width:900px){.info-grid{grid-template-columns:1fr 1fr}.info-heading{align-items:start;flex-direction:column}.app-modal{padding:12px}.app-modal-card{width:min(560px,calc(100vw - 20px));max-height:calc(100vh - 24px)}}
+@media(max-width:620px){.info-grid{grid-template-columns:1fr}.app-tabs{gap:2px;margin-left:6px}.app-tab{padding:7px 9px;font-size:11px}}
+
+/* v3.2 minimal/stable UI: no launch-theme or parameter-sweep modals. */
+.launch-theme-select{height:34px;display:flex;align-items:center;gap:6px;padding:0 7px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(255,255,255,.08);color:#fff;font-size:10px;font-weight:700;white-space:nowrap}
+.launch-theme-select span{opacity:.78}.launch-theme-select select{height:26px;border:1px solid rgba(255,255,255,.18);border-radius:7px;background:#141b24;color:#fff;padding:0 6px;font-size:10px}
+.tool-panel{position:absolute;z-index:30;left:50%;top:70px;transform:translateX(-50%);width:min(580px,calc(100% - 28px));max-height:calc(100% - 130px);overflow:auto;background:var(--surface,#fff);color:var(--text,#161a20);border:1px solid var(--ui-border,#cfd6de);border-radius:14px;box-shadow:0 14px 34px rgba(0,0,0,.28);padding:14px}
+.tool-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.tool-panel-head button{border:0;background:transparent;color:var(--text-muted,#667085);font-size:20px;line-height:1;padding:2px 5px}.tool-panel>p{font-size:11px;color:var(--text-muted,#667085);margin:0 0 10px;line-height:1.45}
+@media(max-width:760px){.launch-theme-select span{display:none}.tool-panel{top:56px;max-height:calc(100% - 112px)}}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import math
 import os
@@ -38,7 +40,27 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "2.9.0"
+BUILD_VERSION = "3.2.0"
+
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+NCEP_REANALYSIS_NCSS = "https://psl.noaa.gov/thredds/ncss/grid/Datasets/ncep.reanalysis/pressure"
+NCEP_REANALYSIS_START = datetime(1948, 1, 1, tzinfo=timezone.utc)
+# NOAA/PSL announced the final NCEP/NCAR Reanalysis 1 update in March 2026.
+NCEP_REANALYSIS_END = datetime(2026, 3, 17, 23, 59, tzinfo=timezone.utc)
+# Standard-atmosphere heights used to map the NCEP/NCAR pressure surfaces to
+# balloon altitude. The wind values themselves come from the archived reanalysis.
+NCEP_PRESSURE_HEIGHT_M = {
+    1000.0: 110.0, 925.0: 760.0, 850.0: 1450.0, 700.0: 3010.0,
+    600.0: 4200.0, 500.0: 5570.0, 400.0: 7180.0, 300.0: 9160.0,
+    250.0: 10360.0, 200.0: 11780.0, 150.0: 13610.0, 100.0: 16180.0,
+    70.0: 18420.0, 50.0: 20580.0, 30.0: 23850.0, 20.0: 26480.0,
+    10.0: 31050.0,
+}
+WEATHER_CACHE_TTL_S = 15 * 60.0
+_weather_cache: dict[tuple[float, float, str], tuple[float, dict[str, Any]]] = {}
+
 
 app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
@@ -85,6 +107,18 @@ class PredictRequest(BaseModel):
         if self.mode == "float" and self.float_altitude_m <= current_alt:
             raise ValueError("Float altitude must be above launch/current altitude")
         return self
+
+
+class WeatherSite(BaseModel):
+    site_id: str = Field(default="site", min_length=1, max_length=160)
+    name: str = Field(default="Launch site", min_length=1, max_length=160)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class WeatherBatchRequest(BaseModel):
+    sites: list[WeatherSite] = Field(min_length=1, max_length=60)
+    launch_datetime: datetime
 
 
 class InflationRequest(BaseModel):
@@ -398,6 +432,365 @@ def summarize(features: list[dict[str, Any]], request_meta: dict[str, Any]) -> d
         "ground_distance_m": ground_distance_m,
         "stages": stage_summaries,
         "approximation": request_meta.get("approximation"),
+        "historical": bool(request_meta.get("historical")),
+        "historical_source": request_meta.get("historical_source"),
+    }
+
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _historical_dataset_candidates(launch_datetime: datetime) -> list[datetime]:
+    """Model cycles to try for Tawhiri historical replay, newest usable cycle first."""
+    dt = _as_utc(launch_datetime)
+    cycle_hour = (dt.hour // 6) * 6
+    cycle = dt.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
+    return [cycle - timedelta(hours=6 * offset) for offset in range(4)]
+
+
+async def tawhiri_for_launch(params: dict[str, Any], launch_datetime: datetime) -> tuple[dict[str, Any], bool]:
+    """Use current Tawhiri normally; explicitly select archived cycles for older launches."""
+    dt = _as_utc(launch_datetime)
+    if dt >= datetime.now(timezone.utc) - timedelta(hours=8):
+        return await tawhiri_request(params), False
+    errors: list[str] = []
+    for dataset in _historical_dataset_candidates(dt):
+        historical_params = dict(params)
+        historical_params["dataset"] = utc_iso(dataset)
+        try:
+            return await tawhiri_request(historical_params), True
+        except ExternalServiceError as exc:
+            errors.append(f"{dataset:%Y-%m-%d %HZ}: {exc}")
+    raise ExternalServiceError("No matching archived Tawhiri model cycle was available. " + " | ".join(errors[-2:]))
+
+
+def _ncep_time_window(req: PredictRequest) -> tuple[datetime, datetime]:
+    start = _as_utc(req.launch_datetime)
+    launch_alt = max(0.0, float(req.launch.altitude_m or 0.0))
+    top = req.burst_altitude_m if req.mode == "burst" else req.float_altitude_m
+    ascent_s = max(0.0, top - launch_alt) / max(req.ascent_rate_ms, 0.1)
+    float_s = req.float_duration_min * 60.0 if req.mode == "float" else 0.0
+    # More than enough room for the descent and 6-hour interpolation bracketing.
+    duration = max(8 * 3600.0, ascent_s + float_s + 4 * 3600.0)
+    duration = min(duration, 36 * 3600.0)
+    return start - timedelta(hours=6), start + timedelta(seconds=duration + 6 * 3600)
+
+
+def _year_ranges(start: datetime, end: datetime) -> list[tuple[int, datetime, datetime]]:
+    ranges: list[tuple[int, datetime, datetime]] = []
+    year = start.year
+    while year <= end.year:
+        ys = datetime(year, 1, 1, tzinfo=timezone.utc)
+        ye = datetime(year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+        ranges.append((year, max(start, ys), min(end, ye)))
+        year += 1
+    return [(y, a, b) for y, a, b in ranges if a <= b]
+
+
+def _parse_ncss_csv(text: str, variable: str) -> dict[datetime, dict[float, float]]:
+    """Parse a THREDDS NCSS grid-as-point CSV into time -> pressure level -> value."""
+    rows = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    if not rows:
+        return {}
+    reader = csv.DictReader(io.StringIO("\n".join(rows)))
+    output: dict[datetime, dict[float, float]] = defaultdict(dict)
+    for row in reader:
+        keys = list(row.keys())
+        lower_keys = {str(k).lower(): k for k in keys}
+        time_key = next((k for k in keys if "time" in str(k).lower() or "date" in str(k).lower()), None)
+        level_key = next((k for k in keys if str(k).lower() in {"level", "lev", "isobaric", "pressure"} or "level" in str(k).lower()), None)
+        value_key = next((k for k in keys if str(k).lower() == variable.lower()), None)
+        if value_key is None:
+            value_key = next((k for k in keys if variable.lower() in str(k).lower()), None)
+        if not time_key or not level_key or not value_key:
+            continue
+        try:
+            dt = parse_iso(str(row[time_key]).strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            level = float(row[level_key])
+            value = float(row[value_key])
+        except (ValueError, TypeError):
+            continue
+        if math.isfinite(value):
+            output[dt.astimezone(timezone.utc)][level] = value
+    return dict(output)
+
+
+async def _fetch_ncep_variable(variable: str, latitude: float, longitude: float, start: datetime, end: datetime) -> dict[datetime, dict[float, float]]:
+    combined: dict[datetime, dict[float, float]] = {}
+    lon_360 = longitude % 360.0
+    async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0), follow_redirects=True) as client:
+        for year, part_start, part_end in _year_ranges(start, end):
+            url = f"{NCEP_REANALYSIS_NCSS}/{variable}.{year}.nc"
+            params = {
+                "var": variable,
+                "latitude": f"{latitude:.5f}",
+                "longitude": f"{lon_360:.5f}",
+                "time_start": utc_iso(part_start),
+                "time_end": utc_iso(part_end),
+                "accept": "csv",
+            }
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            parsed = _parse_ncss_csv(response.text, variable)
+            combined.update(parsed)
+    if not combined:
+        raise ExternalServiceError(f"NOAA historical {variable}-wind archive returned no usable data")
+    return combined
+
+
+def _vertical_interp(profile: dict[float, float], altitude_m: float) -> float:
+    samples = sorted(
+        ((NCEP_PRESSURE_HEIGHT_M[level], value) for level, value in profile.items() if level in NCEP_PRESSURE_HEIGHT_M and math.isfinite(value)),
+        key=lambda item: item[0],
+    )
+    if not samples:
+        raise ExternalServiceError("Historical wind profile contained no supported pressure levels")
+    if altitude_m <= samples[0][0]:
+        return samples[0][1]
+    if altitude_m >= samples[-1][0]:
+        return samples[-1][1]
+    for (a0, v0), (a1, v1) in zip(samples, samples[1:]):
+        if a0 <= altitude_m <= a1:
+            f = (altitude_m - a0) / max(a1 - a0, 1e-9)
+            return v0 + (v1 - v0) * f
+    return samples[-1][1]
+
+
+def _wind_at(profiles: dict[datetime, dict[float, float]], when: datetime, altitude_m: float) -> float:
+    times = sorted(profiles)
+    if not times:
+        raise ExternalServiceError("Historical wind archive contained no times")
+    when = _as_utc(when)
+    if when <= times[0]:
+        return _vertical_interp(profiles[times[0]], altitude_m)
+    if when >= times[-1]:
+        return _vertical_interp(profiles[times[-1]], altitude_m)
+    for t0, t1 in zip(times, times[1:]):
+        if t0 <= when <= t1:
+            v0 = _vertical_interp(profiles[t0], altitude_m)
+            v1 = _vertical_interp(profiles[t1], altitude_m)
+            f = (when - t0).total_seconds() / max((t1 - t0).total_seconds(), 1.0)
+            return v0 + (v1 - v0) * f
+    return _vertical_interp(profiles[times[-1]], altitude_m)
+
+
+def _advect(latitude: float, longitude: float, u_ms: float, v_ms: float, seconds: float) -> tuple[float, float]:
+    radius = 6_371_000.0
+    lat_rad = math.radians(latitude)
+    new_lat = latitude + math.degrees(v_ms * seconds / radius)
+    cos_lat = max(0.05, abs(math.cos(lat_rad)))
+    new_lon = longitude + math.degrees(u_ms * seconds / (radius * cos_lat))
+    return max(-89.999, min(89.999, new_lat)), to_map_lon(new_lon)
+
+
+def _historical_point(latitude: float, longitude: float, altitude_m: float, when: datetime) -> dict[str, Any]:
+    return {"latitude": latitude, "longitude": longitude, "altitude": altitude_m, "datetime": utc_iso(when)}
+
+
+def _integrate_vertical_stage(
+    stage: str,
+    latitude: float,
+    longitude: float,
+    altitude_m: float,
+    when: datetime,
+    target_altitude_m: float,
+    vertical_rate_fn,
+    u_profiles: dict[datetime, dict[float, float]],
+    v_profiles: dict[datetime, dict[float, float]],
+    step_s: float,
+) -> tuple[list[dict[str, Any]], float, float, float, datetime]:
+    points = [_historical_point(latitude, longitude, altitude_m, when)]
+    ascending = target_altitude_m > altitude_m
+    for _ in range(5000):
+        remaining = abs(target_altitude_m - altitude_m)
+        if remaining <= 0.5:
+            break
+        rate = max(0.1, float(vertical_rate_fn(altitude_m)))
+        dt = min(step_s, remaining / rate)
+        sign = 1.0 if ascending else -1.0
+        mid_alt = altitude_m + sign * rate * dt / 2.0
+        mid_time = when + timedelta(seconds=dt / 2.0)
+        u = _wind_at(u_profiles, mid_time, mid_alt)
+        v = _wind_at(v_profiles, mid_time, mid_alt)
+        latitude, longitude = _advect(latitude, longitude, u, v, dt)
+        altitude_m += sign * rate * dt
+        when += timedelta(seconds=dt)
+        if (ascending and altitude_m > target_altitude_m) or ((not ascending) and altitude_m < target_altitude_m):
+            altitude_m = target_altitude_m
+        points.append(_historical_point(latitude, longitude, altitude_m, when))
+        if abs(altitude_m - target_altitude_m) <= 0.5:
+            break
+    return points, latitude, longitude, altitude_m, when
+
+
+async def run_historical_reanalysis(req: PredictRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Historical fallback using NOAA/PSL NCEP/NCAR Reanalysis 1 upper-air winds.
+
+    NCEP/NCAR Reanalysis 1 is a 2.5-degree, 4-times-daily reanalysis. It is ideal
+    for replay/analysis, but is intentionally labelled as a coarser historical
+    reconstruction rather than presented as equivalent to a current high-resolution
+    Tawhiri forecast.
+    """
+    dt = _as_utc(req.launch_datetime)
+    if dt < NCEP_REANALYSIS_START or dt > NCEP_REANALYSIS_END:
+        raise ExternalServiceError(
+            "NOAA NCEP/NCAR Reanalysis fallback is available from 1948-01-01 through 2026-03-17. "
+            "Tawhiri did not have an archived model cycle for this date."
+        )
+    start, end = _ncep_time_window(req)
+    u_profiles, v_profiles = await asyncio.gather(
+        _fetch_ncep_variable("uwnd", req.launch.latitude, req.launch.longitude, start, end),
+        _fetch_ncep_variable("vwnd", req.launch.latitude, req.launch.longitude, start, end),
+    )
+    latitude = req.launch.latitude
+    longitude = req.launch.longitude
+    launch_alt = float(req.launch.altitude_m or 0.0)
+    altitude = launch_alt
+    when = dt
+    features: list[dict[str, Any]] = []
+    common = {
+        "mode": req.mode,
+        "launch_name": req.launch.name,
+        "dataset": f"NOAA NCEP/NCAR Reanalysis 1 {dt:%Y-%m-%d}",
+        "historical": True,
+        "historical_source": "NOAA/PSL NCEP/NCAR Reanalysis 1",
+        "approximation": "Historical replay uses 4x-daily 2.5° reanalysis winds with vertical interpolation through 17 pressure levels.",
+    }
+    if extra_meta:
+        common.update(extra_meta)
+
+    target = req.burst_altitude_m if req.mode == "burst" else req.float_altitude_m
+    ascent, latitude, longitude, altitude, when = _integrate_vertical_stage(
+        "ascent", latitude, longitude, altitude, when, target,
+        lambda _alt: req.ascent_rate_ms, u_profiles, v_profiles, 60.0,
+    )
+    features.append(stage_feature("ascent", ascent, common))
+
+    if req.mode == "float":
+        float_points = [_historical_point(latitude, longitude, altitude, when)]
+        remaining = req.float_duration_min * 60.0
+        for _ in range(2000):
+            if remaining <= 0.5:
+                break
+            dt_s = min(60.0, remaining)
+            mid_time = when + timedelta(seconds=dt_s / 2.0)
+            mid_alt = altitude + req.float_ascent_rate_ms * dt_s / 2.0
+            u = _wind_at(u_profiles, mid_time, mid_alt)
+            v = _wind_at(v_profiles, mid_time, mid_alt)
+            latitude, longitude = _advect(latitude, longitude, u, v, dt_s)
+            altitude += req.float_ascent_rate_ms * dt_s
+            when += timedelta(seconds=dt_s)
+            remaining -= dt_s
+            float_points.append(_historical_point(latitude, longitude, altitude, when))
+        features.append(stage_feature("float", float_points, common))
+
+    # Terminal descent speed scales roughly with sqrt(1/rho). The user's descent
+    # input remains the sea-level terminal rate, matching the operational UI.
+    ground_alt = launch_alt
+    descent, latitude, longitude, altitude, when = _integrate_vertical_stage(
+        "descent", latitude, longitude, altitude, when, ground_alt,
+        lambda alt: req.descent_rate_ms * math.exp(max(0.0, alt - ground_alt) / 17_000.0),
+        u_profiles, v_profiles, 30.0,
+    )
+    features.append(stage_feature("descent", descent, common))
+    summary = summarize(features, common)
+    return {
+        "type": "FeatureCollection", "features": features, "summary": summary,
+        "request": {"dataset": common["dataset"], "source": common["historical_source"], "historical": True},
+    }
+
+
+async def _prediction_with_historical_fallback(req: PredictRequest, mode: str, extra_meta: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return a NOAA fallback only when an older Tawhiri archive is unavailable."""
+    if _as_utc(req.launch_datetime) >= datetime.now(timezone.utc) - timedelta(hours=8):
+        return None
+    try:
+        if mode == "burst":
+            return await run_historical_reanalysis(req, extra_meta)
+        return await run_historical_reanalysis(req, extra_meta)
+    except ExternalServiceError:
+        raise
+
+
+async def fetch_launch_weather(latitude: float, longitude: float, launch_datetime: datetime) -> dict[str, Any]:
+    """Surface launch weather from Open-Meteo forecast/historical archives."""
+    dt = _as_utc(launch_datetime)
+    cache_key = (round(latitude, 3), round(longitude, 3), dt.strftime("%Y-%m-%dT%H"))
+    cached = _weather_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < WEATHER_CACHE_TTL_S:
+        return dict(cached[1])
+
+    now = datetime.now(timezone.utc)
+    endpoints: list[tuple[str, str]]
+    if now - timedelta(days=5) <= dt <= now + timedelta(days=7):
+        endpoints = [(OPEN_METEO_FORECAST_URL, "Open-Meteo Forecast")]
+    elif dt >= datetime(2021, 1, 1, tzinfo=timezone.utc):
+        endpoints = [
+            (OPEN_METEO_HISTORICAL_FORECAST_URL, "Open-Meteo Historical Forecast"),
+            (OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather"),
+        ]
+    else:
+        endpoints = [(OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather")]
+
+    params = {
+        "latitude": latitude, "longitude": longitude,
+        "hourly": "temperature_2m,precipitation,rain,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure",
+        "start_date": dt.date().isoformat(), "end_date": dt.date().isoformat(),
+        "timezone": "UTC", "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "precipitation_unit": "inch",
+    }
+    last_error: Exception | None = None
+    for endpoint, source_name in endpoints:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=7.0), follow_redirects=True) as client:
+                response = await client.get(endpoint, params=params)
+                response.raise_for_status()
+                payload = response.json()
+            hourly = payload.get("hourly") or {}
+            times = hourly.get("time") or []
+            if not times:
+                raise ExternalServiceError("weather archive returned no hourly values")
+            parsed_times = []
+            for raw_time in times:
+                try:
+                    parsed = datetime.fromisoformat(str(raw_time)).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                parsed_times.append(parsed)
+            if not parsed_times:
+                raise ExternalServiceError("weather archive returned unreadable times")
+            idx = min(range(len(parsed_times)), key=lambda i: abs((parsed_times[i] - dt).total_seconds()))
+            def at(name: str) -> Any:
+                values = hourly.get(name) or []
+                return values[idx] if idx < len(values) else None
+            rain_in = float(at("rain") or 0.0)
+            precipitation_in = float(at("precipitation") or 0.0)
+            result = {
+                "datetime": utc_iso(parsed_times[idx]), "source": source_name,
+                "latitude": float(payload.get("latitude", latitude)), "longitude": float(payload.get("longitude", longitude)),
+                "temperature_f": at("temperature_2m"), "wind_speed_mph": at("wind_speed_10m"),
+                "wind_direction_deg": at("wind_direction_10m"), "wind_gust_mph": at("wind_gusts_10m"),
+                "rain_in": rain_in, "precipitation_in": precipitation_in,
+                "rain": bool(rain_in > 0.0), "weather_code": at("weather_code"),
+                "surface_pressure_hpa": at("surface_pressure"),
+                "historical": dt < now - timedelta(hours=8),
+            }
+            _weather_cache[cache_key] = (time.monotonic(), result)
+            return dict(result)
+        except (httpx.HTTPError, ValueError, ExternalServiceError) as exc:
+            last_error = exc
+    raise ExternalServiceError(f"Launch weather could not be loaded: {last_error}")
+
+
+def _weather_feature(site: WeatherSite, weather: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "Feature", "geometry": {"type": "Point", "coordinates": [site.longitude, site.latitude]},
+        "properties": {"site_id": site.site_id, "site_name": site.name, **weather},
     }
 
 
@@ -413,11 +806,21 @@ async def run_burst(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     }
     if req.launch.altitude_m is not None:
         params["launch_altitude"] = req.launch.altitude_m
-    raw = await tawhiri_request(params)
+    try:
+        raw, historical_cycle = await tawhiri_for_launch(params, req.launch_datetime)
+    except ExternalServiceError as tawhiri_error:
+        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+            try:
+                return await run_historical_reanalysis(req, extra_meta)
+            except ExternalServiceError as archive_error:
+                raise ExternalServiceError(f"Historical Tawhiri replay failed ({tawhiri_error}); NOAA fallback failed ({archive_error})") from archive_error
+        raise
     common = {
         "mode": "burst",
         "launch_name": req.launch.name,
         "dataset": raw.get("request", {}).get("dataset"),
+        "historical": historical_cycle,
+        "historical_source": "Tawhiri archived model cycle" if historical_cycle else None,
     }
     if extra_meta:
         common.update(extra_meta)
@@ -438,7 +841,15 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     }
     if req.launch.altitude_m is not None:
         first_params["launch_altitude"] = req.launch.altitude_m
-    first = await tawhiri_request(first_params)
+    try:
+        first, historical_cycle = await tawhiri_for_launch(first_params, req.launch_datetime)
+    except ExternalServiceError as tawhiri_error:
+        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+            try:
+                return await run_historical_reanalysis(req, extra_meta)
+            except ExternalServiceError as archive_error:
+                raise ExternalServiceError(f"Historical Tawhiri replay failed ({tawhiri_error}); NOAA fallback failed ({archive_error})") from archive_error
+        raise
     ascent = first["prediction"][0]["trajectory"]
     if not ascent:
         raise ExternalServiceError("Float ascent prediction was empty")
@@ -456,6 +867,8 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     }
     if second_params["burst_altitude"] <= second_params["launch_altitude"]:
         second_params["burst_altitude"] = second_params["launch_altitude"] + 1
+    if historical_cycle and first.get("request", {}).get("dataset"):
+        second_params["dataset"] = first["request"]["dataset"]
     second = await tawhiri_request(second_params)
     float_trajectory = second["prediction"][0]["trajectory"]
     descent_trajectory = second["prediction"][1]["trajectory"]
@@ -466,6 +879,8 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
         "float_altitude_m": req.float_altitude_m,
         "float_ascent_rate_ms": req.float_ascent_rate_ms,
         "float_duration_min": req.float_duration_min,
+        "historical": historical_cycle,
+        "historical_source": "Tawhiri archived model cycle" if historical_cycle else None,
     }
     if extra_meta:
         common.update(extra_meta)
@@ -1078,6 +1493,12 @@ def _parse_altitude_value_m(value: Any, unit: Any = None, code: Any = None, *, u
             return None
         number = float(m.group(1))
     u = str(unit or code or "").upper()
+    code_text = str(code or "").upper()
+    # FAA's ADIZ/SFRA feed can encode standard-pressure ceilings with an implied
+    # decimal. Example: UPPER_VAL=180000, UPPER_CODE=STD means FL180 (~18,000 ft),
+    # not 180,000 ft. Normalize those values before any 3-D scoring/rendering.
+    if "STD" in code_text and abs(number) >= 100000:
+        return (number / 10.0) * 0.3048
     if "FL" in u or str(value or "").upper().startswith("FL"):
         return number * 100.0 * 0.3048
     if u in {"M", "METER", "METERS", "METRE", "METRES"} or "METER" in u or "METRE" in u:
@@ -1102,6 +1523,23 @@ def _airspace_vertical_bounds_m(feature: dict[str, Any], layer: str) -> tuple[fl
     if upper < lower:
         lower, upper = upper, lower
     return float(lower), float(upper)
+
+
+def annotate_airspace_verticals(collection: dict[str, Any], layer: str) -> dict[str, Any]:
+    """Attach normalized meter bounds for consistent 3-D frontend rendering."""
+    result = {"type": "FeatureCollection", "features": []}
+    for feature in collection.get("features", []) if isinstance(collection, dict) else []:
+        if not isinstance(feature, dict):
+            continue
+        item = dict(feature)
+        props = dict(item.get("properties") or {})
+        lower_m, upper_m = _airspace_vertical_bounds_m(item, layer)
+        props["bpp_lower_m"] = 0.0 if not math.isfinite(lower_m) else lower_m
+        # MapLibre cannot extrude to infinity; 60 km is a visual cap for UNL only.
+        props["bpp_upper_m"] = 60000.0 if not math.isfinite(upper_m) else upper_m
+        item["properties"] = props
+        result["features"].append(item)
+    return result
 
 
 def _polygon_records(collection: dict[str, Any], layer: str) -> list[dict[str, Any]]:
@@ -1392,14 +1830,22 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
     )
 
 def validate_launch_window(value: datetime) -> None:
+    """Keep the existing seven-day future guard, but allow historical replays.
+
+    True historical trajectories need archived upper-air winds. This build first asks
+    Tawhiri for the matching historical model cycle and can fall back to NOAA's
+    NCEP/NCAR 4x-daily reanalysis for dates back to 1948.
+    """
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
-    if value < now - timedelta(hours=8) or value > now + timedelta(days=7):
+    if value > now + timedelta(days=7):
+        raise HTTPException(status_code=400, detail="Launch time may be at most 7 days in the future.")
+    if value < NCEP_REANALYSIS_START:
         raise HTTPException(
             status_code=400,
-            detail="Launch time must be within 8 hours in the past and 7 days in the future, matching the existing BPP predictor window.",
+            detail="Historical upper-air replay is available from January 1, 1948 onward. Earlier dates do not have a compatible upper-air archive in this app.",
         )
 
 
@@ -1415,7 +1861,9 @@ async def health():
         "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
-        "optimal_site": "active/all-site viability ranking with fast current-rate mode, optional ±1 m/s sweep, crossing-altitude airspace checks, and preferred-site gold logic",
+        "optimal_site": "active/all-site viability ranking with crossing-altitude airspace checks and preferred-site gold logic",
+        "historical_predicts": "archived Tawhiri cycles with NOAA NCEP/NCAR Reanalysis fallback from 1948",
+        "launch_weather": "Open-Meteo forecast + historical archives",
     }
 
 
@@ -1426,6 +1874,8 @@ async def config():
         "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
         "aprs_configured": bool(APRSFI_API_KEY), "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
+        "historical_predicts_from": "1948-01-01",
+        "weather": True,
     }
 
 
@@ -1438,6 +1888,8 @@ async def launch_locations():
 @app.get("/api/airspace/{dataset}")
 async def airspace(dataset: Literal["controlled", "class_e", "sua", "tfr", "uncontrolled"], refresh: bool = Query(default=False)):
     data, warning, source = await operational_airspace(dataset, force=refresh)
+    normalized_layer = "class_e" if dataset == "uncontrolled" else dataset
+    data = annotate_airspace_verticals(data, normalized_layer)
     return {"data": data, "warning": warning, "source": source, "count": len(data.get("features", []))}
 
 
@@ -1445,6 +1897,35 @@ async def airspace(dataset: Literal["controlled", "class_e", "sua", "tfr", "unco
 async def reference_data(dataset: Literal["schools", "mcdonalds", "dunkin", "launch_locations", "poi"]):
     data, warning = await operational_reference_data(dataset)
     return {"data": data, "warning": warning}
+
+
+@app.get("/api/weather/site")
+async def weather_site(
+    latitude: float = Query(ge=-90, le=90),
+    longitude: float = Query(ge=-180, le=180),
+    launch_datetime: datetime = Query(),
+):
+    validate_launch_window(launch_datetime)
+    try:
+        return await fetch_launch_weather(latitude, longitude, launch_datetime)
+    except ExternalServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/weather/batch")
+async def weather_batch(req: WeatherBatchRequest):
+    validate_launch_window(req.launch_datetime)
+    semaphore = asyncio.Semaphore(8)
+    async def one(site: WeatherSite) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                weather = await fetch_launch_weather(site.latitude, site.longitude, req.launch_datetime)
+                return {"site_id": site.site_id, "name": site.name, "weather": weather, "error": None}
+            except Exception as exc:
+                return {"site_id": site.site_id, "name": site.name, "weather": None, "error": str(exc)}
+    results = await asyncio.gather(*(one(site) for site in req.sites))
+    features = [_weather_feature(site, item["weather"]) for site, item in zip(req.sites, results) if item.get("weather")]
+    return {"results": results, "data": {"type": "FeatureCollection", "features": features}}
 
 
 @app.get("/api/national-addresses")

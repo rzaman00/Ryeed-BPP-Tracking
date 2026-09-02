@@ -1,32 +1,20 @@
-BPP Predicts v2.9.0 — standalone operational build
+BPP Predicts v3.2.0 — UI stability + Info tab
 
-Run on Windows:
-  Double-click START_BPP_PREDICTS.bat
+Install:
+1. Save predicts\modern\.env if it contains your APRS.fi key.
+2. Replace the previous predicts\modern folder with this package's predicts\modern folder.
+3. Restore .env.
+4. Double-click START_BPP_PREDICTS.bat.
+5. Confirm http://127.0.0.1:8000/api/health reports version 3.2.0.
 
-Or from PowerShell at the repository root:
-  .\START_BPP_PREDICTS.bat
+What changed from v3.0.1:
+- Removed the control-strip History badge; historical prediction support is now documented in Info.
+- Added an Info tab beside Inflation Calculator with a concise feature guide.
+- Rebuilt Launch Theme as a contained custom modal instead of a native browser dialog.
+- Rebuilt Parameter Sweep with the same stable modal system.
+- About Map now opens the Info tab instead of a long modal.
+- Launch Weather remains an inline map mode with its own compact legend/weather card; it never opens a modal.
+- Added explicit modal close/backdrop/Escape behavior so hidden dialog content cannot spill over the map.
+- Strengthened Windows setup so a corrupted pip/.venv is automatically rebuilt.
 
-The application opens at http://127.0.0.1:8000 only after /api/health confirms v2.9.0.
-
-Top-level application tabs:
-  - Predicts
-  - Inflation Calculator
-
-The old BPP website navigation is intentionally removed. This local app is its own interface.
-Prediction/map/APRS data still use their operational online services when those features are requested.
-
-Burst altitude:
-  - Automatic is the default and uses the integrated InflationCalculations2024.m equation port.
-  - Manual restores the normal editable burst-altitude field.
-
-Live APRS requires APRSFI_API_KEY in predicts\modern\.env.
-
-
-v2.9 highlights
----------------
-- Find Optimal: Current Sites = selected presets + every manually drawn launch point.
-- Find Optimal: All Sites = all loaded historical preset sites.
-- Optimal ascent sweep is OFF by default for speed. Turn it on to test current ±0.5/±1.0 m/s.
-- Gold = viable preferred Clear Spring/Hancock only; Green = other viable clear sites; Red = airspace conflict/no-go. No blue status and no distance ranking.
-- Airspace scoring is altitude-aware where FAA vertical limits are available.
-- Bottom Parameter Sweep / download toolbar is pinned on-screen.
+All v3.0 operational functionality is preserved: historical replay, weather, themes, 3D geofences, optimal-site search, altitude-aware airspace scoring, live APRS, inflation calculator, exports, parameter sweep, custom launch sites, Burst/Float, and dark mode.

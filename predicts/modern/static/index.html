@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=2.9.0" rel="stylesheet" />
+  <link href="static/styles.css?v=3.2.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -19,9 +19,11 @@
     <nav class="app-tabs" aria-label="Application sections">
       <button class="app-tab active" id="predictsTab" type="button" data-app-view="predicts">Predicts</button>
       <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
+      <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v2.9.0</span>
+      <span class="build-badge" id="buildBadge">v3.2.0</span>
+      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -98,6 +100,11 @@
     <aside class="layer-panel" id="layerPanel" aria-label="Map layers">
       <div class="layer-panel-title"><strong>Layers</strong><button id="collapseLayers" type="button" aria-label="Collapse layers">›</button></div>
       <section class="layer-group">
+        <h3>Map Mode</h3>
+        <label><span>Operations</span><input type="radio" name="mapmode" value="operations" checked></label>
+        <label><span>Launch Weather</span><input type="radio" name="mapmode" value="weather"></label>
+      </section>
+      <section class="layer-group">
         <h3>Map Dimensions</h3>
         <label><span>2D</span><input type="radio" name="dimension" value="2d" checked></label>
         <label><span>3D</span><input type="radio" name="dimension" value="3d"></label>
@@ -136,8 +143,16 @@
       <div><strong id="drawingInfoTitle">Selected drawing</strong><button id="closeDrawingInfo" type="button">×</button></div>
       <pre id="drawingCoordinates"></pre>
       <div class="drawing-name-row"><input id="drawingName" type="text" placeholder="Drawing name"><button id="saveDrawingName" type="button">Save name</button></div>
+      <div id="rectangleAltitudeRow" class="drawing-altitude-row hidden">
+        <label><span>3D upper bound (ft)</span><input id="drawingUpperAltitude" type="number" min="0" step="500" value="10000"></label>
+        <button id="saveDrawingAltitude" type="button">Set upper bound</button>
+      </div>
       <button id="copyDrawingCoordinates" type="button">Copy coordinates</button>
     </section>
+
+
+
+    <section class="weather-map-legend hidden" id="weatherMapLegend"><strong>Launch Weather</strong><span><i class="dry"></i>Dry</span><span><i class="rain"></i>Rain</span><small>Circle size increases with gust speed.</small></section>
 
     <section class="live-status hidden" id="liveStatus">
       <div class="live-title"><strong id="liveCallsign">KC3SKW-8</strong><span>LIVE</span></div>
@@ -167,6 +182,7 @@
           <div><small>Ground track</small><b id="groundDistance">—</b></div>
           <div><small>Model</small><b id="modelDataset">—</b></div>
         </div>
+
         <div class="stage-list" id="stageList"></div>
         <div class="summary-buttons"><button id="centerLanding" type="button">Center Landing</button><button id="copyLanding" type="button">Copy Coordinates</button></div>
       </div>
@@ -226,9 +242,29 @@
     </div>
   </section>
 
-  <dialog id="sweepDialog" class="classic-dialog">
-    <form method="dialog" class="dialog-head"><strong>Parameter Sweep</strong><button value="cancel">×</button></form>
-    <p>Run a controlled series of Tawhiri predictions from one launch site. Results are added to the map without replacing your normal predicts.</p>
+  <section id="infoView" class="app-view info-page hidden" aria-labelledby="infoHeading">
+    <div class="info-shell">
+      <div class="info-heading">
+        <div><span class="summary-kicker">BPP Operations Tool</span><h1 id="infoHeading">Features & Workflow</h1></div>
+        <p>A quick reference for the tools built into this standalone predictor. Operational colors for trajectories, airspace, and site viability stay fixed even when a launch theme is applied.</p>
+      </div>
+      <div class="info-grid">
+        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Historical dates use archived atmospheric data when available; future predictions remain limited to the model forecast window.</p></article>
+        <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
+        <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click a weather marker for wind, gust, rain, and temperature.</p></article>
+        <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
+        <article class="info-card"><h2>Live APRS</h2><p>Track one or more APRS callsigns and run live predictions from the latest reported latitude, longitude, altitude, and packet time.</p></article>
+        <article class="info-card"><h2>Airspace & 3D</h2><p>Toggle FAA controlled, Class E, special-use, and TFR layers. Switch to 3D to inspect airspace and custom geofence volumes.</p></article>
+        <article class="info-card"><h2>Drawing Tools</h2><p>Add custom launch points or draw oriented rectangles. Rectangles can be assigned an upper altitude and visualized as 3D volumes.</p></article>
+        <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, or Aurora colors. Themes never alter red/green/gold status meanings or trajectory colors.</p></article>
+        <article class="info-card"><h2>Exports & Sweep</h2><p>Use the bottom toolbar for KML export, geofence GeoJSON, parameter sweeps, address queries, and map utilities. Click a dotted sweep path to see the exact parameter value.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section id="sweepPanel" class="tool-panel hidden" aria-labelledby="sweepPanelTitle">
+    <div class="tool-panel-head"><strong id="sweepPanelTitle">Parameter Sweep</strong><button id="closeSweepPanel" type="button" aria-label="Close parameter sweep">×</button></div>
+    <p>Run a controlled series of predictions from one launch site. Click a dotted result line to see its exact parameter value.</p>
     <div class="dialog-grid">
       <label><span>Launch site</span><select id="sweepSite"></select></label>
       <label><span>Parameter</span><select id="sweepParameter"><option value="ascent_rate_ms">Ascent rate (m/s)</option><option value="descent_rate_ms">Descent rate (m/s)</option><option value="altitude">Burst/Float altitude (m)</option></select></label>
@@ -238,16 +274,9 @@
     </div>
     <div class="dialog-actions"><button id="runSweep" type="button" class="dialog-primary">Run Sweep</button><button id="clearSweep" type="button">Clear Sweep</button></div>
     <div id="sweepProgress" class="dialog-progress"></div>
-  </dialog>
-
-  <dialog id="aboutDialog" class="classic-dialog">
-    <form method="dialog" class="dialog-head"><strong>About BPP Predicts</strong><button value="cancel">×</button></form>
-    <p>This is BPP Predicts v2.9.0: a standalone operational predictor with an integrated inflation calculator, automatic/manual burst-altitude selection, restored launch sites, FAA airspace, custom launch points, oriented geofences, multi-callsign APRS prediction, dual-scope optimal-site ranking with optional ascent-rate sweep, crossing-altitude airspace scoring, preferred-site-only gold status, restored bottom tools, and clickable parameter-sweep values.</p>
-    <p><strong>Prediction engine:</strong> SondeHub / Tawhiri. <strong>Float:</strong> BPP stitched-float method (ascent + float + descent). <strong>Live tracking:</strong> select one or more APRS callsigns. Each live prediction starts from the station's latest reported latitude, longitude, altitude, and packet timestamp.</p>
-    <p><strong>Launch sites:</strong> shown by city only and loaded from resolved BPP data with cache/offline fallback. <strong>Airspace:</strong> current FAA Class B/C/D/E, Special Use Airspace, and TFR feeds with a local cache for reliability.</p>
-  </dialog>
+  </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=2.9.0"></script>
+  <script type="module" src="static/app.js?v=3.2.0"></script>
 </body>
 </html>

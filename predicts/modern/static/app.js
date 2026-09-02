@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '2.9.0';
+const BUILD_VERSION = '3.2.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -42,6 +42,10 @@ const state = {
   inflationResult: null,
   inflationTimer: null,
   optimalSiteAnalysis: null,
+  mapMode: 'operations',
+  weatherBySite: new Map(),
+  weatherRequestId: 0,
+  launchTheme: 'standard',
 };
 
 let map;
@@ -167,7 +171,7 @@ function addSource(id) {
 function addOperationalLayers() {
   ['prediction', 'prediction-3d', 'prediction-launch-points', 'prediction-landing-points', 'sweep', 'live-track', 'drawings', 'addresses',
    'airspace-controlled', 'airspace-class_e', 'airspace-sua', 'airspace-tfr',
-   'ref-schools', 'ref-mcdonalds', 'ref-dunkin', 'ref-launch_locations', 'ref-poi', 'optimal-sites'].forEach(addSource);
+   'ref-schools', 'ref-mcdonalds', 'ref-dunkin', 'ref-launch_locations', 'ref-poi', 'optimal-sites', 'launch-weather'].forEach(addSource);
 
   // Airspace stays useful but visually secondary to the flight path.
   map.addLayer({ id:'airspace-controlled-fill', type:'fill', source:'airspace-controlled', layout:{visibility:'visible'}, paint:{
@@ -188,18 +192,18 @@ function addOperationalLayers() {
   map.addLayer({ id:'airspace-controlled-3d', type:'fill-extrusion', source:'airspace-controlled', layout:{visibility:'none'}, paint:{
     'fill-extrusion-color':['match',['get','LOCAL_TYPE'],'R','#ef3340','CLASS_B','#1264d8','CLASS_C','#7b3fb2','CLASS_D','#1264d8','#718096'],
     'fill-extrusion-opacity':.15,
-    'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
-    'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
+    'fill-extrusion-base':['to-number',['get','bpp_lower_m'],0],
+    'fill-extrusion-height':['to-number',['get','bpp_upper_m'],0],
   }});
   map.addLayer({ id:'airspace-class_e-3d', type:'fill-extrusion', source:'airspace-class_e', layout:{visibility:'none'}, paint:{
     'fill-extrusion-color':'#2f7f9d','fill-extrusion-opacity':.08,
-    'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
-    'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
+    'fill-extrusion-base':['to-number',['get','bpp_lower_m'],0],
+    'fill-extrusion-height':['to-number',['get','bpp_upper_m'],0],
   }});
   map.addLayer({ id:'airspace-sua-3d', type:'fill-extrusion', source:'airspace-sua', layout:{visibility:'none'}, paint:{
     'fill-extrusion-color':'#b52b4a','fill-extrusion-opacity':.11,
-    'fill-extrusion-base':['*',['to-number',['get','LOWER_VAL'],0],0.3048],
-    'fill-extrusion-height':['*',['to-number',['get','UPPER_VAL'],0],0.3048],
+    'fill-extrusion-base':['to-number',['get','bpp_lower_m'],0],
+    'fill-extrusion-height':['to-number',['get','bpp_upper_m'],0],
   }});
 
   // Reference layers from the existing BPP data files.
@@ -213,8 +217,18 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
+  // Launch-weather map mode. These markers intentionally report conditions rather
+  // than declaring a launch safe/unsafe. Blue means rain at the selected hour; dry
+  // sites are green, and larger markers indicate stronger gusts.
+  map.addLayer({id:'launch-weather-points',type:'circle',source:'launch-weather',layout:{visibility:'none'},paint:{
+    'circle-radius':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,7,15,10,30,14,50,18],
+    'circle-color':['case',['boolean',['get','rain'],false],'#2788ff','#1f9d55'],
+    'circle-opacity':.9,'circle-stroke-width':3,'circle-stroke-color':'#ffffff'
+  }});
+
   // Drawings.
   map.addLayer({id:'drawing-fill',type:'fill',source:'drawings',filter:['==',['geometry-type'],'Polygon'],paint:{'fill-color':['case',['boolean',['get','selected'],false],'#f2b84b','#9254d6'],'fill-opacity':['case',['boolean',['get','preview'],false],.12,.18]}});
+  map.addLayer({id:'drawing-3d',type:'fill-extrusion',source:'drawings',filter:['all',['==',['geometry-type'],'Polygon'],['!', ['boolean',['get','preview'],false]]],layout:{visibility:'none'},paint:{'fill-extrusion-color':['case',['boolean',['get','selected'],false],'#f2b84b','#9254d6'],'fill-extrusion-base':0,'fill-extrusion-height':['coalesce',['to-number',['get','upper_altitude_m']],0],'fill-extrusion-opacity':.26}});
   map.addLayer({id:'drawing-line',type:'line',source:'drawings',filter:['==',['geometry-type'],'Polygon'],paint:{'line-color':['case',['boolean',['get','selected'],false],'#b86e00','#7626c5'],'line-width':['case',['boolean',['get','selected'],false],3,2]}});
   map.addLayer({id:'drawing-guide',type:'line',source:'drawings',filter:['==',['geometry-type'],'LineString'],paint:{'line-color':'#f2b84b','line-width':3,'line-dasharray':[2,1.5],'line-opacity':.95}});
   map.addLayer({id:'drawing-point',type:'circle',source:'drawings',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':['case',['boolean',['get','selected'],false],7,6],'circle-color':'#9254d6','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
@@ -256,6 +270,13 @@ function addOperationalLayers() {
 
   map.addLayer({id:'live-track-line',type:'line',source:'live-track',paint:{'line-color':'#111820','line-width':3,'line-opacity':.85,'line-dasharray':[1.2,1.2]}});
 
+  map.on('click','launch-weather-points',(e)=>{
+    const f=e.features?.[0];if(!f)return;const p=f.properties||{};const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
+    const rain=String(p.rain)==='true'||p.rain===true?'Yes':'No';
+    new maplibregl.Popup({offset:14}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(p.site_name||'Launch site')}</strong><br>Wind ${fmt(p.wind_speed_mph,1)} mph · Gust ${fmt(p.wind_gust_mph,1)} mph<br>Rain: ${rain}<br>${p.temperature_f==null?'':`Temperature ${fmt(p.temperature_f,0)}°F<br>`}<small>${esc(p.source||'Weather')}</small>`).addTo(map);
+  });
+  map.on('mouseenter','launch-weather-points',()=>{map.getCanvas().style.cursor='pointer';});
+  map.on('mouseleave','launch-weather-points',()=>{map.getCanvas().style.cursor='';});
   registerFeaturePopups();
 }
 
@@ -333,6 +354,7 @@ function setDimension(mode) {
   const is3d = mode === '3d';
   map.easeTo({ pitch:is3d?55:0, bearing:is3d?-12:0, duration:500 });
   if (map.getLayer('prediction-3d-curtain')) map.setLayoutProperty('prediction-3d-curtain','visibility',is3d?'visible':'none');
+  if (map.getLayer('drawing-3d')) map.setLayoutProperty('drawing-3d','visibility',is3d?'visible':'none');
   syncAirspaceVisibility();
 }
 
@@ -377,6 +399,30 @@ function setReferenceVisibility(key, visible) {
   if (visible) loadReference(key);
 }
 
+
+function weatherSitePayload(target){
+  const [lon,lat]=target.geometry.coordinates;
+  return {site_id:target._id||slug(target._label||'site'),name:target._label||target.properties?.name||'Launch site',latitude:Number(lat),longitude:Number(lon)};
+}
+function allWeatherTargets(){return [...state.launchLocations,...allCustomPointTargets()];}
+function setWeatherLayerVisibility(visible){if(map?.getLayer('launch-weather-points'))map.setLayoutProperty('launch-weather-points','visibility',visible?'visible':'none');$('weatherMapLegend')?.classList.toggle('hidden',!visible);}
+function setMapMode(mode){
+  state.mapMode=mode==='weather'?'weather':'operations';
+  setWeatherLayerVisibility(state.mapMode==='weather');
+  if(state.mapMode==='weather')refreshWeatherMap();
+}
+function refreshWeatherMap(){
+  if(state.mapMode!=='weather'||!map?.getSource('launch-weather'))return;
+  const requestId=++state.weatherRequestId;const targets=allWeatherTargets();
+  if(!targets.length){map.getSource('launch-weather').setData({type:'FeatureCollection',features:[]});return;}
+  const body={sites:targets.map(weatherSitePayload),launch_datetime:buildLaunchDateTime().toISOString()};
+  try{
+    const r=await api('/api/weather/batch',{method:'POST',body:JSON.stringify(body)});if(requestId!==state.weatherRequestId)return;
+    map.getSource('launch-weather').setData(r.data||{type:'FeatureCollection',features:[]});
+    const failures=(r.results||[]).filter(x=>x.error).length;if(failures)toast(`Weather loaded with ${failures} unavailable site${failures===1?'':'s'}.`,true,4200);
+  }catch(e){if(requestId===state.weatherRequestId)toast(`Weather map: ${e.message}`,true,5500);}
+}
+
 function deriveSiteLabel(feature, idx) { return deriveCityLabel(feature, idx); }
 
 async function loadLaunchLocations() {
@@ -397,6 +443,7 @@ async function loadLaunchLocations() {
   state.referenceLoaded.add('launch_locations');
   if(r.warning) toast(`Launch locations: ${r.warning}`,true,6000);
   if(features.length) console.info(`Loaded ${features.length} launch sites from`,r.sources||[]);
+  if(state.mapMode==='weather')refreshWeatherMap();
 }
 
 function buildPredictSiteList() {
@@ -513,9 +560,11 @@ function updateAltitudeLabels(){
 }
 
 function setAppView(view){
-  state.appView=view==='inflation'?'inflation':'predicts';
+  const allowed=new Set(['predicts','inflation','info']);
+  state.appView=allowed.has(view)?view:'predicts';
   $('predictsView').classList.toggle('hidden',state.appView!=='predicts');
   $('inflationView').classList.toggle('hidden',state.appView!=='inflation');
+  $('infoView')?.classList.toggle('hidden',state.appView!=='info');
   qsa('[data-app-view]').forEach(b=>{const active=b.dataset.appView===state.appView;b.classList.toggle('active',active);b.setAttribute('aria-selected',active?'true':'false');});
   if(state.appView==='predicts')setTimeout(()=>map?.resize?.(),40);
 }
@@ -682,8 +731,9 @@ function renderSummary() {
   entries.forEach(pred=>{const s=pred.summary;const btn=document.createElement('button');btn.className=`summary-row ${pred.site_id===state.activePredictionId?'active':''}`;btn.type='button';const liveStart=pred.live?.used_altitude_m!=null?`Start ${fmt(feet(pred.live.used_altitude_m))} ft · `:'';btn.innerHTML=`<div><strong>${esc(pred.site_name)}</strong><small>${esc(liveStart)}${esc(localTime(s?.landing_time))} · ${fmt(miles(s?.ground_distance_m),1)} mi track</small></div><div class="landing-mini">⌖ ${s?.landing?.latitude?.toFixed(3)??'—'}, ${s?.landing?.longitude?.toFixed(3)??'—'}</div>`;btn.onclick=()=>{state.activePredictionId=pred.site_id;renderSummary();refreshPredictionSources();focusPrediction(pred.site_id);};list.appendChild(btn);});
   const pred=state.predictions.get(state.activePredictionId);const s=pred?.summary;const active=$('activeSummary');
   if(!s){active.classList.add('hidden');return;}active.classList.remove('hidden');
-  $('landingCoords').textContent=`${s.landing.latitude.toFixed(5)}°, ${s.landing.longitude.toFixed(5)}°`;$('landingTime').textContent=`Landing ${localTime(s.landing_time)}`;$('flightDuration').textContent=duration(s.flight_duration_s);$('maxAltitude').textContent=`${fmt(feet(s.max_altitude_m))} ft`;$('groundDistance').textContent=`${fmt(miles(s.ground_distance_m),1)} mi`;$('modelDataset').textContent=s.dataset?String(s.dataset).slice(0,16):'Latest';
+  $('landingCoords').textContent=`${s.landing.latitude.toFixed(5)}°, ${s.landing.longitude.toFixed(5)}°`;$('landingTime').textContent=`Landing ${localTime(s.landing_time)}`;$('flightDuration').textContent=duration(s.flight_duration_s);$('maxAltitude').textContent=`${fmt(feet(s.max_altitude_m))} ft`;$('groundDistance').textContent=`${fmt(miles(s.ground_distance_m),1)} mi`;$('modelDataset').textContent=s.historical?'Historical':(s.dataset?String(s.dataset).slice(0,16):'Latest');$('modelDataset').title=s.historical_source||s.dataset||'Latest model';
   const stageList=$('stageList');stageList.innerHTML='';(s.stages||[]).forEach(st=>{const row=document.createElement('div');row.className='stage-item';row.innerHTML=`<i class="stage-dot ${esc(st.stage)}"></i><strong>${esc(st.stage[0].toUpperCase()+st.stage.slice(1))} · ${fmt(feet(st.end?.altitude_m))} ft</strong><span>${duration(st.duration_s)}</span>`;stageList.appendChild(row);});
+  
 }
 
 function predictionBounds(entries=visiblePredictionEntries()) {
@@ -709,7 +759,7 @@ function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureColl
 function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:`Geofence ${n}`;}
 function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;invalidateOptimalSiteAnalysis();refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
 function rectangleBaselinePreview(a,b){return{type:'Feature',geometry:{type:'LineString',coordinates:[[a.lng,a.lat],[b.lng,b.lat]]},properties:{kind:'rectangle-guide',preview:true}};}
-function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2}};}
+function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2,upper_altitude_ft:10000,upper_altitude_m:3048}};}
 function cancelRectangleDraft(message='Rectangle drawing cancelled.'){state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();if(message)toast(message);}
 function setDrawMode(mode){state.drawMode=mode;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;qsa('[data-draw-mode]').forEach(b=>b.classList.toggle('active',b.dataset.drawMode===mode));refreshDrawings();if(mode==='point')toast('Draw point: click once to create a working custom launch site.');if(mode==='rectangle')toast('Oriented rectangle: click the START of the first edge, then its END, then click to set the width.');if(mode==='select')toast('Select drawing: click a custom launch point or rectangle.');}
 function handleMapDrawClick(e){
@@ -725,8 +775,17 @@ function handleMapDrawClick(e){
 }
 function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}refreshDrawings();}
 function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_id===state.selectedDrawingId);}
-function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
-function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';$('deleteDrawing').disabled=false;}
+function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²\n3D upper bound: ${fmt(d.properties?.upper_altitude_ft??10000,0)} ft (${fmt(d.properties?.upper_altitude_m??3048,0)} m)`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
+function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
+
+function saveDrawingAltitude(){
+  const d=selectedDrawing();if(!d||!(d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon'))return;
+  const feetValue=Number($('drawingUpperAltitude')?.value);
+  if(!Number.isFinite(feetValue)||feetValue<0||feetValue>200000){toast('Enter a 3D upper bound from 0 to 200,000 ft.',true);return;}
+  d.properties.upper_altitude_ft=feetValue;d.properties.upper_altitude_m=feetValue*0.3048;
+  refreshDrawings();showSelectedDrawing();toast(`3D geofence upper bound set to ${fmt(feetValue)} ft.`);
+}
+
 function saveDrawingName(){const d=selectedDrawing();if(!d)return;const name=$('drawingName').value.trim();if(!name){toast('Enter a name first.',true);return;}d.properties.name=name;refreshDrawings();showSelectedDrawing();toast('Drawing name saved.');}
 function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
 function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
@@ -831,6 +890,25 @@ async function runSweep(){const target=findSweepTarget($('sweepSite').value);if(
 }
 function clearSweep(){state.sweepFeatures=[];refreshPredictionSources();$('sweepProgress').textContent='Sweep results cleared.';}
 
+
+const LAUNCH_THEME_PRESETS={
+  standard:{primary:'#d71920',secondary:'#ffd200',accent:'#6f2da8'},
+  maryland:{primary:'#e21833',secondary:'#ffd200',accent:'#111111'},
+  night:{primary:'#5b78ff',secondary:'#b6c4ff',accent:'#7b4ce0'},
+  aurora:{primary:'#16b889',secondary:'#7ee8c8',accent:'#8b5cf6'},
+};
+function applyLaunchTheme(name='standard',persist=true){
+  const key=Object.prototype.hasOwnProperty.call(LAUNCH_THEME_PRESETS,name)?name:'standard';
+  const preset=LAUNCH_THEME_PRESETS[key];state.launchTheme=key;
+  document.documentElement.style.setProperty('--launch-primary',preset.primary);
+  document.documentElement.style.setProperty('--launch-secondary',preset.secondary);
+  document.documentElement.style.setProperty('--launch-accent',preset.accent);
+  document.documentElement.dataset.launchTheme=key;
+  if($('launchThemeSelect'))$('launchThemeSelect').value=key;
+  if(persist)localStorage.setItem('bpp-launch-theme-preset',key);
+}
+function restoreLaunchTheme(){applyLaunchTheme(localStorage.getItem('bpp-launch-theme-preset')||'standard',false);}
+
 function preferredTheme(){
   const saved=localStorage.getItem('bpp-predicts-theme');
   if(saved==='dark'||saved==='light')return saved;
@@ -854,8 +932,9 @@ function toggleTheme(){applyTheme(state.theme==='dark'?'light':'dark');}
 
 function wireControls(){
   $('themeToggle')?.addEventListener('click',toggleTheme);
-  $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
+  $('launchThemeSelect')?.addEventListener('change',e=>{applyLaunchTheme(e.target.value);toast(`${e.target.options[e.target.selectedIndex].text} launch theme applied.`);});
+  $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));$('infoTab')?.addEventListener('click',()=>setAppView('info'));
+  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
   $('burstAltitudeMode').addEventListener('change',e=>{invalidateOptimalSiteAnalysis();setBurstAltitudeMode(e.target.value);});
@@ -863,22 +942,24 @@ function wireControls(){
   $('ascentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();});
   $('inflationAscentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
-  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',invalidateOptimalSiteAnalysis));
+  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{invalidateOptimalSiteAnalysis();if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();}));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
   $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',()=>{invalidateOptimalSiteAnalysis();updateOptimalSweepLabel();});$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  qsa('input[name="mapmode"]').forEach(x=>x.addEventListener('change',()=>setMapMode(x.value)));
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
   $('collapseLayers').addEventListener('click',()=>{$('layerPanel').classList.add('collapsed');$('reopenLayers').classList.remove('hidden');});$('reopenLayers').addEventListener('click',()=>{$('layerPanel').classList.remove('collapsed');$('reopenLayers').classList.add('hidden');});
-  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);
-  $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>$('aboutDialog').showModal());
-  $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('sweepDialog').showModal();});$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
+  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);$('saveDrawingAltitude')?.addEventListener('click',saveDrawingAltitude);
+  $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>setAppView('info'));
+  $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('sweepPanel').classList.toggle('hidden');});$('closeSweepPanel')?.addEventListener('click',()=>$('sweepPanel').classList.add('hidden'));$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
   $('closeSummary').addEventListener('click',()=>$('predictionSummary').classList.add('hidden'));$('centerLanding').addEventListener('click',centerLanding);$('copyLanding').addEventListener('click',copyLanding);
 }
 
 function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);$('launchDate').value=[tomorrow.getFullYear(),String(tomorrow.getMonth()+1).padStart(2,'0'),String(tomorrow.getDate()).padStart(2,'0')].join('-');}
 
 async function init() {
+  restoreLaunchTheme();
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
   setDefaultDate();wireControls();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');

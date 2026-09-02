@@ -1,3 +1,4 @@
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
@@ -266,7 +267,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "2.9.0"
+    assert h["version"] == "3.2.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -674,3 +675,154 @@ def test_v29_nonviable_preferred_site_is_red_and_no_blue(monkeypatch):
     assert byid["h"]["site_status"] == "no-go"
     assert byid["w"]["site_status"] == "viable"
     assert result["gold_site_id"] is None
+
+
+# v3.0 historical replay, weather, theme, and 3-D geofence regression tests
+
+def test_v30_launch_window_allows_historical_dates_and_keeps_future_guard():
+    import app as appmod
+    from fastapi import HTTPException
+    # Deep historical replay is now intentionally accepted instead of the old 8-hour cutoff.
+    appmod.validate_launch_window(datetime(1950, 6, 1, 12, 0, tzinfo=timezone.utc))
+    with pytest.raises(HTTPException, match="1948"):
+        appmod.validate_launch_window(datetime(1947, 12, 31, 23, 0, tzinfo=timezone.utc))
+    with pytest.raises(HTTPException, match="7 days"):
+        appmod.validate_launch_window(datetime.now(timezone.utc) + appmod.timedelta(days=8))
+
+
+def test_v30_historical_tawhiri_requests_archived_dataset(monkeypatch):
+    import asyncio
+    import app as appmod
+    seen=[]
+    async def fake(params):
+        seen.append(dict(params))
+        return {"request":{"dataset":params.get("dataset")},"prediction":[{"stage":"ascent","trajectory":[]}]}
+    monkeypatch.setattr(appmod,"tawhiri_request",fake)
+    launch=datetime(2020,5,4,13,27,tzinfo=timezone.utc)
+    result,historical=asyncio.run(appmod.tawhiri_for_launch({"profile":"standard_profile"},launch))
+    assert historical is True
+    assert seen[0]["dataset"].startswith("2020-05-04T12:00:00")
+    assert result["request"]["dataset"] == seen[0]["dataset"]
+
+
+def test_v30_ncss_csv_parser_and_wind_interpolation():
+    import app as appmod
+    text=("time,latitude,longitude,level,uwnd\n"
+          "2020-01-01T00:00:00Z,39,-77,1000,2\n"
+          "2020-01-01T00:00:00Z,39,-77,500,10\n"
+          "2020-01-01T06:00:00Z,39,-77,1000,4\n"
+          "2020-01-01T06:00:00Z,39,-77,500,14\n")
+    profiles=appmod._parse_ncss_csv(text,"uwnd")
+    assert len(profiles)==2
+    t=datetime(2020,1,1,3,0,tzinfo=timezone.utc)
+    # 1000 hPa is mapped to ~110 m. Halfway in time gives 3 m/s.
+    assert appmod._wind_at(profiles,t,110)==pytest.approx(3.0)
+    # At the 500 hPa mapped height, halfway in time gives 12 m/s.
+    assert appmod._wind_at(profiles,t,5570)==pytest.approx(12.0)
+
+
+def test_v30_historical_reanalysis_builds_burst_trajectory(monkeypatch):
+    import asyncio
+    import app as appmod
+    # Constant eastward wind profile at all supported pressure levels/times.
+    times=[datetime(2020,1,1,h,tzinfo=timezone.utc) for h in (0,6,12,18)]
+    u={t:{level:10.0 for level in appmod.NCEP_PRESSURE_HEIGHT_M} for t in times}
+    v={t:{level:0.0 for level in appmod.NCEP_PRESSURE_HEIGHT_M} for t in times}
+    async def fake_fetch(variable,*_args,**_kwargs): return u if variable=='uwnd' else v
+    monkeypatch.setattr(appmod,'_fetch_ncep_variable',fake_fetch)
+    req=appmod.PredictRequest(
+        mode='burst',launch=appmod.LaunchPoint(name='Replay',latitude=39.0,longitude=-77.0,altitude_m=100),
+        launch_datetime=datetime(2020,1,1,6,0,tzinfo=timezone.utc),ascent_rate_ms=5.5,descent_rate_ms=9,
+        burst_altitude_m=1000,
+    )
+    r=asyncio.run(appmod.run_historical_reanalysis(req))
+    assert r['summary']['historical'] is True
+    assert 'NCEP/NCAR' in r['summary']['historical_source']
+    assert [f['properties']['stage'] for f in r['features']] == ['ascent','descent']
+    assert r['summary']['landing']['longitude'] > -77.0
+
+
+def test_v30_sfRA_standard_pressure_180000_normalizes_to_fl180():
+    import app as appmod
+    meters=appmod._parse_altitude_value_m(180000,'FT','STD',upper=True)
+    assert meters == pytest.approx(18000*0.3048,rel=1e-12)
+    data=appmod.annotate_airspace_verticals({"type":"FeatureCollection","features":[{
+        "type":"Feature","geometry":{"type":"Polygon","coordinates":[]},"properties":{
+            "NAME":"WASHINGTON, DC METROPOLITAN AREA SPECIAL FLIGHT RULES AREA",
+            "UPPER_VAL":180000,"UPPER_UOM":"FT","UPPER_CODE":"STD","LOWER_VAL":0,"LOWER_CODE":"SFC"
+        }}]},'controlled')
+    assert data['features'][0]['properties']['bpp_upper_m'] == pytest.approx(5486.4)
+
+
+def test_v30_weather_archive_parses_wind_gust_rain(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._weather_cache.clear()
+    payload={
+        'latitude':39.0,'longitude':-77.0,
+        'hourly':{
+            'time':['2020-01-01T11:00','2020-01-01T12:00','2020-01-01T13:00'],
+            'temperature_2m':[40,41,42],'precipitation':[0,0.02,0], 'rain':[0,0.02,0],
+            'weather_code':[0,61,0],'wind_speed_10m':[5,8,6],'wind_direction_10m':[270,280,290],
+            'wind_gusts_10m':[10,17,12],'surface_pressure':[1010,1009,1008],
+        }
+    }
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return payload
+    class Client:
+        def __init__(self,*a,**k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*a): pass
+        async def get(self,*a,**k): return Resp()
+    monkeypatch.setattr(appmod.httpx,'AsyncClient',Client)
+    r=asyncio.run(appmod.fetch_launch_weather(39,-77,datetime(2020,1,1,12,0,tzinfo=timezone.utc)))
+    assert r['source'] == 'Open-Meteo Historical Weather'
+    assert r['wind_speed_mph'] == 8
+    assert r['wind_gust_mph'] == 17
+    assert r['rain'] is True
+    assert r['rain_in'] == pytest.approx(.02)
+
+
+def test_v32_frontend_uses_minimal_stable_controls():
+    from pathlib import Path
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    css=(base/'static'/'styles.css').read_text(encoding='utf-8')
+    for item in ['launchThemeSelect','weatherMapLegend','drawingUpperAltitude','saveDrawingAltitude','infoTab','infoView','sweepPanel']:
+        assert f'id="{item}"' in html
+    assert 'launchThemeButton' not in html and 'launchThemeDialog' not in html
+    assert 'modalBackdrop' not in html and '<dialog' not in html.lower()
+    assert 'name="mapmode" value="weather"' in html
+    assert "setMapMode" in js and "refreshWeatherMap" in js
+    assert "upper_altitude_m:3048" in js
+    assert "fill-extrusion-height" in js and "upper_altitude_m" in js
+    assert "applyLaunchTheme" in js and "restoreLaunchTheme" in js
+    assert "openModal(" not in js and "showModal(" not in js
+    assert "--launch-primary" in css
+
+
+def test_v30_build_contract_and_docs():
+    import asyncio
+    import app as appmod
+    from pathlib import Path
+    h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
+    assert h['version']=='3.2.0'
+    assert c['historical_predicts_from']=='1948-01-01'
+    assert c['weather'] is True
+    base=Path(__file__).resolve().parents[2]
+    assert '3.2.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+
+
+def test_v32_no_prompt_modal_or_history_hint():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    assert '<dialog' not in html.lower()
+    assert 'historical-hint' not in html
+    assert 'data-app-view="info"' in html
+    for token in ['openModal(', 'closeModal(', 'showModal(', 'prompt(', 'alert(', 'confirm(']:
+        assert token not in js
+    assert "setAppView('info')" in js
+    assert "launchThemeSelect" in js and "sweepPanel" in js

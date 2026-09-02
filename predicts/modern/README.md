@@ -1,52 +1,39 @@
-# BPP Predicts v2.9.0 — Standalone Predicts + Inflation Calculator
+# BPP Predicts v3.2.0 — Stable Minimal UI
 
-This build keeps the v2.4 operational predictor and adds a fully integrated inflation calculator based directly on the supplied `InflationCalculations2024.m`. No MATLAB installation is required.
+This build keeps the proven operational predictor and strips the newer UI back to simple controls:
+- Launch themes are a header dropdown (no modal).
+- Launch Weather is a map mode with clickable weather markers (no weather prompt/panel).
+- Info is a normal top-level tab.
+- 3D rectangle upper altitude remains in the drawing inspector.
+- Parameter Sweep uses one small in-map panel rather than a dialog/modal.
+- Historical prediction/weather backend support remains available, with the 7-day future limit preserved.
 
-## Application tabs
+All established prediction, optimal-site, APRS, airspace, inflation-calculator, export, and drawing functionality is retained.
 
-The local application has exactly two primary tabs:
+# BPP Predicts v3.2.0
 
-- **Predicts** — launch-site, custom-site, live APRS, airspace, drawing, export, sweep, and trajectory workflows.
-- **Inflation Calculator** — the MATLAB-equivalent launch inflation calculation.
+Standalone University of Maryland Balloon Payload Program prediction and launch-planning application.
 
-The previous BPP website navigation links are removed from the local interface.
+## Run on Windows
+From the repository root, double-click `START_BPP_PREDICTS.bat`, or run it from a terminal. The launcher verifies `/api/health` before opening the browser and prevents an older local BPP build from being mistaken for this release.
 
-## Burst altitude
+## Major capabilities
+- Burst and stitched-float trajectories.
+- Integrated MATLAB-equivalent inflation calculator and automatic/manual burst altitude.
+- Preset and custom launch sites, custom oriented geofences, 2-D/3-D map modes.
+- FAA Class B/C/D/E, SUA and TFR layers with altitude-aware scoring.
+- Live APRS multi-callsign prediction using packet latitude, longitude, altitude and time.
+- Fast/current and all-site optimal-site searches with optional ascent-rate sweep.
+- Historical replay: archived Tawhiri model cycles first, NOAA/PSL NCEP/NCAR Reanalysis fallback for older dates supported by that archive.
+- Launch weather: wind, gusts, rain and temperature plus a dedicated weather map mode.
+- Launch-specific visual themes without altering operational/safety colors.
+- KML/geofence export, parameter sweep, address query, drawing tools, and prediction summaries.
 
-Burst predictions default to **Automatic (Inflation Calculator)**. The calculator output is copied into the burst-altitude field and refreshed whenever its launch conditions or desired ascent rate change. Switch the Burst Altitude selector to **Manual** to edit the field exactly as before.
+## Historical-data note
+Surface weather archives cover a wider historical period than the upper-air replay engine. This application intentionally requires compatible upper-air wind data for a historical balloon trajectory; its explicit lower bound is 1948. Very old replay results and NOAA fallback results are labelled as historical reconstructions.
 
-The MATLAB model reports burst height **above launch site**, and v2.9 intentionally preserves that model/output rather than silently changing the equations.
+## APRS
+Create `predicts/modern/.env` from `.env.example` and set `APRSFI_API_KEY=...`. Never commit a real API key.
 
-## Launch-site labels
-
-Past launch sites are displayed by **city only**. Duplicate city entries from the online/cache/bundled sources are collapsed so operational locations such as Clear Spring and Cumberland appear once.
-
-## Inflation model provenance
-
-The original supplied MATLAB source is bundled unchanged at `reference/InflationCalculations2024.m`. The Python port preserves the constants and equations: drag coefficient 0.25, gas constants, 2–3 m launch-diameter bracket, scale-lift calculation, PSI conversion, 10.5 m Hwoyee 1600 burst diameter, and the 7238.3 m exponential-density burst-height approximation.
-
-## Start
-
-Windows repository root:
-
-```powershell
-.\START_BPP_PREDICTS.bat
-```
-
-Verify: `http://127.0.0.1:8000/api/health` should report `2.9.0`.
-
-Live APRS still requires `APRSFI_API_KEY` in `.env`. Prediction, APRS, map tiles, and live FAA data require internet access when those services are used.
-
-
-## v2.9 Optimal-site workflow
-
-- **Find Optimal: Current Sites** checks selected preset sites plus every manually drawn launch point.
-- **Find Optimal: All Sites** checks the complete preset list after strict city de-duplication: one row per launch city.
-- The **Optimal ascent sweep** toggle chooses current-rate-only (fast) or current ±0.5/±1.0 m/s. Automatic Burst recalculates the inflation model for each tested rate.
-- Airspace conflicts are scored in 3-D. A horizontal crossing does **not** count when the balloon is above that FAA polygon's upper altitude at the actual crossing.
-- **Gold is reserved only for a viable preferred site**: Clear Spring first, otherwise Hancock.
-- **Green** = any other viable site with no scored 3-D conflict and a safe landing.
-- **Red** = airspace conflict/no-go; Clear Spring or Hancock are also red when they are not viable.
-- There is no blue status and geographic distance is not calculated or used for ranking.
-- Restricted controlled airspace, SUA, and TFR polygons remain landing no-go zones.
-- Parameter-sweep dotted lines remain clickable and identify the exact swept value.
+## Verify
+Open `http://127.0.0.1:8000/api/health`; `version` must be `3.2.0`.
