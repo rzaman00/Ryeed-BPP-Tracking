@@ -39,7 +39,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "3.3.0"
+BUILD_VERSION = "3.4.0"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -1891,23 +1891,15 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
     )
 
 def validate_launch_window(value: datetime) -> None:
-    """Keep the existing seven-day future guard, but allow historical replays.
-
-    True historical trajectories need archived upper-air winds. This build first asks
-    Tawhiri for the matching historical model cycle and can fall back to NOAA's
-    NCEP/NCAR 4x-daily reanalysis for dates back to 1948.
-    """
+    """Accept only current/future launches inside the seven-day model window."""
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
+    if value < now - timedelta(minutes=5):
+        raise HTTPException(status_code=400, detail="Past predictions are not supported. Choose the current time or a future launch time.")
     if value > now + timedelta(days=7):
         raise HTTPException(status_code=400, detail="Launch time may be at most 7 days in the future.")
-    if value < NCEP_REANALYSIS_START:
-        raise HTTPException(
-            status_code=400,
-            detail="Historical upper-air replay is available from January 1, 1948 onward. Earlier dates do not have a compatible upper-air archive in this app.",
-        )
 
 
 @app.get("/")
@@ -1923,8 +1915,8 @@ async def health():
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
         "optimal_site": "active/all-site viability ranking with crossing-altitude airspace checks and preferred-site gold logic",
-        "historical_predicts": "archived Tawhiri cycles with NOAA NCEP/NCAR Reanalysis fallback from 1948",
-        "launch_weather": "Open-Meteo forecast + historical archives",
+        "prediction_window": "current time through 7 days in the future",
+        "launch_weather": "Open-Meteo forecast",
     }
 
 
@@ -1935,7 +1927,7 @@ async def config():
         "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
         "aprs_configured": bool(APRSFI_API_KEY), "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
-        "historical_predicts_from": "1948-01-01",
+        "prediction_window_days": 7,
         "weather": True,
     }
 

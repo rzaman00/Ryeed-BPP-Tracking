@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.3.0" rel="stylesheet" />
+  <link href="static/styles.css?v=3.4.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -22,8 +22,8 @@
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.3.0</span>
-      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option></select></label>
+      <span class="build-badge" id="buildBadge">v3.4.0</span>
+      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -41,8 +41,13 @@
 
     <div class="predict-only control-time-group">
       <label class="control-field"><span>Date</span><input id="launchDate" type="date" required></label>
-      <label class="control-field"><span>Time</span><input id="launchTime" type="time" value="10:00" required></label>
-      <label class="control-field timezone"><span>TZ</span><select id="launchTimezone"><option value="local">Local</option><option value="utc">UTC</option></select></label>
+      <div class="control-field launch-time-field"><span>Launch Time</span>
+        <button id="launchTimeButton" class="launch-time-button" type="button" aria-haspopup="dialog" aria-expanded="false"><span id="launchTimeDisplay">10:00 AM · Local</span><span aria-hidden="true">◷</span></button>
+        <div id="launchTimePopover" class="launch-time-popover hidden" role="dialog" aria-label="Launch time and time zone">
+          <label><span>Time</span><input id="launchTime" type="time" value="10:00" required></label>
+          <label><span>Time zone</span><select id="launchTimezone"><option value="local">Local</option><option value="utc">UTC</option></select></label>
+        </div>
+      </div>
     </div>
 
     <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
@@ -135,6 +140,7 @@
         <div class="custom-sites-heading">Custom launch sites</div>
         <div id="customPredictSiteList"><p class="loading-text">Draw a point to add a custom launch site.</p></div>
         <label class="custom-predict-label"><span>Enable custom launch sites</span><input id="customPredictEnabled" type="checkbox" checked></label>
+        <button id="clearPredictSites" class="clear-sites-button" type="button">Clear all launch sites</button>
       </section>
     </aside>
     <button class="layers-reopen hidden" id="reopenLayers" type="button">Layers</button>
@@ -155,7 +161,7 @@
     <section class="weather-map-legend hidden" id="weatherMapLegend" aria-label="Launch weather legend">
       <strong>Launch Weather</strong>
       <span><i class="dry"></i>Dry</span><span><i class="rain"></i>Rain</span>
-      <span class="gust-scale"><i class="gust-low"></i><i class="gust-mid"></i><i class="gust-high"></i>Gust ring: low → high</span>
+      <span class="gust-scale"><i class="gust-low"></i><i class="gust-mid"></i><i class="gust-high"></i>Gusts: Low 0–5 · Medium 5–15 · High &gt;15 mph</span>
       <small>Marker and ring size increase with gust speed. Select a marker for wind direction and details.</small>
     </section>
 
@@ -254,14 +260,14 @@
         <p>A quick reference for the tools built into this standalone predictor. Operational colors for trajectories, airspace, and site viability stay fixed even when a launch theme is applied.</p>
       </div>
       <div class="info-grid">
-        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Historical dates use archived atmospheric data when available; future predictions remain limited to the model forecast window.</p></article>
+        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be now through the model's seven-day forecast window.</p></article>
         <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
-        <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click a weather marker for wind, gust, rain, and temperature.</p></article>
+        <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click any launch marker for weather, address details, coordinates, and a direct Ventusky link.</p></article>
         <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
         <article class="info-card"><h2>Live APRS</h2><p>Track one or more APRS callsigns and run live predictions from the latest reported latitude, longitude, altitude, and packet time.</p></article>
         <article class="info-card"><h2>Airspace & 3D</h2><p>Toggle FAA controlled, Class E, special-use, and TFR layers. Switch to 3D to inspect airspace and custom geofence volumes.</p></article>
         <article class="info-card"><h2>Drawing Tools</h2><p>Add custom launch points or draw oriented rectangles. Rectangles can be assigned an upper altitude and visualized as 3D volumes.</p></article>
-        <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, or Aurora colors. Themes never alter red/green/gold status meanings or trajectory colors.</p></article>
+        <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, Aurora, Country Desert, or Summer Beach. Themes never alter operational status or trajectory colors.</p></article>
         <article class="info-card"><h2>Exports & Sweep</h2><p>Use the bottom toolbar for KML export, geofence GeoJSON, parameter sweeps, address queries, and map utilities. Click a dotted sweep path to see the exact parameter value.</p></article>
       </div>
     </div>
@@ -282,6 +288,6 @@
   </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.3.0"></script>
+  <script type="module" src="static/app.js?v=3.4.0"></script>
 </body>
 </html>

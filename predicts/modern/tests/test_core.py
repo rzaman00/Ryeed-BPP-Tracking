@@ -328,7 +328,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.3.0"
+    assert h["version"] == "3.4.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -740,13 +740,11 @@ def test_v29_nonviable_preferred_site_is_red_and_no_blue(monkeypatch):
 
 # v3.0 historical replay, weather, theme, and 3-D geofence regression tests
 
-def test_v30_launch_window_allows_historical_dates_and_keeps_future_guard():
+def test_v34_launch_window_rejects_past_dates_and_keeps_future_guard():
     import app as appmod
     from fastapi import HTTPException
-    # Deep historical replay is now intentionally accepted instead of the old 8-hour cutoff.
-    appmod.validate_launch_window(datetime(1950, 6, 1, 12, 0, tzinfo=timezone.utc))
-    with pytest.raises(HTTPException, match="1948"):
-        appmod.validate_launch_window(datetime(1947, 12, 31, 23, 0, tzinfo=timezone.utc))
+    with pytest.raises(HTTPException, match="Past predictions"):
+        appmod.validate_launch_window(datetime(1950, 6, 1, 12, 0, tzinfo=timezone.utc))
     with pytest.raises(HTTPException, match="7 days"):
         appmod.validate_launch_window(datetime.now(timezone.utc) + appmod.timedelta(days=8))
 
@@ -975,11 +973,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.3.0'
-    assert c['historical_predicts_from']=='1948-01-01'
+    assert h['version']=='3.4.0'
+    assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.3.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.4.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -993,3 +991,19 @@ def test_v32_no_prompt_modal_or_history_hint():
         assert token not in js
     assert "setAppView('info')" in js
     assert "launchThemeSelect" in js and "sweepPanel" in js
+
+
+def test_v34_launch_details_time_control_and_themes():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    css=(base/'static'/'styles.css').read_text(encoding='utf-8')
+    for item in ['launchTimeButton','launchTimePopover','clearPredictSites']:
+        assert f'id="{item}"' in html
+    assert 'value="country"' in html and 'value="summer"' in html
+    assert 'Open this launch site in Ventusky' in js
+    assert 'showLaunchSiteDetails' in js and 'launchAddress' in js
+    assert "gust<=5" in js and "gust<=15" in js
+    assert 'Past predictions are not supported' in js
+    assert 'html[data-theme="light"] #runPredicts' in css
+    assert '.info-page{background:var(--ui-bg);color:var(--text)}' in css

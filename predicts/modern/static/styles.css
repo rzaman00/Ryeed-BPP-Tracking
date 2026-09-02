@@ -476,3 +476,59 @@ html[data-launch-theme="aurora"] .bottom-tools{
   .site-status-legend,.site-status-legend.beside-summary{left:8px;right:8px;bottom:calc(32% + 62px);min-width:0;max-width:none}.site-status-legend span{white-space:normal}
   .bottom-tools{justify-content:flex-start}
 }
+
+/* --------------------------------------------------------------------------
+   v3.4 launch details, compact time control, and seasonal themes
+   -------------------------------------------------------------------------- */
+html[data-theme="light"] #runPredicts{background:linear-gradient(180deg,#fff,#edf2f7);color:#142033;border:1px solid #aeb8c5;border-top:2px solid var(--launch-primary);box-shadow:0 5px 14px rgba(15,23,42,.12)}
+html[data-theme="light"] #runPredicts:hover{background:linear-gradient(180deg,#fff,#e2eaf3);filter:none}
+html[data-theme="light"] #runPredicts.running{background:#fff4d6;color:#6b4c00;border-color:#d6a93a}
+html[data-theme="light"] #runPredicts.success{background:#e6f7ed;color:#146b3d;border-color:#4ca978}
+
+.launch-time-field{position:relative;overflow:visible;flex-basis:150px}
+.launch-time-button{height:30px;width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--ui-border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 9px;font-size:12px;font-weight:700;white-space:nowrap}
+.launch-time-button:hover,.launch-time-button[aria-expanded="true"]{background:var(--surface);border-color:#3688e8;box-shadow:0 0 0 3px rgba(54,136,232,.16)}
+.launch-time-popover{position:absolute;left:5px;top:calc(100% + 6px);z-index:90;width:230px;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;border:1px solid var(--ui-border-strong);border-radius:12px;background:var(--surface);color:var(--text);box-shadow:var(--control-shadow)}
+.launch-time-popover label{display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:750;color:var(--text-muted)}
+.launch-time-popover input,.launch-time-popover select{width:100%;height:34px;border:1px solid var(--ui-border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:4px 7px}
+.control-strip.float-mode .control-field{flex-basis:104px;min-width:96px;padding-inline:7px}.control-strip.float-mode .launch-time-field{flex-basis:138px}.control-strip.float-mode .run-button,.control-strip.float-mode .optimal-button,.control-strip.float-mode .optimal-sweep-toggle{flex-basis:132px;min-width:124px}
+
+.clear-sites-button{width:100%;margin-top:8px;border:1px solid var(--ui-border-strong);border-radius:8px;background:var(--surface-2);color:var(--text);padding:7px 9px;font-size:11px;font-weight:800;cursor:pointer}
+.clear-sites-button:hover{background:var(--hover);border-color:#5e97d6}
+
+.launch-site-detail-popup .maplibregl-popup-content{padding:0;overflow:hidden}
+.launch-site-popup{min-width:310px}.launch-site-popup h3{margin:0;padding:12px 14px;border-bottom:1px solid var(--ui-border);font-size:16px}
+.launch-site-popup section{display:grid;gap:8px;padding:11px 14px;border-bottom:1px solid var(--ui-border)}
+.launch-site-popup section:last-child{border-bottom:0}.launch-site-popup section>strong{text-transform:uppercase;letter-spacing:.08em;font-size:10px;color:var(--text-muted)}
+.launch-site-popup .popup-weather-row{grid-template-columns:auto 1fr;align-items:center;margin:0}.launch-site-popup .popup-weather-row span:last-child{grid-column:1/-1}
+.launch-site-popup .gust-low{color:#64748b}.launch-site-popup .gust-medium{color:#a16207}.launch-site-popup .gust-high{color:#dc2626;font-weight:800}
+.launch-popup-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.launch-popup-grid span{display:flex;flex-direction:column;gap:2px;padding:6px;border:1px solid var(--ui-border);border-radius:7px;background:var(--surface-2)}
+.launch-popup-grid small,.launch-detail-row small{color:var(--text-muted);font-size:9px}.launch-popup-grid b,.launch-detail-row b{font-size:11px;line-height:1.35}
+.launch-popup-loading{margin:0;color:var(--text-muted);font-size:11px}.weather-source{font-size:9px;color:var(--text-muted)}
+.ventusky-link{display:flex;align-items:center;justify-content:center;border:1px solid #2e86c1;border-radius:8px;background:#e8f5ff;color:#075985!important;padding:7px 9px;text-decoration:none;font-weight:800;font-size:11px}
+html[data-theme="dark"] .ventusky-link{background:#102c42;color:#8dd5ff!important;border-color:#246c9c}
+.launch-detail-row{display:flex;flex-direction:column;gap:2px}.launch-optimal-detail{display:flex;flex-direction:column;gap:2px;padding:7px;border-radius:8px;background:color-mix(in srgb,var(--surface-2) 85%,var(--launch-secondary) 15%);font-size:10px}
+
+.info-page{background:var(--ui-bg);color:var(--text)}
+.info-heading h1,.info-card h2{color:var(--text)}.info-heading p,.info-card p{color:var(--text-muted)}
+.info-card{background:var(--surface);border-color:var(--ui-border);box-shadow:var(--soft-shadow)}
+
+/* Country and summer use bold environmental color fields plus lightweight icon
+   motifs, while all operational map colors stay fixed. */
+html[data-launch-theme="country"] .site-header,
+html[data-launch-theme="country"] .control-strip,
+html[data-launch-theme="country"] .bottom-tools{background:linear-gradient(110deg,#4a2d18,#a45127 42%,#d7a64d 72%,#31533b)}
+html[data-launch-theme="summer"] .site-header,
+html[data-launch-theme="summer"] .control-strip,
+html[data-launch-theme="summer"] .bottom-tools{background:linear-gradient(110deg,#075985,#0284c7 42%,#22d3ee 70%,#facc15)}
+html[data-launch-theme="country"] .site-header::before,
+html[data-launch-theme="country"] .control-strip::before,
+html[data-launch-theme="country"] .bottom-tools::before,
+html[data-launch-theme="summer"] .site-header::before,
+html[data-launch-theme="summer"] .control-strip::before,
+html[data-launch-theme="summer"] .bottom-tools::before{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-around;pointer-events:none;opacity:.24;font-size:24px;letter-spacing:clamp(20px,7vw,100px);white-space:nowrap;overflow:hidden}
+html[data-launch-theme="country"] .site-header::before,html[data-launch-theme="country"] .control-strip::before,html[data-launch-theme="country"] .bottom-tools::before{content:"🌵  🐄  🏜️  🌵  🐄  🏜️"}
+html[data-launch-theme="summer"] .site-header::before,html[data-launch-theme="summer"] .control-strip::before,html[data-launch-theme="summer"] .bottom-tools::before{content:"🌴  🌊  ☀️  🌴  🌊  ☀️"}
+.control-strip{position:relative}.control-strip>*{position:relative;z-index:1}.bottom-tools>*{position:relative;z-index:1}
+
+@media(max-width:620px){.launch-time-popover{left:0;width:min(230px,calc(100vw - 24px))}.launch-site-popup{min-width:260px}.launch-popup-grid{grid-template-columns:1fr}}

@@ -1,8 +1,13 @@
-# BPP Predicts v3.3.0 — Responsive Mission UI
+# BPP Predicts v3.4.0 — Responsive Mission UI
 
 This build keeps the proven operational predictor and makes its dense map UI easier to operate:
 - Launch themes are a header dropdown and now style the complete top and bottom chrome.
 - Launch Weather uses distinct white dry markers, blue rain markers, and gust-severity rings.
+- Clicking a launch marker shows weather, address, coordinates, and a Ventusky link in one card.
+- BPP gust categories are Low 0–5 mph, Medium 5–15 mph, and High above 15 mph.
+- Time and time zone share one clock popover, and Clear All deselects every site.
+- Country Desert and Summer Beach join the existing launch themes.
+- Prediction times are limited to now through seven days ahead.
 - Header tabs and prediction controls wrap dynamically instead of clipping.
 - Geofence editing, prediction summaries, weather, and optimal status occupy separate map zones.
 - Optimal-site colors persist through normal map interaction until a new predicts run begins.
@@ -10,7 +15,7 @@ This build keeps the proven operational predictor and makes its dense map UI eas
 
 All established prediction, optimal-site, APRS, airspace, inflation-calculator, export, and drawing functionality is retained.
 
-# BPP Predicts v3.3.0
+# BPP Predicts v3.4.0
 
 Standalone University of Maryland Balloon Payload Program prediction and launch-planning application.
 
@@ -24,16 +29,13 @@ From the repository root, double-click `START_BPP_PREDICTS.bat`, or run it from 
 - FAA Class B/C/D/E, SUA and TFR layers with altitude-aware scoring.
 - Live APRS multi-callsign prediction using packet latitude, longitude, altitude and time.
 - Fast/current and all-site optimal-site searches with optional ascent-rate sweep.
-- Historical replay: archived Tawhiri model cycles first, NOAA/PSL NCEP/NCAR Reanalysis fallback for older dates supported by that archive.
+- Current and future prediction dates within the seven-day model window.
 - Launch weather: wind, gusts, rain and temperature plus a dedicated weather map mode.
 - Launch-specific visual themes without altering operational/safety colors.
 - KML/geofence export, parameter sweep, address query, drawing tools, and prediction summaries.
-
-## Historical-data note
-Surface weather archives cover a wider historical period than the upper-air replay engine. This application intentionally requires compatible upper-air wind data for a historical balloon trajectory; its explicit lower bound is 1948. Very old replay results and NOAA fallback results are labelled as historical reconstructions.
 
 ## APRS
 Create `predicts/modern/.env` from `.env.example` and set `APRSFI_API_KEY=...`. Never commit a real API key.
 
 ## Verify
-Open `http://127.0.0.1:8000/api/health`; `version` must be `3.3.0`.
+Open `http://127.0.0.1:8000/api/health`; `version` must be `3.4.0`.

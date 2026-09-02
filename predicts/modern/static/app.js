@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.3.0';
+const BUILD_VERSION = '3.4.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -51,6 +51,7 @@ const state = {
 
 let map;
 let activeMapPopup = null;
+let launchSitePopupRequestId = 0;
 
 function openMapPopup(options = {}) {
   activeMapPopup?.remove();
@@ -104,6 +105,12 @@ function fmt(value, digits = 0) { return Number(value || 0).toLocaleString(undef
 function windDirectionLabel(degrees) {
   const directions = ['N','NE','E','SE','S','SW','W','NW'];
   return directions[Math.round((((Number(degrees) % 360) + 360) % 360) / 45) % 8];
+}
+function gustCategory(mph) {
+  const gust=Number(mph||0);
+  if(gust<=5)return {label:'Low',className:'low'};
+  if(gust<=15)return {label:'Medium',className:'medium'};
+  return {label:'High',className:'high'};
 }
 function duration(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';
@@ -251,7 +258,7 @@ function addOperationalLayers() {
     'circle-radius':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,11,15,16,30,23,50,31],
     'circle-color':'rgba(0,0,0,0)',
     'circle-stroke-width':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,2,30,4,50,6],
-    'circle-stroke-color':['step',['coalesce',['to-number',['get','wind_gust_mph']],0],'#94a3b8',15,'#facc15',25,'#fb923c',35,'#ef4444'],
+    'circle-stroke-color':['case',['<=',['coalesce',['to-number',['get','wind_gust_mph']],0],5],'#94a3b8',['<=',['coalesce',['to-number',['get','wind_gust_mph']],0],15],'#facc15','#ef4444'],
     'circle-stroke-opacity':.9
   }});
   map.addLayer({id:'launch-weather-points',type:'circle',source:'launch-weather',layout:{visibility:'none'},paint:{
@@ -307,9 +314,7 @@ function addOperationalLayers() {
 
   map.on('click','launch-weather-points',(e)=>{
     const f=e.features?.[0];if(!f)return;const p=f.properties||{};const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
-    const rain=String(p.rain)==='true'||p.rain===true?'Yes':'No';
-    const direction=Number(p.wind_direction_deg);const directionText=Number.isFinite(direction)?`${Math.round(direction)}° ${windDirectionLabel(direction)}`:'Unknown';
-    openMapPopup({offset:14,className:'weather-detail-popup'}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(p.site_name||'Launch site')}</strong><div class="popup-weather-row"><b>${rain==='Yes'?'Rain':'Dry'}</b><span>Wind ${fmt(p.wind_speed_mph,1)} mph</span><span>Gust ${fmt(p.wind_gust_mph,1)} mph</span></div><div><b>Direction:</b> ${esc(directionText)}</div>${p.temperature_f==null?'':`<div><b>Temperature:</b> ${fmt(p.temperature_f,0)}°F</div>`}<small>${esc(p.source||'Weather')}</small>`).addTo(map);
+    showLaunchSiteDetails({siteId:p.site_id,siteName:p.site_name,coordinates:coords.slice(0,2),weather:p});
   });
   map.on('mouseenter','launch-weather-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','launch-weather-points',()=>{map.getCanvas().style.cursor='';});
@@ -344,12 +349,7 @@ function registerFeaturePopups() {
   map.on('mouseleave','sweep-hitbox',()=>{map.getCanvas().style.cursor='';});
   map.on('click','optimal-site-points',(e)=>{
     const f=e.features?.[0];if(!f)return;const p=f.properties||{};
-    const intrusion=Number(p.airspace_intrusion_m||0);
-    const viable=p.viable===true||p.viable==='true';
-    const status=p.site_status==='best'?'Preferred + Viable (Gold)':p.site_status==='viable'?'Viable':'No-Go';
-    const bestRate=Number(p.best_ascent_rate_ms||0);
-    const conflicts=String(p.conflict_layers||'').trim();
-    openMapPopup({className:'optimal-detail-popup'}).setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>3-D airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div>${conflicts?`<div><b>Conflict layers:</b> ${esc(conflicts)}</div>`:''}`).addTo(map);
+    const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];showLaunchSiteDetails({siteId:p.site_id,siteName:p.site_name,coordinates:coords.slice(0,2),optimal:p});
   });
   map.on('mouseenter','optimal-site-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','optimal-site-points',()=>{map.getCanvas().style.cursor='';});
@@ -364,6 +364,14 @@ function registerFeaturePopups() {
   map.on('click','prediction-lines',(e)=>{
     const id=e.features?.[0]?.properties?.site_id;if(id&&state.predictions.has(id)){state.activePredictionId=id;renderSummary();refreshPredictionSources();}
   });
+  map.on('click','prediction-launch-points-layer',(e)=>{
+    const f=e.features?.[0];if(!f)return;const p=f.properties||{};const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
+    showLaunchSiteDetails({siteId:p.site_id,siteName:p.site_name,coordinates:coords.slice(0,2)});
+  });
+  map.on('click','ref-launch_locations-layer',(e)=>{
+    const f=e.features?.[0];if(!f)return;const p=f.properties||{};const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
+    showLaunchSiteDetails({siteId:p.site_id,siteName:p.site_name||p.city||p.name,coordinates:coords.slice(0,2)});
+  });
   map.on('click','prediction-landing-points-layer',(e)=>{
     const f=e.features?.[0];if(!f)return;
     const id=f.properties?.site_id;if(id&&state.predictions.has(id)){state.activePredictionId=id;renderSummary();refreshPredictionSources();}
@@ -371,7 +379,7 @@ function registerFeaturePopups() {
     const landingTime=f.properties?.landing_time||'';
     openMapPopup({offset:12}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(f.properties?.site_name||'Predicted landing')}</strong><br>${Number(coords[1]).toFixed(5)}, ${Number(coords[0]).toFixed(5)}${landingTime?`<br>${esc(localTime(landingTime))}`:''}`).addTo(map);
   });
-  ['prediction-lines','prediction-landing-points-layer'].forEach(layer=>{
+  ['prediction-lines','prediction-launch-points-layer','prediction-landing-points-layer','ref-launch_locations-layer'].forEach(layer=>{
     map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});
     map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
   });
@@ -441,6 +449,41 @@ function weatherSitePayload(target){
   return {site_id:target._id||slug(target._label||'site'),name:target._label||target.properties?.name||'Launch site',latitude:Number(lat),longitude:Number(lon)};
 }
 function allWeatherTargets(){return [...state.launchLocations,...allCustomPointTargets()];}
+function launchTargetById(siteId){
+  return state.launchLocations.find(x=>x._id===siteId)||allCustomPointTargets().find(x=>x._id===siteId)||null;
+}
+function launchTargetNear(coordinates){
+  const [lon,lat]=coordinates.map(Number);let best=null,bestDistance=Infinity;
+  for(const target of allWeatherTargets()){
+    const [x,y]=target.geometry?.coordinates||[];const distance=Math.hypot(Number(x)-lon,Number(y)-lat);
+    if(distance<bestDistance){best=target;bestDistance=distance;}
+  }
+  return bestDistance<.001?best:null;
+}
+function launchAddress(properties={}){
+  const direct=properties.address||properties.ADDRESS||properties.Address;
+  if(direct)return String(direct);
+  return [properties.street||properties.STREET,properties.city||properties.CITY,properties.state||properties.STATE,properties.zip||properties.ZIP].filter(Boolean).join(', ')||'No street address available';
+}
+function ventuskyUrl(lat,lon){return `https://www.ventusky.com/?p=${Number(lat).toFixed(5)};${Number(lon).toFixed(5)};9&l=wind-10m`;}
+function launchDetailsHtml({target,siteName,coordinates,weather,optimal,loading=false}){
+  const [lon,lat]=coordinates.map(Number);const props=target?.properties||{};const title=siteName||target?._label||props.name||'Launch site';
+  const rain=weather&&(String(weather.rain)==='true'||weather.rain===true);const direction=Number(weather?.wind_direction_deg);const gust=gustCategory(weather?.wind_gust_mph);
+  const weatherHtml=loading?'<p class="launch-popup-loading">Loading launch conditions…</p>':weather?`<div class="popup-weather-row"><b>${rain?'Rain':'Dry'}</b><span>Wind ${fmt(weather.wind_speed_mph,1)} mph</span><span class="gust-${gust.className}">${gust.label} gust · ${fmt(weather.wind_gust_mph,1)} mph</span></div><div class="launch-popup-grid"><span><small>Direction</small><b>${Number.isFinite(direction)?`${Math.round(direction)}° ${windDirectionLabel(direction)}`:'—'}</b></span><span><small>Temperature</small><b>${weather.temperature_f==null?'—':`${fmt(weather.temperature_f,0)}°F`}</b></span><span><small>Precipitation</small><b>${fmt(weather.precipitation_in,2)} in</b></span><span><small>Forecast time</small><b>${esc(localTime(weather.datetime))}</b></span></div><small class="weather-source">${esc(weather.source||'Weather forecast')}</small>`:'<p class="launch-popup-loading">Conditions are unavailable for this site.</p>';
+  const optimalHtml=optimal?`<div class="launch-optimal-detail"><b>${esc(optimal.site_status==='best'?'Preferred + viable':optimal.site_status==='viable'?'Viable':'No-go')}</b><span>Best ascent ${fmt(optimal.best_ascent_rate_ms,1)} m/s · Airspace intrusion ${fmt(miles(optimal.airspace_intrusion_m),2)} mi</span></div>`:'';
+  return `<div class="launch-site-popup"><h3>${esc(title)}</h3><section><strong>Weather</strong>${weatherHtml}<a class="ventusky-link" href="${esc(ventuskyUrl(lat,lon))}" target="_blank" rel="noopener noreferrer">Open this launch site in Ventusky ↗</a></section><section><strong>Launch details</strong><div class="launch-detail-row"><small>Address</small><b>${esc(launchAddress(props))}</b></div><div class="launch-detail-row"><small>Coordinates</small><b>${lat.toFixed(5)}, ${lon.toFixed(5)}</b></div>${props.data_source?`<div class="launch-detail-row"><small>Location source</small><b>${esc(props.data_source)}</b></div>`:''}${optimalHtml}</section></div>`;
+}
+async function showLaunchSiteDetails({siteId,siteName,coordinates,weather=null,optimal=null}){
+  const requestId=++launchSitePopupRequestId;const target=launchTargetById(siteId)||launchTargetNear(coordinates);const resolvedId=siteId||target?._id;
+  let currentWeather=weather||state.weatherBySite.get(resolvedId)||null;
+  const popup=openMapPopup({offset:14,className:'launch-site-detail-popup',maxWidth:'360px'}).setLngLat(coordinates).setHTML(launchDetailsHtml({target,siteName,coordinates,weather:currentWeather,optimal,loading:!currentWeather})).addTo(map);
+  if(currentWeather)return;
+  try{
+    const [lon,lat]=coordinates;currentWeather=await api(`/api/weather/site?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}&launch_datetime=${encodeURIComponent(buildLaunchDateTime().toISOString())}`);
+    if(resolvedId)state.weatherBySite.set(resolvedId,currentWeather);
+    if(requestId===launchSitePopupRequestId&&activeMapPopup===popup)popup.setHTML(launchDetailsHtml({target,siteName,coordinates,weather:currentWeather,optimal}));
+  }catch(e){if(requestId===launchSitePopupRequestId&&activeMapPopup===popup)popup.setHTML(launchDetailsHtml({target,siteName,coordinates,weather:null,optimal}));}
+}
 function setWeatherLayerVisibility(visible){
   ['launch-weather-gust-ring','launch-weather-points'].forEach(id=>{if(map?.getLayer(id))map.setLayoutProperty(id,'visibility',visible?'visible':'none');});
   $('weatherMapLegend')?.classList.toggle('hidden',!visible);
@@ -463,6 +506,7 @@ async function refreshWeatherMap(){
   const body={sites:targets.map(weatherSitePayload),launch_datetime:buildLaunchDateTime().toISOString()};
   try{
     const r=await api('/api/weather/batch',{method:'POST',body:JSON.stringify(body),signal:controller.signal});if(requestId!==state.weatherRequestId)return;
+    state.weatherBySite.clear();for(const item of r.results||[]){if(item.weather)state.weatherBySite.set(item.site_id,item.weather);}
     map.getSource('launch-weather').setData(r.data||{type:'FeatureCollection',features:[]});
     const failures=(r.results||[]).filter(x=>x.error).length;if(failures)toast(`Weather loaded with ${failures} unavailable site${failures===1?'':'s'}.`,true,4200);
   }catch(e){if(e.name!=='AbortError'&&requestId===state.weatherRequestId)toast(`Weather map: ${e.message}`,true,5500);}
@@ -485,7 +529,8 @@ async function loadLaunchLocations() {
   });
   buildPredictSiteList();
   const allBtn=$('findOptimalAll');if(allBtn){const label=allBtn.querySelector('.optimal-label');if(label)label.textContent=`Find Optimal: All ${state.launchLocations.length} Sites`;}
-  map.getSource('ref-launch_locations')?.setData({type:'FeatureCollection',features});
+  const mapFeatures=state.launchLocations.map(site=>({...site,properties:{...(site.properties||{}),site_id:site._id,site_name:site._label}}));
+  map.getSource('ref-launch_locations')?.setData({type:'FeatureCollection',features:mapFeatures});
   state.referenceLoaded.add('launch_locations');
   if(r.warning) toast(`Launch locations: ${r.warning}`,true,6000);
   if(features.length) console.info(`Loaded ${features.length} launch sites from`,r.sources||[]);
@@ -512,6 +557,11 @@ function buildCustomPredictSiteList(){
   const points=state.drawings.filter(d=>d.properties?.kind==='point');
   for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';label.dataset.customPredictSiteRow=id;const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
   if(!points.length)root.innerHTML='<p class="loading-text">Draw a point to add a custom launch site.</p>';
+}
+function clearPredictSites(){
+  qsa('input[data-predict-site],input[data-custom-predict-site]').forEach(input=>{input.checked=false;});
+  state.drawings.filter(d=>d.properties?.kind==='point').forEach(d=>{d.properties.predict_enabled=false;});
+  refreshPredictionSources();refreshMarkers();renderSummary();toast('All launch sites deselected.');
 }
 function selectedPresetSites() {
   const checked=new Set(qsa('input[data-predict-site]:checked').map(x=>x.dataset.predictSite));
@@ -593,6 +643,7 @@ async function findOptimalSite(scope='current'){
 
 function setPredictionType(type) {
   state.predictType = type;
+  qs('.control-strip')?.classList.toggle('float-mode',type==='float');
   qsa('.burst-control').forEach(el=>el.classList.toggle('hidden',type!=='burst'));
   qsa('.float-control').forEach(el=>el.classList.toggle('hidden',type!=='float'));
   $('predictType').value=type;
@@ -669,7 +720,17 @@ function buildLaunchDateTime() {
   const zone=$('launchTimezone').value;
   const d=new Date(`${date}T${time}:00${zone==='utc'?'Z':''}`);
   if(Number.isNaN(d.getTime()))throw new Error('Invalid launch date/time');
+  if(d.getTime()<Date.now()-5*60*1000)throw new Error('Past predictions are not supported. Choose the current time or a future launch time.');
   return d;
+}
+function updateLaunchTimeControl(){
+  const value=$('launchTime')?.value||'10:00';const [rawHour,rawMinute]=value.split(':').map(Number);const hour=rawHour%12||12;const suffix=rawHour>=12?'PM':'AM';const zone=$('launchTimezone')?.value==='utc'?'UTC':'Local';
+  if($('launchTimeDisplay'))$('launchTimeDisplay').textContent=`${hour}:${String(rawMinute||0).padStart(2,'0')} ${suffix} · ${zone}`;
+}
+function toggleLaunchTimePopover(force){
+  const popover=$('launchTimePopover'),button=$('launchTimeButton');if(!popover||!button)return;
+  const open=typeof force==='boolean'?force:popover.classList.contains('hidden');popover.classList.toggle('hidden',!open);button.setAttribute('aria-expanded',String(open));
+  if(open)setTimeout(()=>$('launchTime')?.focus(),0);
 }
 function predictionBody(target) {
   const [lon,lat]=target.geometry.coordinates;
@@ -950,6 +1011,8 @@ const LAUNCH_THEME_PRESETS={
   maryland:{primary:'#e21833',secondary:'#ffd200',accent:'#111111'},
   night:{primary:'#5b78ff',secondary:'#b6c4ff',accent:'#7b4ce0'},
   aurora:{primary:'#16b889',secondary:'#7ee8c8',accent:'#8b5cf6'},
+  country:{primary:'#c76a2b',secondary:'#f4c95d',accent:'#3d6b3d'},
+  summer:{primary:'#0284c7',secondary:'#fde047',accent:'#14b8a6'},
 };
 function applyLaunchTheme(name='standard',persist=true){
   const key=Object.prototype.hasOwnProperty.call(LAUNCH_THEME_PRESETS,name)?name:'standard';
@@ -988,7 +1051,10 @@ function wireControls(){
   $('themeToggle')?.addEventListener('click',toggleTheme);
   $('launchThemeSelect')?.addEventListener('change',e=>{applyLaunchTheme(e.target.value);toast(`${e.target.options[e.target.selectedIndex].text} launch theme applied.`);});
   $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));$('infoTab')?.addEventListener('click',()=>setAppView('info'));
-  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
+  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('launchTimePopover')?.classList.contains('hidden')){toggleLaunchTimePopover(false);return;}if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
+  $('launchTimeButton')?.addEventListener('click',e=>{e.stopPropagation();toggleLaunchTimePopover();});
+  $('launchTimePopover')?.addEventListener('click',e=>e.stopPropagation());
+  document.addEventListener('click',()=>toggleLaunchTimePopover(false));
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
   $('burstAltitudeMode').addEventListener('change',e=>setBurstAltitudeMode(e.target.value));
@@ -996,13 +1062,14 @@ function wireControls(){
   $('ascentRate').addEventListener('input',()=>{$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();});
   $('inflationAscentRate').addEventListener('input',()=>{$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
-  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();}));
+  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{if(id==='launchTime'||id==='launchTimezone')updateLaunchTimeControl();if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();}));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
   $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',updateOptimalSweepLabel);$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="mapmode"]').forEach(x=>x.addEventListener('change',()=>setMapMode(x.value)));
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
+  $('clearPredictSites')?.addEventListener('click',clearPredictSites);
   $('collapseLayers').addEventListener('click',()=>{$('layerPanel').classList.add('collapsed');$('reopenLayers').classList.remove('hidden');});$('reopenLayers').addEventListener('click',()=>{$('layerPanel').classList.remove('collapsed');$('reopenLayers').classList.add('hidden');});
   $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);$('saveDrawingAltitude')?.addEventListener('click',saveDrawingAltitude);
   $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>setAppView('info'));
@@ -1017,13 +1084,13 @@ function wireControls(){
   });
 }
 
-function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);$('launchDate').value=[tomorrow.getFullYear(),String(tomorrow.getMonth()+1).padStart(2,'0'),String(tomorrow.getDate()).padStart(2,'0')].join('-');}
+function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);const todayValue=[now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');$('launchDate').min=todayValue;$('launchDate').value=[tomorrow.getFullYear(),String(tomorrow.getMonth()+1).padStart(2,'0'),String(tomorrow.getDate()).padStart(2,'0')].join('-');}
 
 async function init() {
   restoreLaunchTheme();
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
-  setDefaultDate();wireControls();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
+  setDefaultDate();wireControls();updateLaunchTimeControl();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
   await calculateInflation(true).catch(()=>{});
   try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);renderCallsignControls();}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});

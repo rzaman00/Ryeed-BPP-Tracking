@@ -1,8 +1,15 @@
-# Build report — BPP Predicts v3.3.0
+# Build report — BPP Predicts v3.4.0
 
 This build is a responsive UI release on top of the v3.2.1 stability and performance fixes. The backend/frontend architecture and operational predictor are unchanged.
 
-## v3.3.0 fixes
+## v3.4.0 fixes
+- Made Run Predicts light in light mode while preserving running/success feedback.
+- Applied BPP gust thresholds: Low 0–5 mph, Medium 5–15 mph, High above 15 mph.
+- Added one launch-site card with weather, address, coordinates, source, optimal status, and a coordinate-linked Ventusky action.
+- Combined time and time zone in a clock popover and added Clear All for launch sites.
+- Added Country Desert and Summer Beach chrome themes.
+- Disabled unreliable past predictions in the UI and API launch window.
+- Made Info use the shared light/dark surface tokens.
 - Added complete Maryland-flag, star-and-moon Night Launch, and animated Aurora chrome themes.
 - Replaced the clipping control strip with a dynamically wrapping layout.
 - Docked map overlays and added a geofence focus state that prevents inspector/summary overlap.
@@ -30,4 +37,4 @@ This build is a responsive UI release on top of the v3.2.1 stability and perform
 - Launch Theme and Parameter Sweep are hidden until explicitly opened.
 - Info, Predicts, and Inflation Calculator are mutually exclusive application views.
 - Launch Weather changes map mode without opening a modal.
-- Historical replay, 3D geofences, themes, optimal-site logic, live APRS, and inflation behavior remain present.
+- Past launch times are rejected while current/future predicts, 3D geofences, themes, optimal-site logic, live APRS, and inflation behavior remain present.
