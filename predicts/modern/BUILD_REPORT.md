@@ -1,6 +1,13 @@
-# Build report — BPP Predicts v3.2.0
+# Build report — BPP Predicts v3.2.1
 
 This build is a UI-stability release based on v3.0.1. It intentionally does not redesign the operational predictor.
+
+## v3.2.1 fixes
+- Fixed a browser-module syntax error that prevented the entire interface from starting.
+- Added bounded parallel prediction and parameter-sweep execution.
+- Cancelled superseded weather-map requests and reused backend HTTP connections for weather batches.
+- Hardened Tawhiri trajectory validation and historical-float fallback behavior.
+- Corrected hourly weather indexing when an upstream timestamp is malformed.
 
 ## Fixes
 - Replaced native `<dialog>` elements with explicit contained modal panels for Launch Theme and Parameter Sweep.

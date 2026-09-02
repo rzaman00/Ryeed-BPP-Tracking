@@ -37,6 +37,28 @@ def test_summary():
     assert len(result["stages"]) == 2
 
 
+def test_summary_rejects_empty_trajectories_cleanly():
+    from app import ExternalServiceError
+
+    empty = stage_feature("ascent", [], {"mode": "burst"})
+    with pytest.raises(ExternalServiceError, match="trajectory"):
+        summarize([empty], {"mode": "burst"})
+
+
+def test_prediction_trajectory_uses_stage_names_and_rejects_empty_data():
+    from app import ExternalServiceError, prediction_trajectory
+
+    payload = {
+        "prediction": [
+            {"stage": "descent", "trajectory": [{"altitude": 0}]},
+            {"stage": "ascent", "trajectory": [{"altitude": 100}]},
+        ]
+    }
+    assert prediction_trajectory(payload, "ascent", 0)[0]["altitude"] == 100
+    with pytest.raises(ExternalServiceError, match="empty descent"):
+        prediction_trajectory({"prediction": [{"stage": "descent", "trajectory": []}]}, "descent", 0)
+
+
 def test_normalize_launch_locations_legacy_properties():
     from app import normalize_launch_locations
     data = {
@@ -107,6 +129,45 @@ def test_stitched_float_calls_two_standard_predictions(monkeypatch):
     assert calls[1]["burst_altitude"] == 25600
     assert [f["properties"]["stage"] for f in result["features"]] == ["ascent", "float", "descent"]
     assert abs(result["summary"]["landing"]["longitude"] + 77.2) < 1e-9
+
+
+def test_historical_float_second_stage_failure_uses_noaa_fallback(monkeypatch):
+    import asyncio
+
+    import app as appmod
+    from app import LaunchPoint, PredictRequest
+
+    calls = 0
+
+    async def fake_tawhiri(_params):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "request": {"dataset": "2020-01-01T00:00:00Z"},
+                "prediction": [
+                    {"stage": "ascent", "trajectory": [
+                        {"longitude": 283.0, "latitude": 39.0, "altitude": 100, "datetime": "2020-01-01T00:00:00Z"},
+                        {"longitude": 283.1, "latitude": 39.1, "altitude": 22000, "datetime": "2020-01-01T01:00:00Z"},
+                    ]},
+                    {"stage": "descent", "trajectory": []},
+                ],
+            }
+        raise appmod.ExternalServiceError("second stitched request failed")
+
+    fallback = {"type": "FeatureCollection", "features": [], "summary": {"historical": True}}
+
+    async def fake_noaa(_req, _meta=None):
+        return fallback
+
+    monkeypatch.setattr(appmod, "tawhiri_request", fake_tawhiri)
+    monkeypatch.setattr(appmod, "run_historical_reanalysis", fake_noaa)
+    req = PredictRequest(
+        mode="float",
+        launch=LaunchPoint(name="Test", latitude=39.0, longitude=-77.0, altitude_m=100),
+        launch_datetime=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    assert asyncio.run(appmod.run_float(req)) is fallback
 
 
 def test_normalize_callsigns_typed_multi():
@@ -267,7 +328,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.2.0"
+    assert h["version"] == "3.2.1"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -784,6 +845,112 @@ def test_v30_weather_archive_parses_wind_gust_rain(monkeypatch):
     assert r['rain_in'] == pytest.approx(.02)
 
 
+def test_weather_parser_preserves_source_indexes_when_a_timestamp_is_invalid(monkeypatch):
+    import asyncio
+
+    import app as appmod
+
+    appmod._weather_cache.clear()
+    payload = {
+        "latitude": 39.0,
+        "longitude": -77.0,
+        "hourly": {
+            "time": ["not-a-time", "2020-01-01T12:00", "2020-01-01T13:00"],
+            "temperature_2m": [999, 41, 42],
+            "wind_speed_10m": [999, 8, 6],
+        },
+    }
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, *args, **kwargs):
+            return Resp()
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
+    result = asyncio.run(
+        appmod.fetch_launch_weather(39, -77, datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc))
+    )
+    assert result["temperature_f"] == 41
+    assert result["wind_speed_mph"] == 8
+
+
+def test_weather_batch_reuses_one_http_client(monkeypatch):
+    import asyncio
+
+    import app as appmod
+
+    clients = []
+    seen_clients = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    async def fake_weather(latitude, longitude, launch_datetime, client=None):
+        seen_clients.append(client)
+        return {
+            "datetime": appmod.utc_iso(launch_datetime),
+            "temperature_f": 70,
+            "wind_speed_mph": 5,
+            "rain": False,
+        }
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(appmod, "fetch_launch_weather", fake_weather)
+    request = appmod.WeatherBatchRequest(
+        sites=[
+            appmod.WeatherSite(site_id="a", name="A", latitude=39.0, longitude=-77.0),
+            appmod.WeatherSite(site_id="b", name="B", latitude=39.1, longitude=-77.1),
+            appmod.WeatherSite(site_id="c", name="C", latitude=39.2, longitude=-77.2),
+        ],
+        launch_datetime=datetime.now(timezone.utc),
+    )
+    result = asyncio.run(appmod.weather_batch(request))
+    assert len(result["results"]) == 3
+    assert len(clients) == 1
+    assert seen_clients == [clients[0], clients[0], clients[0]]
+
+
+def test_frontend_main_module_passes_a_real_module_syntax_check():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    base = Path(__file__).resolve().parents[1]
+    source = (base / "static" / "app.js").read_text(encoding="utf-8")
+    checked = subprocess.run(
+        [node, "--input-type=module", "--check"],
+        input=source,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+
+
 def test_v32_frontend_uses_minimal_stable_controls():
     from pathlib import Path
     base=Path(__file__).resolve().parents[1]
@@ -808,11 +975,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.2.0'
+    assert h['version']=='3.2.1'
     assert c['historical_predicts_from']=='1948-01-01'
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.2.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.2.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():

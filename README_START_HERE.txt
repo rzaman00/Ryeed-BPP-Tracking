@@ -1,11 +1,11 @@
-BPP Predicts v3.2.0 — UI stability + Info tab
+BPP Predicts v3.2.1 — Stability and performance fixes
 
 Install:
 1. Save predicts\modern\.env if it contains your APRS.fi key.
 2. Replace the previous predicts\modern folder with this package's predicts\modern folder.
 3. Restore .env.
 4. Double-click START_BPP_PREDICTS.bat.
-5. Confirm http://127.0.0.1:8000/api/health reports version 3.2.0.
+5. Confirm http://127.0.0.1:8000/api/health reports version 3.2.1.
 
 What changed from v3.0.1:
 - Removed the control-strip History badge; historical prediction support is now documented in Info.

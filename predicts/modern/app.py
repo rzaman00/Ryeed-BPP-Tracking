@@ -22,7 +22,6 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import LineString, Point, shape
-from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
 ROOT = Path(__file__).resolve().parent
@@ -40,7 +39,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "3.2.0"
+BUILD_VERSION = "3.2.1"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -345,19 +344,28 @@ def parse_iso(value: str) -> datetime:
 
 async def tawhiri_request(params: dict[str, Any]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        for attempt in range(3):
+            try:
                 response = await client.get(TAWHIRI_API_URL, params=params)
                 response.raise_for_status()
                 payload = response.json()
-            if payload.get("error"):
-                raise ExternalServiceError(payload["error"].get("description", "Tawhiri prediction failed"))
-            if not payload.get("prediction"):
-                raise ExternalServiceError("Tawhiri returned no prediction")
-            return payload
-        except (httpx.HTTPError, ValueError, ExternalServiceError) as exc:
-            last_error = exc
+                if payload.get("error"):
+                    description = payload["error"].get("description", "Tawhiri prediction failed")
+                    raise ExternalServiceError(description)
+                if not payload.get("prediction"):
+                    raise ExternalServiceError("Tawhiri returned no prediction")
+                return payload
+            except ExternalServiceError:
+                # A structured Tawhiri error will not become valid after retrying the
+                # identical parameters (notably unavailable historical datasets).
+                raise
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if 400 <= exc.response.status_code < 500 and exc.response.status_code not in {408, 429}:
+                    break
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc
             if attempt < 2:
                 await asyncio.sleep(0.35 * (attempt + 1))
     raise ExternalServiceError(f"Tawhiri request failed: {last_error}")
@@ -380,8 +388,31 @@ def stage_feature(stage: str, trajectory: list[dict[str, Any]], props: dict[str,
     }
 
 
+def prediction_trajectory(payload: dict[str, Any], stage: str, fallback_index: int) -> list[dict[str, Any]]:
+    """Return a validated Tawhiri trajectory without trusting array order alone."""
+    predictions = payload.get("prediction")
+    if not isinstance(predictions, list):
+        raise ExternalServiceError("Tawhiri returned an invalid prediction payload")
+    selected = next(
+        (item for item in predictions if isinstance(item, dict) and item.get("stage") == stage),
+        None,
+    )
+    if selected is None and 0 <= fallback_index < len(predictions):
+        selected = predictions[fallback_index]
+    if not isinstance(selected, dict) or not isinstance(selected.get("trajectory"), list):
+        raise ExternalServiceError(f"Tawhiri returned no valid {stage} trajectory")
+    trajectory = selected["trajectory"]
+    if not trajectory:
+        raise ExternalServiceError(f"Tawhiri returned an empty {stage} trajectory")
+    return trajectory
+
+
 def summarize(features: list[dict[str, Any]], request_meta: dict[str, Any]) -> dict[str, Any]:
-    lines = [f for f in features if f.get("geometry", {}).get("type") == "LineString"]
+    lines = [
+        f for f in features
+        if f.get("geometry", {}).get("type") == "LineString"
+        and f.get("geometry", {}).get("coordinates")
+    ]
     if not lines:
         raise ExternalServiceError("Prediction did not contain a trajectory")
 
@@ -413,6 +444,9 @@ def summarize(features: list[dict[str, Any]], request_meta: dict[str, Any]) -> d
             "start": {"longitude": coords[0][0], "latitude": coords[0][1], "altitude_m": coords[0][2]},
             "end": {"longitude": coords[-1][0], "latitude": coords[-1][1], "altitude_m": coords[-1][2]},
         })
+
+    if not all_coords:
+        raise ExternalServiceError("Prediction did not contain usable trajectory coordinates")
 
     first_time = parse_iso(all_times[0]) if all_times else None
     last_time = parse_iso(all_times[-1]) if all_times else None
@@ -500,7 +534,6 @@ def _parse_ncss_csv(text: str, variable: str) -> dict[datetime, dict[float, floa
     output: dict[datetime, dict[float, float]] = defaultdict(dict)
     for row in reader:
         keys = list(row.keys())
-        lower_keys = {str(k).lower(): k for k in keys}
         time_key = next((k for k in keys if "time" in str(k).lower() or "date" in str(k).lower()), None)
         level_key = next((k for k in keys if str(k).lower() in {"level", "lev", "isobaric", "pressure"} or "level" in str(k).lower()), None)
         value_key = next((k for k in keys if str(k).lower() == variable.lower()), None)
@@ -718,7 +751,12 @@ async def _prediction_with_historical_fallback(req: PredictRequest, mode: str, e
         raise
 
 
-async def fetch_launch_weather(latitude: float, longitude: float, launch_datetime: datetime) -> dict[str, Any]:
+async def fetch_launch_weather(
+    latitude: float,
+    longitude: float,
+    launch_datetime: datetime,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
     """Surface launch weather from Open-Meteo forecast/historical archives."""
     dt = _as_utc(launch_datetime)
     cache_key = (round(latitude, 3), round(longitude, 3), dt.strftime("%Y-%m-%dT%H"))
@@ -744,47 +782,58 @@ async def fetch_launch_weather(latitude: float, longitude: float, launch_datetim
         "start_date": dt.date().isoformat(), "end_date": dt.date().isoformat(),
         "timezone": "UTC", "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "precipitation_unit": "inch",
     }
-    last_error: Exception | None = None
-    for endpoint, source_name in endpoints:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=7.0), follow_redirects=True) as client:
-                response = await client.get(endpoint, params=params)
+    async def load(active_client: httpx.AsyncClient) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for endpoint, source_name in endpoints:
+            try:
+                response = await active_client.get(endpoint, params=params)
                 response.raise_for_status()
                 payload = response.json()
-            hourly = payload.get("hourly") or {}
-            times = hourly.get("time") or []
-            if not times:
-                raise ExternalServiceError("weather archive returned no hourly values")
-            parsed_times = []
-            for raw_time in times:
-                try:
-                    parsed = datetime.fromisoformat(str(raw_time)).replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                parsed_times.append(parsed)
-            if not parsed_times:
-                raise ExternalServiceError("weather archive returned unreadable times")
-            idx = min(range(len(parsed_times)), key=lambda i: abs((parsed_times[i] - dt).total_seconds()))
-            def at(name: str) -> Any:
-                values = hourly.get(name) or []
-                return values[idx] if idx < len(values) else None
-            rain_in = float(at("rain") or 0.0)
-            precipitation_in = float(at("precipitation") or 0.0)
-            result = {
-                "datetime": utc_iso(parsed_times[idx]), "source": source_name,
-                "latitude": float(payload.get("latitude", latitude)), "longitude": float(payload.get("longitude", longitude)),
-                "temperature_f": at("temperature_2m"), "wind_speed_mph": at("wind_speed_10m"),
-                "wind_direction_deg": at("wind_direction_10m"), "wind_gust_mph": at("wind_gusts_10m"),
-                "rain_in": rain_in, "precipitation_in": precipitation_in,
-                "rain": bool(rain_in > 0.0), "weather_code": at("weather_code"),
-                "surface_pressure_hpa": at("surface_pressure"),
-                "historical": dt < now - timedelta(hours=8),
-            }
-            _weather_cache[cache_key] = (time.monotonic(), result)
-            return dict(result)
-        except (httpx.HTTPError, ValueError, ExternalServiceError) as exc:
-            last_error = exc
-    raise ExternalServiceError(f"Launch weather could not be loaded: {last_error}")
+                hourly = payload.get("hourly") or {}
+                times = hourly.get("time") or []
+                if not times:
+                    raise ExternalServiceError("weather archive returned no hourly values")
+                parsed_times: list[tuple[int, datetime]] = []
+                for source_index, raw_time in enumerate(times):
+                    try:
+                        parsed = datetime.fromisoformat(str(raw_time))
+                    except ValueError:
+                        continue
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    else:
+                        parsed = parsed.astimezone(timezone.utc)
+                    parsed_times.append((source_index, parsed))
+                if not parsed_times:
+                    raise ExternalServiceError("weather archive returned unreadable times")
+                idx, selected_time = min(parsed_times, key=lambda item: abs((item[1] - dt).total_seconds()))
+
+                def at(name: str) -> Any:
+                    values = hourly.get(name) or []
+                    return values[idx] if idx < len(values) else None
+
+                rain_in = float(at("rain") or 0.0)
+                precipitation_in = float(at("precipitation") or 0.0)
+                result = {
+                    "datetime": utc_iso(selected_time), "source": source_name,
+                    "latitude": float(payload.get("latitude", latitude)), "longitude": float(payload.get("longitude", longitude)),
+                    "temperature_f": at("temperature_2m"), "wind_speed_mph": at("wind_speed_10m"),
+                    "wind_direction_deg": at("wind_direction_10m"), "wind_gust_mph": at("wind_gusts_10m"),
+                    "rain_in": rain_in, "precipitation_in": precipitation_in,
+                    "rain": bool(rain_in > 0.0), "weather_code": at("weather_code"),
+                    "surface_pressure_hpa": at("surface_pressure"),
+                    "historical": dt < now - timedelta(hours=8),
+                }
+                _weather_cache[cache_key] = (time.monotonic(), result)
+                return dict(result)
+            except (httpx.HTTPError, ValueError, ExternalServiceError) as exc:
+                last_error = exc
+        raise ExternalServiceError(f"Launch weather could not be loaded: {last_error}")
+
+    if client is not None:
+        return await load(client)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=7.0), follow_redirects=True) as owned_client:
+        return await load(owned_client)
 
 
 def _weather_feature(site: WeatherSite, weather: dict[str, Any]) -> dict[str, Any]:
@@ -824,7 +873,10 @@ async def run_burst(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     }
     if extra_meta:
         common.update(extra_meta)
-    features = [stage_feature(stage["stage"], stage["trajectory"], common) for stage in raw["prediction"]]
+    features = [
+        stage_feature("ascent", prediction_trajectory(raw, "ascent", 0), common),
+        stage_feature("descent", prediction_trajectory(raw, "descent", 1), common),
+    ]
     summary = summarize(features, common)
     return {"type": "FeatureCollection", "features": features, "summary": summary, "request": raw.get("request", {})}
 
@@ -850,9 +902,7 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
             except ExternalServiceError as archive_error:
                 raise ExternalServiceError(f"Historical Tawhiri replay failed ({tawhiri_error}); NOAA fallback failed ({archive_error})") from archive_error
         raise
-    ascent = first["prediction"][0]["trajectory"]
-    if not ascent:
-        raise ExternalServiceError("Float ascent prediction was empty")
+    ascent = prediction_trajectory(first, "ascent", 0)
     end = ascent[-1]
     float_rate = max(req.float_ascent_rate_ms, 0.1)
     second_params = {
@@ -869,9 +919,20 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
         second_params["burst_altitude"] = second_params["launch_altitude"] + 1
     if historical_cycle and first.get("request", {}).get("dataset"):
         second_params["dataset"] = first["request"]["dataset"]
-    second = await tawhiri_request(second_params)
-    float_trajectory = second["prediction"][0]["trajectory"]
-    descent_trajectory = second["prediction"][1]["trajectory"]
+    try:
+        second = await tawhiri_request(second_params)
+        float_trajectory = prediction_trajectory(second, "ascent", 0)
+        descent_trajectory = prediction_trajectory(second, "descent", 1)
+    except ExternalServiceError as tawhiri_error:
+        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+            try:
+                return await run_historical_reanalysis(req, extra_meta)
+            except ExternalServiceError as archive_error:
+                raise ExternalServiceError(
+                    f"Historical Tawhiri float replay failed ({tawhiri_error}); "
+                    f"NOAA fallback failed ({archive_error})"
+                ) from archive_error
+        raise
     common = {
         "mode": "float",
         "launch_name": req.launch.name,
@@ -1916,14 +1977,18 @@ async def weather_site(
 async def weather_batch(req: WeatherBatchRequest):
     validate_launch_window(req.launch_datetime)
     semaphore = asyncio.Semaphore(8)
-    async def one(site: WeatherSite) -> dict[str, Any]:
-        async with semaphore:
-            try:
-                weather = await fetch_launch_weather(site.latitude, site.longitude, req.launch_datetime)
-                return {"site_id": site.site_id, "name": site.name, "weather": weather, "error": None}
-            except Exception as exc:
-                return {"site_id": site.site_id, "name": site.name, "weather": None, "error": str(exc)}
-    results = await asyncio.gather(*(one(site) for site in req.sites))
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=7.0), follow_redirects=True) as client:
+        async def one(site: WeatherSite) -> dict[str, Any]:
+            async with semaphore:
+                try:
+                    weather = await fetch_launch_weather(
+                        site.latitude, site.longitude, req.launch_datetime, client=client
+                    )
+                    return {"site_id": site.site_id, "name": site.name, "weather": weather, "error": None}
+                except Exception as exc:
+                    return {"site_id": site.site_id, "name": site.name, "weather": None, "error": str(exc)}
+
+        results = await asyncio.gather(*(one(site) for site in req.sites))
     features = [_weather_feature(site, item["weather"]) for site, item in zip(req.sites, results) if item.get("weather")]
     return {"results": results, "data": {"type": "FeatureCollection", "features": features}}
 

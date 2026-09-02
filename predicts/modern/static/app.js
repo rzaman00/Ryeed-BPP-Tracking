@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.2.0';
+const BUILD_VERSION = '3.2.1';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -45,6 +45,7 @@ const state = {
   mapMode: 'operations',
   weatherBySite: new Map(),
   weatherRequestId: 0,
+  weatherAbortController: null,
   launchTheme: 'standard',
 };
 
@@ -61,8 +62,8 @@ function toast(message, error = false, timeout = 3600) {
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   let payload = null;
   try { payload = await response.json(); } catch { /* empty */ }
@@ -72,6 +73,20 @@ async function api(url, options = {}) {
     throw new Error(msg);
   }
   return payload;
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const runner = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  const workerCount = Math.min(items.length, Math.max(1, Number(limit) || 1));
+  await Promise.all(Array.from({ length: workerCount }, runner));
+  return results;
 }
 
 function feet(m) { return Number(m || 0) * 3.28084; }
@@ -408,19 +423,23 @@ function allWeatherTargets(){return [...state.launchLocations,...allCustomPointT
 function setWeatherLayerVisibility(visible){if(map?.getLayer('launch-weather-points'))map.setLayoutProperty('launch-weather-points','visibility',visible?'visible':'none');$('weatherMapLegend')?.classList.toggle('hidden',!visible);}
 function setMapMode(mode){
   state.mapMode=mode==='weather'?'weather':'operations';
+  if(state.mapMode!=='weather')state.weatherAbortController?.abort();
   setWeatherLayerVisibility(state.mapMode==='weather');
   if(state.mapMode==='weather')refreshWeatherMap();
 }
-function refreshWeatherMap(){
+async function refreshWeatherMap(){
   if(state.mapMode!=='weather'||!map?.getSource('launch-weather'))return;
+  state.weatherAbortController?.abort();
+  const controller=new AbortController();state.weatherAbortController=controller;
   const requestId=++state.weatherRequestId;const targets=allWeatherTargets();
-  if(!targets.length){map.getSource('launch-weather').setData({type:'FeatureCollection',features:[]});return;}
+  if(!targets.length){state.weatherAbortController=null;map.getSource('launch-weather').setData({type:'FeatureCollection',features:[]});return;}
   const body={sites:targets.map(weatherSitePayload),launch_datetime:buildLaunchDateTime().toISOString()};
   try{
-    const r=await api('/api/weather/batch',{method:'POST',body:JSON.stringify(body)});if(requestId!==state.weatherRequestId)return;
+    const r=await api('/api/weather/batch',{method:'POST',body:JSON.stringify(body),signal:controller.signal});if(requestId!==state.weatherRequestId)return;
     map.getSource('launch-weather').setData(r.data||{type:'FeatureCollection',features:[]});
     const failures=(r.results||[]).filter(x=>x.error).length;if(failures)toast(`Weather loaded with ${failures} unavailable site${failures===1?'':'s'}.`,true,4200);
-  }catch(e){if(requestId===state.weatherRequestId)toast(`Weather map: ${e.message}`,true,5500);}
+  }catch(e){if(e.name!=='AbortError'&&requestId===state.weatherRequestId)toast(`Weather map: ${e.message}`,true,5500);}
+  finally{if(state.weatherAbortController===controller)state.weatherAbortController=null;}
 }
 
 function deriveSiteLabel(feature, idx) { return deriveCityLabel(feature, idx); }
@@ -665,19 +684,22 @@ async function runPredicts() {
   const targets=[...selectedPresetSites(),...customPointTargets()];
   if(!targets.length){toast('Select at least one preset launch site or draw a custom point.',true);return;}
   state.predictions.clear();state.activePredictionId=null;clearPredictionMarkers();refreshPredictionSources();renderSummary();
-  let completed=0,failed=0;
+  let completed=0,failed=0,finished=0;
   setRunButton('running',`0/${targets.length}`);
-  for(const target of targets){
-    try{
-      const result=await api('/api/predict',{method:'POST',body:JSON.stringify(predictionBody(target))});
-      const entry=decoratePrediction(target._id,target._label,result);
-      state.predictions.set(target._id,entry);if(!state.activePredictionId)state.activePredictionId=target._id;
-      completed++;refreshPredictionSources();refreshMarkers();renderSummary();
-    }catch(e){failed++;console.error(target._label,e);toast(`${target._label}: ${e.message}`,true,5200);}
-    $('runState').textContent=`${completed+failed}/${targets.length}`;
+  const outcomes=await mapWithConcurrency(targets,4,async target=>{
+    try{return {target,result:await api('/api/predict',{method:'POST',body:JSON.stringify(predictionBody(target))})};}
+    catch(error){return {target,error};}
+    finally{finished++;$('runState').textContent=`${finished}/${targets.length}`;}
+  });
+  for(const outcome of outcomes){
+    if(outcome.error){failed++;console.error(outcome.target._label,outcome.error);continue;}
+    const entry=decoratePrediction(outcome.target._id,outcome.target._label,outcome.result);
+    state.predictions.set(outcome.target._id,entry);if(!state.activePredictionId)state.activePredictionId=outcome.target._id;completed++;
   }
+  refreshPredictionSources();refreshMarkers();renderSummary();
   setRunButton('success',failed?`${completed} ok, ${failed} failed`:`${completed} updated`);
   if(completed){fitPredictions();showSiteStatusLegend();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
+  if(failed){const details=outcomes.filter(x=>x.error).map(x=>`${x.target._label}: ${x.error.message}`).join(' | ');toast(details,true,7000);}
 }
 
 function decoratePrediction(id,label,result) {
@@ -884,9 +906,11 @@ async function runLivePrediction(silent=false){
 // Parameter sweep ------------------------------------------------------------
 function refreshSweepSites(){const select=$('sweepSite');if(!select)return;const current=select.value;select.innerHTML='';for(const s of state.launchLocations){const o=document.createElement('option');o.value=s._id;o.textContent=s._label;select.appendChild(o);}for(const d of state.drawings.filter(x=>x.properties?.kind==='point')){const o=document.createElement('option');o.value=`custom-${d.properties.drawing_id}`;o.textContent=d.properties.name||'Custom Launch';select.appendChild(o);}if([...select.options].some(o=>o.value===current))select.value=current;}
 function findSweepTarget(id){if(id.startsWith('custom-')){const did=id.slice(7),d=state.drawings.find(x=>x.properties?.drawing_id===did);return d?{...d,_id:id,_label:d.properties.name}:null;}return state.launchLocations.find(x=>x._id===id)||null;}
-async function runSweep(){const target=findSweepTarget($('sweepSite').value);if(!target){toast('Choose a launch site for the sweep.',true);return;}const lower=Number($('sweepLower').value),upper=Number($('sweepUpper').value),step=Number($('sweepStep').value);if(!Number.isFinite(lower)||!Number.isFinite(upper)||!Number.isFinite(step)||step<=0||lower>upper){toast('Invalid sweep bounds.',true);return;}const values=[];for(let v=lower;v<=upper+step*1e-6;v+=step){values.push(Number(v.toFixed(6)));if(values.length>20){toast('Sweep is limited to 20 predictions at a time.',true);return;}}state.sweepFeatures=[];$('sweepProgress').textContent=`Running 0/${values.length}…`;
-  let done=0;for(const value of values){const body=predictionBody(target);const param=$('sweepParameter').value;if(param==='altitude'){if(state.predictType==='burst')body.burst_altitude_m=value;else body.float_altitude_m=value;}else body[param]=value;try{const r=await api('/api/predict',{method:'POST',body:JSON.stringify(body)});for(const f of r.features||[])state.sweepFeatures.push({...f,properties:{...(f.properties||{}),sweep_value:value,sweep_parameter:param}});}catch(e){console.warn('sweep',value,e);}done++;$('sweepProgress').textContent=`Running ${done}/${values.length}…`;refreshPredictionSources();}
-  $('sweepProgress').textContent=`Finished ${values.length} sweep predictions. Dashed lines are sweep results.`;toast('Parameter sweep complete.');
+async function runSweep(){const target=findSweepTarget($('sweepSite').value);if(!target){toast('Choose a launch site for the sweep.',true);return;}if(!(await ensureAutomaticBurst()))return;const lower=Number($('sweepLower').value),upper=Number($('sweepUpper').value),step=Number($('sweepStep').value);if(!Number.isFinite(lower)||!Number.isFinite(upper)||!Number.isFinite(step)||step<=0||lower>upper){toast('Invalid sweep bounds.',true);return;}const values=[];for(let v=lower;v<=upper+step*1e-6;v+=step){values.push(Number(v.toFixed(6)));if(values.length>20){toast('Sweep is limited to 20 predictions at a time.',true);return;}}state.sweepFeatures=[];$('sweepProgress').textContent=`Running 0/${values.length}…`;
+  const param=$('sweepParameter').value;let done=0;
+  const outcomes=await mapWithConcurrency(values,4,async value=>{const body=predictionBody(target);if(param==='altitude'){if(state.predictType==='burst')body.burst_altitude_m=value;else body.float_altitude_m=value;}else body[param]=value;try{return {value,result:await api('/api/predict',{method:'POST',body:JSON.stringify(body)})};}catch(error){console.warn('sweep',value,error);return {value,error};}finally{done++;$('sweepProgress').textContent=`Running ${done}/${values.length}…`;}});
+  const failures=outcomes.filter(x=>x.error);for(const outcome of outcomes.filter(x=>!x.error)){for(const f of outcome.result.features||[])state.sweepFeatures.push({...f,properties:{...(f.properties||{}),sweep_value:outcome.value,sweep_parameter:param}});}refreshPredictionSources();
+  $('sweepProgress').textContent=`Finished ${values.length-failures.length}/${values.length} sweep predictions. Dashed lines are sweep results.`;toast(failures.length?`Parameter sweep completed with ${failures.length} failure${failures.length===1?'':'s'}.`:'Parameter sweep complete.',Boolean(failures.length),5200);
 }
 function clearSweep(){state.sweepFeatures=[];refreshPredictionSources();$('sweepProgress').textContent='Sweep results cleared.';}
 

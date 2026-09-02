@@ -1,4 +1,4 @@
-# BPP Predicts v3.2.0 — Stable Minimal UI
+# BPP Predicts v3.2.1 — Stable Minimal UI
 
 This build keeps the proven operational predictor and strips the newer UI back to simple controls:
 - Launch themes are a header dropdown (no modal).
@@ -10,7 +10,7 @@ This build keeps the proven operational predictor and strips the newer UI back t
 
 All established prediction, optimal-site, APRS, airspace, inflation-calculator, export, and drawing functionality is retained.
 
-# BPP Predicts v3.2.0
+# BPP Predicts v3.2.1
 
 Standalone University of Maryland Balloon Payload Program prediction and launch-planning application.
 
@@ -36,4 +36,4 @@ Surface weather archives cover a wider historical period than the upper-air repl
 Create `predicts/modern/.env` from `.env.example` and set `APRSFI_API_KEY=...`. Never commit a real API key.
 
 ## Verify
-Open `http://127.0.0.1:8000/api/health`; `version` must be `3.2.0`.
+Open `http://127.0.0.1:8000/api/health`; `version` must be `3.2.1`.
