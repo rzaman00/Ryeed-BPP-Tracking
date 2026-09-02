@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-set "BUILD_VERSION=3.2.1"
+set "BUILD_VERSION=3.3.0"
 echo [BPP Predicts] Starting stable build v%BUILD_VERSION%...
 
 rem Do not reuse a virtual environment from an older package. This avoids

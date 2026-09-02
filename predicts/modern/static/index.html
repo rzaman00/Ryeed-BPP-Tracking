@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.2.1" rel="stylesheet" />
+  <link href="static/styles.css?v=3.3.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -22,7 +22,7 @@
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.2.1</span>
+      <span class="build-badge" id="buildBadge">v3.3.0</span>
       <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
@@ -109,14 +109,14 @@
         <label><span>2D</span><input type="radio" name="dimension" value="2d" checked></label>
         <label><span>3D</span><input type="radio" name="dimension" value="3d"></label>
       </section>
-      <section class="layer-group">
+      <section class="layer-group collapsed">
         <h3>Basemap</h3>
         <label><span>Esri Topography</span><input type="radio" name="basemap" value="topo" checked></label>
         <label><span>Esri World Imagery Hybrid</span><input type="radio" name="basemap" value="hybrid"></label>
         <label><span>USGS Topo</span><input type="radio" name="basemap" value="usgs"></label>
         <label><span>Esri Dark Gray</span><input type="radio" name="basemap" value="dark"></label>
       </section>
-      <section class="layer-group">
+      <section class="layer-group collapsed">
         <h3>Reference</h3>
         <label><span>Controlled Airspace (B/C/D)</span><input type="checkbox" data-layer="controlled" checked></label>
         <label><span>Class E Airspace</span><input type="checkbox" data-layer="class_e"></label>
@@ -152,7 +152,12 @@
 
 
 
-    <section class="weather-map-legend hidden" id="weatherMapLegend"><strong>Launch Weather</strong><span><i class="dry"></i>Dry</span><span><i class="rain"></i>Rain</span><small>Circle size increases with gust speed.</small></section>
+    <section class="weather-map-legend hidden" id="weatherMapLegend" aria-label="Launch weather legend">
+      <strong>Launch Weather</strong>
+      <span><i class="dry"></i>Dry</span><span><i class="rain"></i>Rain</span>
+      <span class="gust-scale"><i class="gust-low"></i><i class="gust-mid"></i><i class="gust-high"></i>Gust ring: low → high</span>
+      <small>Marker and ring size increase with gust speed. Select a marker for wind direction and details.</small>
+    </section>
 
     <section class="live-status hidden" id="liveStatus">
       <div class="live-title"><strong id="liveCallsign">KC3SKW-8</strong><span>LIVE</span></div>
@@ -277,6 +282,6 @@
   </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.2.1"></script>
+  <script type="module" src="static/app.js?v=3.3.0"></script>
 </body>
 </html>

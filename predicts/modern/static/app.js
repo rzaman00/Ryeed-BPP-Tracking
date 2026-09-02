@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.2.1';
+const BUILD_VERSION = '3.3.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -50,6 +50,15 @@ const state = {
 };
 
 let map;
+let activeMapPopup = null;
+
+function openMapPopup(options = {}) {
+  activeMapPopup?.remove();
+  const popup = new maplibregl.Popup(options);
+  activeMapPopup = popup;
+  popup.on('close', () => { if (activeMapPopup === popup) activeMapPopup = null; });
+  return popup;
+}
 
 function toast(message, error = false, timeout = 3600) {
   const el = $('toast');
@@ -92,6 +101,10 @@ async function mapWithConcurrency(items, limit, worker) {
 function feet(m) { return Number(m || 0) * 3.28084; }
 function miles(m) { return Number(m || 0) / 1609.344; }
 function fmt(value, digits = 0) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits }); }
+function windDirectionLabel(degrees) {
+  const directions = ['N','NE','E','SE','S','SW','W','NW'];
+  return directions[Math.round((((Number(degrees) % 360) + 360) % 360) / 45) % 8];
+}
 function duration(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';
   const total = Math.max(0, Math.round(Number(seconds)));
@@ -232,13 +245,20 @@ function addOperationalLayers() {
   map.addLayer({id:'ref-poi-layer',type:'circle',source:'ref-poi',layout:{visibility:'none'},paint:{'circle-radius':5,'circle-color':'#fff','circle-stroke-width':4,'circle-stroke-color':'#e21f26'}});
   map.addLayer({id:'addresses-layer',type:'circle',source:'addresses',layout:{visibility:'none'},minzoom:11,paint:{'circle-radius':3,'circle-color':'#0084ff','circle-opacity':.7,'circle-stroke-width':.5,'circle-stroke-color':'#fff'}});
 
-  // Launch-weather map mode. These markers intentionally report conditions rather
-  // than declaring a launch safe/unsafe. Blue means rain at the selected hour; dry
-  // sites are green, and larger markers indicate stronger gusts.
+  // Launch-weather map mode. White means dry and blue means rain. A separate
+  // severity ring makes gust strength readable without reusing optimal-site green.
+  map.addLayer({id:'launch-weather-gust-ring',type:'circle',source:'launch-weather',layout:{visibility:'none'},paint:{
+    'circle-radius':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,11,15,16,30,23,50,31],
+    'circle-color':'rgba(0,0,0,0)',
+    'circle-stroke-width':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,2,30,4,50,6],
+    'circle-stroke-color':['step',['coalesce',['to-number',['get','wind_gust_mph']],0],'#94a3b8',15,'#facc15',25,'#fb923c',35,'#ef4444'],
+    'circle-stroke-opacity':.9
+  }});
   map.addLayer({id:'launch-weather-points',type:'circle',source:'launch-weather',layout:{visibility:'none'},paint:{
     'circle-radius':['interpolate',['linear'],['coalesce',['to-number',['get','wind_gust_mph']],0],0,7,15,10,30,14,50,18],
-    'circle-color':['case',['boolean',['get','rain'],false],'#2788ff','#1f9d55'],
-    'circle-opacity':.9,'circle-stroke-width':3,'circle-stroke-color':'#ffffff'
+    'circle-color':['case',['boolean',['get','rain'],false],'#2788ff','#ffffff'],
+    'circle-opacity':.96,'circle-stroke-width':3,
+    'circle-stroke-color':['case',['boolean',['get','rain'],false],'#ffffff','#1e293b']
   }});
 
   // Drawings.
@@ -288,7 +308,8 @@ function addOperationalLayers() {
   map.on('click','launch-weather-points',(e)=>{
     const f=e.features?.[0];if(!f)return;const p=f.properties||{};const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
     const rain=String(p.rain)==='true'||p.rain===true?'Yes':'No';
-    new maplibregl.Popup({offset:14}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(p.site_name||'Launch site')}</strong><br>Wind ${fmt(p.wind_speed_mph,1)} mph · Gust ${fmt(p.wind_gust_mph,1)} mph<br>Rain: ${rain}<br>${p.temperature_f==null?'':`Temperature ${fmt(p.temperature_f,0)}°F<br>`}<small>${esc(p.source||'Weather')}</small>`).addTo(map);
+    const direction=Number(p.wind_direction_deg);const directionText=Number.isFinite(direction)?`${Math.round(direction)}° ${windDirectionLabel(direction)}`:'Unknown';
+    openMapPopup({offset:14,className:'weather-detail-popup'}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(p.site_name||'Launch site')}</strong><div class="popup-weather-row"><b>${rain==='Yes'?'Rain':'Dry'}</b><span>Wind ${fmt(p.wind_speed_mph,1)} mph</span><span>Gust ${fmt(p.wind_gust_mph,1)} mph</span></div><div><b>Direction:</b> ${esc(directionText)}</div>${p.temperature_f==null?'':`<div><b>Temperature:</b> ${fmt(p.temperature_f,0)}°F</div>`}<small>${esc(p.source||'Weather')}</small>`).addTo(map);
   });
   map.on('mouseenter','launch-weather-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','launch-weather-points',()=>{map.getCanvas().style.cursor='';});
@@ -305,19 +326,19 @@ function registerFeaturePopups() {
       const props = f.properties || {};
       const useful = Object.entries(props).filter(([k,v]) => v != null && String(v).trim() && !['fid'].includes(k)).slice(0,8);
       const body = useful.map(([k,v]) => `<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('');
-      new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${title}</strong>${body}`).addTo(map);
+      openMapPopup().setLngLat(e.lngLat).setHTML(`<strong>${title}</strong>${body}`).addTo(map);
     });
   });
   const airspaceLayers=['airspace-controlled-fill','airspace-class_e-fill','airspace-sua-fill','airspace-tfr-fill'];
   for(const layer of airspaceLayers){
-    map.on('click',layer,(e)=>{const f=e.features?.[0];if(!f)return;const p=f.properties||{};const title=p.bpp_airspace_layer||p.LOCAL_TYPE||p.TYPE_CODE||p.type||'Airspace';const fields=[['Name',p.NAME||p.NAME_TXT||p.description||p.TITLE],['Class',p.CLASS||p.LOCAL_TYPE],['Lower',p.LOWER_VAL?`${p.LOWER_VAL} ${p.LOWER_UOM||'ft'}`:null],['Upper',p.UPPER_VAL?`${p.UPPER_VAL} ${p.UPPER_UOM||'ft'}`:null],['NOTAM',p.notam_id||p.NOTAM_KEY]].filter(x=>x[1]!=null&&String(x[1]).trim());new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(title)}</strong>${fields.map(([k,v])=>`<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('')}`).addTo(map);});
+    map.on('click',layer,(e)=>{const f=e.features?.[0];if(!f)return;const p=f.properties||{};const title=p.bpp_airspace_layer||p.LOCAL_TYPE||p.TYPE_CODE||p.type||'Airspace';const fields=[['Name',p.NAME||p.NAME_TXT||p.description||p.TITLE],['Class',p.CLASS||p.LOCAL_TYPE],['Lower',p.LOWER_VAL?`${p.LOWER_VAL} ${p.LOWER_UOM||'ft'}`:null],['Upper',p.UPPER_VAL?`${p.UPPER_VAL} ${p.UPPER_UOM||'ft'}`:null],['NOTAM',p.notam_id||p.NOTAM_KEY]].filter(x=>x[1]!=null&&String(x[1]).trim());openMapPopup().setLngLat(e.lngLat).setHTML(`<strong>${esc(title)}</strong>${fields.map(([k,v])=>`<div><b>${esc(k)}:</b> ${esc(v)}</div>`).join('')}`).addTo(map);});
     map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
   }
   map.on('click','sweep-hitbox',(e)=>{
     const feature=e.features?.[0];if(!feature)return;const props=feature.properties||{};
     const label=formatSweepParameter(props.sweep_parameter,props.sweep_value);
     const stage=props.stage?String(props.stage).replace(/^./,x=>x.toUpperCase()):'Trajectory';
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>Parameter Sweep</strong><div>${esc(label)}</div><div><b>Stage:</b> ${esc(stage)}</div>`).addTo(map);
+    openMapPopup().setLngLat(e.lngLat).setHTML(`<strong>Parameter Sweep</strong><div>${esc(label)}</div><div><b>Stage:</b> ${esc(stage)}</div>`).addTo(map);
   });
   map.on('mouseenter','sweep-hitbox',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','sweep-hitbox',()=>{map.getCanvas().style.cursor='';});
@@ -328,7 +349,7 @@ function registerFeaturePopups() {
     const status=p.site_status==='best'?'Preferred + Viable (Gold)':p.site_status==='viable'?'Viable':'No-Go';
     const bestRate=Number(p.best_ascent_rate_ms||0);
     const conflicts=String(p.conflict_layers||'').trim();
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>3-D airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div>${conflicts?`<div><b>Conflict layers:</b> ${esc(conflicts)}</div>`:''}`).addTo(map);
+    openMapPopup({className:'optimal-detail-popup'}).setLngLat(e.lngLat).setHTML(`<strong>${esc(status)} · ${esc(p.site_name||'Launch')}</strong><div><b>Best ascent rate:</b> ${fmt(bestRate,1)} m/s</div><div><b>3-D airspace intrusion:</b> ${fmt(miles(intrusion),2)} mi</div>${conflicts?`<div><b>Conflict layers:</b> ${esc(conflicts)}</div>`:''}`).addTo(map);
   });
   map.on('mouseenter','optimal-site-points',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','optimal-site-points',()=>{map.getCanvas().style.cursor='';});
@@ -338,7 +359,7 @@ function registerFeaturePopups() {
     const wrap=document.createElement('div');
     wrap.innerHTML=`<strong>${esc(props.NAME || props.name || 'Public School')}</strong><div style="font-size:10px;margin-top:4px">${esc(props.STREET || props.address || '')} ${esc(props.CITY || '')}</div>`;
     const btn=document.createElement('button');btn.textContent='Create predict point here';btn.style.marginTop='7px';btn.onclick=()=>{addPointDrawing(coord.lng,coord.lat,props.NAME||'School launch');popup.remove();};wrap.appendChild(btn);
-    const popup=new maplibregl.Popup().setLngLat(coord).setDOMContent(wrap).addTo(map);
+    const popup=openMapPopup().setLngLat(coord).setDOMContent(wrap).addTo(map);
   });
   map.on('click','prediction-lines',(e)=>{
     const id=e.features?.[0]?.properties?.site_id;if(id&&state.predictions.has(id)){state.activePredictionId=id;renderSummary();refreshPredictionSources();}
@@ -348,7 +369,7 @@ function registerFeaturePopups() {
     const id=f.properties?.site_id;if(id&&state.predictions.has(id)){state.activePredictionId=id;renderSummary();refreshPredictionSources();}
     const coords=f.geometry?.coordinates||[e.lngLat.lng,e.lngLat.lat];
     const landingTime=f.properties?.landing_time||'';
-    new maplibregl.Popup({offset:12}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(f.properties?.site_name||'Predicted landing')}</strong><br>${Number(coords[1]).toFixed(5)}, ${Number(coords[0]).toFixed(5)}${landingTime?`<br>${esc(localTime(landingTime))}`:''}`).addTo(map);
+    openMapPopup({offset:12}).setLngLat(coords.slice(0,2)).setHTML(`<strong>${esc(f.properties?.site_name||'Predicted landing')}</strong><br>${Number(coords[1]).toFixed(5)}, ${Number(coords[0]).toFixed(5)}${landingTime?`<br>${esc(localTime(landingTime))}`:''}`).addTo(map);
   });
   ['prediction-lines','prediction-landing-points-layer'].forEach(layer=>{
     map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});
@@ -420,7 +441,13 @@ function weatherSitePayload(target){
   return {site_id:target._id||slug(target._label||'site'),name:target._label||target.properties?.name||'Launch site',latitude:Number(lat),longitude:Number(lon)};
 }
 function allWeatherTargets(){return [...state.launchLocations,...allCustomPointTargets()];}
-function setWeatherLayerVisibility(visible){if(map?.getLayer('launch-weather-points'))map.setLayoutProperty('launch-weather-points','visibility',visible?'visible':'none');$('weatherMapLegend')?.classList.toggle('hidden',!visible);}
+function setWeatherLayerVisibility(visible){
+  ['launch-weather-gust-ring','launch-weather-points'].forEach(id=>{if(map?.getLayer(id))map.setLayoutProperty(id,'visibility',visible?'visible':'none');});
+  $('weatherMapLegend')?.classList.toggle('hidden',!visible);
+  if(map?.getLayer('prediction-lines'))map.setPaintProperty('prediction-lines','line-opacity',visible ? .48 : 1);
+  if(map?.getLayer('prediction-casing'))map.setPaintProperty('prediction-casing','line-opacity',visible ? .45 : .92);
+  if(map?.getLayer('sweep-lines'))map.setPaintProperty('sweep-lines','line-opacity',visible ? .16 : .38);
+}
 function setMapMode(mode){
   state.mapMode=mode==='weather'?'weather':'operations';
   if(state.mapMode!=='weather')state.weatherAbortController?.abort();
@@ -472,7 +499,7 @@ function buildPredictSiteList() {
     const label=document.createElement('label');label.className='predict-site';label.dataset.predictSiteRow=site._id;
     const span=document.createElement('span');span.textContent=site._label;span.title=site.properties?.address||site.properties?.name||site._label;
     const input=document.createElement('input');input.type='checkbox';input.dataset.predictSite=site._id;input.checked=idx===clearSpringIndex;
-    input.addEventListener('change',()=>{invalidateOptimalSiteAnalysis();refreshPredictionSources();renderSummary();refreshMarkers();});
+    input.addEventListener('change',()=>{refreshPredictionSources();renderSummary();refreshMarkers();});
     label.append(span,input);root.appendChild(label);
   });
   if(!state.launchLocations.length)root.innerHTML='<p class="loading-text">No launch locations available.</p>';
@@ -483,7 +510,7 @@ function buildPredictSiteList() {
 function buildCustomPredictSiteList(){
   const root=$('customPredictSiteList');if(!root)return;root.innerHTML='';
   const points=state.drawings.filter(d=>d.properties?.kind==='point');
-  for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';label.dataset.customPredictSiteRow=id;const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;invalidateOptimalSiteAnalysis();refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
+  for(const d of points){const id=`custom-${d.properties.drawing_id}`;const label=document.createElement('label');label.className='predict-site custom-predict-site';label.dataset.customPredictSiteRow=id;const span=document.createElement('span');span.textContent=d.properties?.name||'Custom Launch';const input=document.createElement('input');input.type='checkbox';input.dataset.customPredictSite=id;input.checked=d.properties?.predict_enabled!==false;input.addEventListener('change',()=>{d.properties.predict_enabled=input.checked;refreshPredictionSources();renderSummary();});label.append(span,input);root.appendChild(label);}
   if(!points.length)root.innerHTML='<p class="loading-text">Draw a point to add a custom launch site.</p>';
 }
 function selectedPresetSites() {
@@ -494,10 +521,10 @@ function isSiteVisible(id){const input=qs(`input[data-predict-site="${CSS.escape
 
 function invalidateOptimalSiteAnalysis(){
   if(!state.optimalSiteAnalysis)return;
-  state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();
+  state.optimalSiteAnalysis=null;$('siteStatusLegend')?.classList.add('hidden');refreshOptimalSiteHighlights();
 }
 function siteStatusClass(status){return status==='best'?'site-best':status==='viable'?'site-viable':'site-nogo';}
-function showSiteStatusLegend(){ const el=$('siteStatusLegend');if(!el)return;el.classList.remove('hidden');el.classList.toggle('beside-summary',!$('predictionSummary').classList.contains('hidden')); }
+function showSiteStatusLegend(){ const el=$('siteStatusLegend');if(!el||!state.optimalSiteAnalysis)return;el.classList.remove('hidden'); }
 function refreshOptimalSiteHighlights(){
   const analysis=state.optimalSiteAnalysis;
   const ranking=analysis?.ranking||[];const byId=new Map(ranking.map(x=>[x.site_id,x]));
@@ -555,17 +582,16 @@ async function findOptimalSite(scope='current'){
     airspace_layers:optimalAirspaceLayers(),ascent_rate_sweep_ms:optimalSweepRates(),
     automatic_burst:state.predictType==='burst'&&state.burstAltitudeMode==='auto',inflation:inflationRequestBody(),
   };
-  const rates=optimalSweepRates();setOptimalButton(scope,true,`${sites.length}×${rates.length}`);$('optimalResult').classList.add('hidden');
+  const rates=optimalSweepRates();setOptimalButton(scope,true,`${sites.length}×${rates.length}`);
   try{
     const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
     const gold=result.ranking?.find(x=>x.site_status==='best');const viable=result.viable_count||0;if(gold){toast(`Preferred viable site: ${gold.site_name} (gold). ${viable}/${result.ranking.length} viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}else{toast(`No preferred gold site. ${viable}/${result.ranking.length} sites viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}
     if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
-  }catch(e){state.optimalSiteAnalysis=null;refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
+  }catch(e){refreshOptimalSiteHighlights();toast(`Optimal-site search: ${e.message}`,true,7000);}
   finally{setOptimalButton(scope,false,'');}
 }
 
 function setPredictionType(type) {
-  if(state.predictType!==type)invalidateOptimalSiteAnalysis();
   state.predictType = type;
   qsa('.burst-control').forEach(el=>el.classList.toggle('hidden',type!=='burst'));
   qsa('.float-control').forEach(el=>el.classList.toggle('hidden',type!=='float'));
@@ -683,6 +709,10 @@ async function runPredicts() {
   if(!(await ensureAutomaticBurst()))return;
   const targets=[...selectedPresetSites(),...customPointTargets()];
   if(!targets.length){toast('Select at least one preset launch site or draw a custom point.',true);return;}
+  // Keep optimal-site colors stable while the operator explores the map and edits
+  // controls. A new normal predicts run is the explicit boundary that clears them.
+  invalidateOptimalSiteAnalysis();
+  $('siteStatusLegend')?.classList.add('hidden');
   state.predictions.clear();state.activePredictionId=null;clearPredictionMarkers();refreshPredictionSources();renderSummary();
   let completed=0,failed=0,finished=0;
   setRunButton('running',`0/${targets.length}`);
@@ -698,7 +728,7 @@ async function runPredicts() {
   }
   refreshPredictionSources();refreshMarkers();renderSummary();
   setRunButton('success',failed?`${completed} ok, ${failed} failed`:`${completed} updated`);
-  if(completed){fitPredictions();showSiteStatusLegend();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
+  if(completed){fitPredictions();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
   if(failed){const details=outcomes.filter(x=>x.error).map(x=>`${x.target._label}: ${x.error.message}`).join(' | ');toast(details,true,7000);}
 }
 
@@ -779,7 +809,7 @@ function downloadBlob(content,type,name){const blob=content instanceof Blob?cont
 function drawingFeatureCollection(includePreview=true){const features=state.drawings.map(d=>({...d,properties:{...(d.properties||{}),selected:d.properties?.drawing_id===state.selectedDrawingId}}));if(includePreview&&state.rectanglePreview)features.push(state.rectanglePreview);return{type:'FeatureCollection',features};}
 function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureCollection());buildCustomPredictSiteList();refreshSweepSites();}
 function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:`Geofence ${n}`;}
-function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;invalidateOptimalSiteAnalysis();refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
+function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast('Custom launch site added and enabled for predicts.');}
 function rectangleBaselinePreview(a,b){return{type:'Feature',geometry:{type:'LineString',coordinates:[[a.lng,a.lat],[b.lng,b.lat]]},properties:{kind:'rectangle-guide',preview:true}};}
 function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2,upper_altitude_ft:10000,upper_altitude_m:3048}};}
 function cancelRectangleDraft(message='Rectangle drawing cancelled.'){state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();if(message)toast(message);}
@@ -793,12 +823,12 @@ function handleMapDrawClick(e){
     else{try{const f=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},false);state.drawings.push(f);state.selectedDrawingId=f.properties.drawing_id;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast(`Oriented geofence created: ${fmt(f.properties.baseline_length_m)} m × ${fmt(f.properties.width_m)} m.`);}catch(err){toast(err.message,true);}}
     refreshDrawings();return true;
   }
-  if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');$('deleteDrawing').disabled=true;}return true;}return false;
+  if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');$('deleteDrawing').disabled=true;}return true;}return false;
 }
 function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}refreshDrawings();}
 function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_id===state.selectedDrawingId);}
 function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²\n3D upper bound: ${fmt(d.properties?.upper_altitude_ft??10000,0)} ft (${fmt(d.properties?.upper_altitude_m??3048,0)} m)`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
-function showSelectedDrawing(){const d=selectedDrawing();if(!d){$('drawingInfo').classList.add('hidden');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
+function showSelectedDrawing(){const d=selectedDrawing();const workspace=qs('.map-workspace');if(!d){$('drawingInfo').classList.add('hidden');workspace?.classList.remove('geofence-focus');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');workspace?.classList.add('geofence-focus');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
 
 function saveDrawingAltitude(){
   const d=selectedDrawing();if(!d||!(d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon'))return;
@@ -809,8 +839,8 @@ function saveDrawingAltitude(){
 }
 
 function saveDrawingName(){const d=selectedDrawing();if(!d)return;const name=$('drawingName').value.trim();if(!name){toast('Enter a name first.',true);return;}d.properties.name=name;refreshDrawings();showSelectedDrawing();toast('Drawing name saved.');}
-function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
-function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;invalidateOptimalSiteAnalysis();refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
+function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();}
+function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();toast('All drawings cleared.');}
 function downloadDrawings(){if(!state.drawings.length){toast('No drawings to download.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:state.drawings},null,2),'application/geo+json','BPP_map_drawings.geojson');}
 function downloadGeofence(){const rectangles=state.drawings.filter(d=>d.properties?.kind==='rectangle');if(!rectangles.length){toast('Draw an oriented rectangle first.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:rectangles},null,2),'application/geo+json','BPP_geofence.geojson');}
 async function copyDrawing(){const d=selectedDrawing();if(!d)return;await navigator.clipboard.writeText(drawingCoordinateText(d));toast('Drawing coordinates copied.');}
@@ -961,23 +991,30 @@ function wireControls(){
   document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('workspaceMode').addEventListener('change',e=>setWorkspaceMode(e.target.value));
   $('predictType').addEventListener('change',e=>setPredictionType(e.target.value));
-  $('burstAltitudeMode').addEventListener('change',e=>{invalidateOptimalSiteAnalysis();setBurstAltitudeMode(e.target.value);});
-  $('burstAltitude').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();});$('floatAltitude').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();updateAltitudeLabels();});
-  $('ascentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();});
-  $('inflationAscentRate').addEventListener('input',()=>{invalidateOptimalSiteAnalysis();$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
+  $('burstAltitudeMode').addEventListener('change',e=>setBurstAltitudeMode(e.target.value));
+  $('burstAltitude').addEventListener('input',()=>{if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();});$('floatAltitude').addEventListener('input',updateAltitudeLabels);
+  $('ascentRate').addEventListener('input',()=>{$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();});
+  $('inflationAscentRate').addEventListener('input',()=>{$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
-  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{invalidateOptimalSiteAnalysis();if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();}));
+  ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();}));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
-  $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',()=>{invalidateOptimalSiteAnalysis();updateOptimalSweepLabel();});$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',updateOptimalSweepLabel);$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="mapmode"]').forEach(x=>x.addEventListener('change',()=>setMapMode(x.value)));
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();}else setReferenceVisibility(key,x.checked);}));
   $('customPredictEnabled').addEventListener('change',()=>{refreshPredictionSources();refreshMarkers();renderSummary();});
   $('collapseLayers').addEventListener('click',()=>{$('layerPanel').classList.add('collapsed');$('reopenLayers').classList.remove('hidden');});$('reopenLayers').addEventListener('click',()=>{$('layerPanel').classList.remove('collapsed');$('reopenLayers').classList.add('hidden');});
-  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);$('saveDrawingAltitude')?.addEventListener('click',saveDrawingAltitude);
+  $('drawingToggle').addEventListener('click',()=>{$('drawingMenu').classList.toggle('hidden');$('drawingToggle').classList.toggle('active',!$('drawingMenu').classList.contains('hidden'));});qsa('[data-draw-mode]').forEach(b=>b.addEventListener('click',()=>setDrawMode(b.dataset.drawMode)));$('deleteDrawing').addEventListener('click',deleteSelectedDrawing);$('deleteAllDrawings').addEventListener('click',deleteAllDrawings);$('downloadDrawings').addEventListener('click',downloadDrawings);$('closeDrawingInfo').addEventListener('click',()=>{$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');});$('copyDrawingCoordinates').addEventListener('click',copyDrawing);$('saveDrawingName').addEventListener('click',saveDrawingName);$('saveDrawingAltitude')?.addEventListener('click',saveDrawingAltitude);
   $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>setAppView('info'));
   $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('sweepPanel').classList.toggle('hidden');});$('closeSweepPanel')?.addEventListener('click',()=>$('sweepPanel').classList.add('hidden'));$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
   $('closeSummary').addEventListener('click',()=>$('predictionSummary').classList.add('hidden'));$('centerLanding').addEventListener('click',centerLanding);$('copyLanding').addEventListener('click',copyLanding);
+
+  qsa('.layer-group').forEach((group,index)=>{
+    const heading=qs('h3',group);if(!heading)return;
+    heading.tabIndex=0;heading.setAttribute('role','button');heading.setAttribute('aria-expanded',String(!group.classList.contains('collapsed')));
+    const toggle=()=>{group.classList.toggle('collapsed');heading.setAttribute('aria-expanded',String(!group.classList.contains('collapsed')));};
+    heading.addEventListener('click',toggle);heading.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});
+  });
 }
 
 function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);$('launchDate').value=[tomorrow.getFullYear(),String(tomorrow.getMonth()+1).padStart(2,'0'),String(tomorrow.getDate()).padStart(2,'0')].join('-');}

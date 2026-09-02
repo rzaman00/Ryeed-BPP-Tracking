@@ -1,16 +1,16 @@
-# BPP Predicts v3.2.1 — Stable Minimal UI
+# BPP Predicts v3.3.0 — Responsive Mission UI
 
-This build keeps the proven operational predictor and strips the newer UI back to simple controls:
-- Launch themes are a header dropdown (no modal).
-- Launch Weather is a map mode with clickable weather markers (no weather prompt/panel).
-- Info is a normal top-level tab.
-- 3D rectangle upper altitude remains in the drawing inspector.
-- Parameter Sweep uses one small in-map panel rather than a dialog/modal.
-- Historical prediction/weather backend support remains available, with the 7-day future limit preserved.
+This build keeps the proven operational predictor and makes its dense map UI easier to operate:
+- Launch themes are a header dropdown and now style the complete top and bottom chrome.
+- Launch Weather uses distinct white dry markers, blue rain markers, and gust-severity rings.
+- Header tabs and prediction controls wrap dynamically instead of clipping.
+- Geofence editing, prediction summaries, weather, and optimal status occupy separate map zones.
+- Optimal-site colors persist through normal map interaction until a new predicts run begins.
+- Secondary layer groups are collapsible.
 
 All established prediction, optimal-site, APRS, airspace, inflation-calculator, export, and drawing functionality is retained.
 
-# BPP Predicts v3.2.1
+# BPP Predicts v3.3.0
 
 Standalone University of Maryland Balloon Payload Program prediction and launch-planning application.
 
@@ -36,4 +36,4 @@ Surface weather archives cover a wider historical period than the upper-air repl
 Create `predicts/modern/.env` from `.env.example` and set `APRSFI_API_KEY=...`. Never commit a real API key.
 
 ## Verify
-Open `http://127.0.0.1:8000/api/health`; `version` must be `3.2.1`.
+Open `http://127.0.0.1:8000/api/health`; `version` must be `3.3.0`.

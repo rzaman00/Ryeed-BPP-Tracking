@@ -328,7 +328,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.2.1"
+    assert h["version"] == "3.3.0"
     assert h["airspace"] == "FAA live services with disk cache"
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
@@ -975,11 +975,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.2.1'
+    assert h['version']=='3.3.0'
     assert c['historical_predicts_from']=='1948-01-01'
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.2.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.3.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():

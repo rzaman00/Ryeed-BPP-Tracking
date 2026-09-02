@@ -39,7 +39,7 @@ APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "3.2.1"
+BUILD_VERSION = "3.3.0"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"

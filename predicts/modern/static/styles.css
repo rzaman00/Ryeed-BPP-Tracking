@@ -351,3 +351,128 @@ body.modal-open{overflow:hidden}
 .tool-panel{position:absolute;z-index:30;left:50%;top:70px;transform:translateX(-50%);width:min(580px,calc(100% - 28px));max-height:calc(100% - 130px);overflow:auto;background:var(--surface,#fff);color:var(--text,#161a20);border:1px solid var(--ui-border,#cfd6de);border-radius:14px;box-shadow:0 14px 34px rgba(0,0,0,.28);padding:14px}
 .tool-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.tool-panel-head button{border:0;background:transparent;color:var(--text-muted,#667085);font-size:20px;line-height:1;padding:2px 5px}.tool-panel>p{font-size:11px;color:var(--text-muted,#667085);margin:0 0 10px;line-height:1.45}
 @media(max-width:760px){.launch-theme-select span{display:none}.tool-panel{top:56px;max-height:calc(100% - 112px)}}
+
+/* --------------------------------------------------------------------------
+   v3.3 responsive mission layout + cohesive launch themes
+   -------------------------------------------------------------------------- */
+
+/* Header tabs and controls wrap instead of clipping or forcing horizontal
+   scrolling. The map keeps the remaining viewport height through the existing
+   flex layout, regardless of how many control rows are needed. */
+.site-header{
+  height:auto;min-height:58px;display:grid;
+  grid-template-columns:minmax(260px,1fr) auto minmax(350px,1fr);
+  align-items:center;gap:12px;padding-block:7px;overflow:hidden;
+}
+.site-brand,.app-tabs,.header-actions{position:relative;z-index:1;min-width:0}
+.app-tabs{margin:0;justify-content:center;flex-wrap:wrap;gap:4px}
+.app-tab{white-space:nowrap;padding:7px 11px}
+.header-actions{justify-self:end;justify-content:flex-end;flex-wrap:wrap}
+.control-strip{display:flex;flex-wrap:wrap;align-items:stretch;overflow:visible}
+.control-time-group{display:contents}
+.control-field{flex:1 1 118px;min-width:108px;max-width:none;white-space:normal}
+.control-field.timezone{flex-basis:78px;min-width:72px}
+.burst-altitude-control{flex-basis:210px}.burst-altitude-control select{min-width:0}
+.run-button,.optimal-button,.utility-button{position:static;flex:1 1 150px;min-width:138px;min-height:58px;white-space:normal;padding:8px 11px}
+.optimal-sweep-toggle{flex:1 1 150px;min-width:138px;white-space:normal}
+
+/* Full-width themed chrome. Operational status colors remain untouched. */
+html[data-launch-theme="standard"] .site-header,
+html[data-launch-theme="standard"] .bottom-tools{background:linear-gradient(110deg,#080b10 0%,#111827 62%,#21111a 100%)}
+html[data-launch-theme="standard"] .control-strip{background:linear-gradient(90deg,#111827,#2b1117 45%,#111827)}
+
+html[data-launch-theme="maryland"] .site-header,
+html[data-launch-theme="maryland"] .control-strip,
+html[data-launch-theme="maryland"] .bottom-tools{
+  background-color:#111;
+  background-image:
+    linear-gradient(rgba(5,8,13,.58),rgba(5,8,13,.58)),
+    conic-gradient(from 45deg at 25% 25%,#ffd200 0 12.5%,#111 0 25%,#e21833 0 37.5%,#fff 0 50%,#111 0 62.5%,#ffd200 0 75%,#fff 0 87.5%,#e21833 0);
+  background-size:auto,64px 64px;
+}
+html[data-launch-theme="night"] .site-header,
+html[data-launch-theme="night"] .control-strip,
+html[data-launch-theme="night"] .bottom-tools{
+  background-color:#050b24;
+  background-image:
+    radial-gradient(circle at 90% 35%,#fffbd0 0 10px,transparent 11px),
+    radial-gradient(circle at 20% 28%,rgba(255,255,255,.95) 0 1px,transparent 2px),
+    radial-gradient(circle at 45% 70%,rgba(186,204,255,.8) 0 1px,transparent 2px),
+    radial-gradient(circle at 70% 22%,rgba(255,255,255,.78) 0 1.5px,transparent 2.5px),
+    linear-gradient(115deg,#030718,#0c1742 58%,#24134f);
+  background-size:auto,74px 46px,95px 61px,131px 73px,auto;
+}
+html[data-launch-theme="aurora"] .site-header,
+html[data-launch-theme="aurora"] .control-strip,
+html[data-launch-theme="aurora"] .bottom-tools{
+  background-color:#071725;
+  background-image:
+    radial-gradient(ellipse at 15% 120%,rgba(22,184,137,.72),transparent 48%),
+    radial-gradient(ellipse at 62% -35%,rgba(126,232,200,.62),transparent 52%),
+    radial-gradient(ellipse at 92% 115%,rgba(139,92,246,.72),transparent 50%),
+    linear-gradient(110deg,#06111e,#102536 55%,#170f35);
+  background-size:130% 160%;animation:auroraChrome 11s ease-in-out infinite alternate;
+}
+@keyframes auroraChrome{from{background-position:0 30%,25% 15%,70% 70%,0 0}to{background-position:18% 10%,55% 30%,95% 45%,0 0}}
+@media(prefers-reduced-motion:reduce){html[data-launch-theme="aurora"] .site-header,html[data-launch-theme="aurora"] .control-strip,html[data-launch-theme="aurora"] .bottom-tools{animation:none}}
+
+/* Make controls readable over the themed strip while retaining its motif. */
+.control-strip>.control-field,.control-strip>.control-time-group .control-field{
+  background:color-mix(in srgb,var(--surface) 94%,transparent);backdrop-filter:blur(8px)
+}
+.control-strip>.optimal-sweep-toggle{background:color-mix(in srgb,var(--surface-2) 93%,transparent);backdrop-filter:blur(8px)}
+.bottom-tools{gap:8px;padding-inline:12px}
+.bottom-tools button{background:rgba(12,20,31,.76);border-color:rgba(255,255,255,.28);color:#fff;backdrop-filter:blur(8px)}
+.bottom-tools button:hover{background:rgba(255,255,255,.18);border-color:rgba(255,255,255,.5)}
+
+/* Compact, non-overlapping map overlay zones. */
+.drawing-control{left:12px;top:12px}
+.drawing-menu{width:360px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--ui-border);overflow:hidden}
+.drawing-menu.hidden{display:none!important}.drawing-menu button{border:0!important;min-width:0}
+.map-workspace:has(.drawing-menu:not(.hidden)) .weather-map-legend{display:none!important}
+.drawing-info{left:390px;top:12px;width:330px;max-width:calc(100% - 690px);max-height:calc(50% - 20px);overflow:auto;z-index:19}
+.drawing-info pre{max-height:110px}
+.prediction-summary{left:12px;bottom:56px;width:360px;max-width:calc(100% - 600px);max-height:46%}
+.map-workspace.geofence-focus .prediction-summary{display:none!important}
+.weather-map-legend{left:50%;top:12px;right:auto;transform:translateX(-50%);max-width:min(520px,calc(100% - 790px));z-index:21}
+.site-status-legend,.site-status-legend.beside-summary{left:auto;right:286px;bottom:56px;z-index:21;min-width:250px;max-width:330px}
+.trajectory-legend{bottom:56px;z-index:18}
+.layer-panel{right:12px;top:12px;max-height:calc(100% - 68px)}
+.layers-reopen{right:12px;top:12px}
+
+/* The weather layer has a distinct white dry state and a readable gust scale. */
+.weather-map-legend i.dry{background:#fff;border-color:#27364a;box-shadow:0 0 0 1px #fff}
+.weather-map-legend i.rain{background:#2788ff;border-color:#fff}
+.weather-map-legend .gust-scale{gap:3px}.weather-map-legend .gust-scale i{border:0;width:8px;height:8px}
+.weather-map-legend i.gust-low{background:#94a3b8}.weather-map-legend i.gust-mid{background:#facc15}.weather-map-legend i.gust-high{background:#ef4444;margin-right:3px}
+.weather-map-legend small{width:100%;line-height:1.35}
+.popup-weather-row{display:grid;grid-template-columns:auto auto auto;gap:6px;margin:7px 0;padding:6px;border-radius:7px;background:var(--surface-2)}
+
+/* Layer sections are small accordions so operators see only the groups they need. */
+.layer-group h3{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none}
+.layer-group h3::after{content:"−";font-size:15px;line-height:1;color:var(--text-muted)}
+.layer-group.collapsed h3::after{content:"+"}.layer-group.collapsed>:not(h3){display:none!important}
+.layer-group.collapsed{padding-bottom:3px}
+
+@media(max-width:1250px){
+  .site-header{grid-template-columns:minmax(230px,1fr) auto}.header-actions{grid-column:1/-1;justify-self:stretch;justify-content:flex-end}
+  .weather-map-legend{left:382px;transform:none;max-width:calc(100% - 680px)}
+  .drawing-info{left:12px;top:188px;max-width:350px;max-height:30%}
+}
+@media(max-width:900px){
+  .site-header{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;padding:7px 10px;gap:7px}.site-brand{flex:1 1 240px}.app-tabs{order:3;flex:1 1 100%;justify-content:stretch}.app-tab{flex:1 1 120px}.header-actions{position:static;flex:1 1 auto;padding:0;justify-content:flex-end}
+  .drawing-menu{width:min(360px,calc(100vw - 24px))}
+  .drawing-info{left:12px;top:188px;width:340px;max-width:calc(100% - 292px);max-height:28%}
+  .prediction-summary{width:340px;max-width:calc(100% - 292px);max-height:38%}
+  .weather-map-legend{left:12px;top:56px;right:286px;transform:none;max-width:none}
+  .site-status-legend,.site-status-legend.beside-summary{left:12px;right:auto;bottom:calc(44% + 58px);max-width:calc(100% - 304px)}
+}
+@media(max-width:620px){
+  .control-field{flex-basis:132px}.run-button,.optimal-button,.optimal-sweep-toggle{flex-basis:calc(50% - 2px)}
+  .drawing-menu{grid-template-columns:1fr;width:min(230px,calc(100vw - 16px))}
+  .drawing-info{left:8px;top:254px;width:calc(100% - 16px);max-width:none;max-height:23%}
+  .prediction-summary{left:8px;width:calc(100% - 16px);max-width:none;max-height:32%}
+  .weather-map-legend{left:8px;right:8px;top:48px;max-width:none;transform:none}
+  .site-status-legend,.site-status-legend.beside-summary{left:8px;right:8px;bottom:calc(32% + 62px);min-width:0;max-width:none}.site-status-legend span{white-space:normal}
+  .bottom-tools{justify-content:flex-start}
+}

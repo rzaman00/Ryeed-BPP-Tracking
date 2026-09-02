@@ -1,8 +1,16 @@
-# Build report — BPP Predicts v3.2.1
+# Build report — BPP Predicts v3.3.0
 
-This build is a UI-stability release based on v3.0.1. It intentionally does not redesign the operational predictor.
+This build is a responsive UI release on top of the v3.2.1 stability and performance fixes. The backend/frontend architecture and operational predictor are unchanged.
 
-## v3.2.1 fixes
+## v3.3.0 fixes
+- Added complete Maryland-flag, star-and-moon Night Launch, and animated Aurora chrome themes.
+- Replaced the clipping control strip with a dynamically wrapping layout.
+- Docked map overlays and added a geofence focus state that prevents inspector/summary overlap.
+- Added white dry-weather markers, blue rain markers, and low-to-high gust rings.
+- Separated weather and optimal-status legends and reduced trajectory emphasis in weather mode.
+- Preserved optimal-site colors through clicks and control edits; only a new normal predicts run clears them.
+- Made Basemap and Reference layer sections collapsible by default.
+- Reused one details popup so feature cards cannot stack on top of each other.
 - Fixed a browser-module syntax error that prevented the entire interface from starting.
 - Added bounded parallel prediction and parameter-sweep execution.
 - Cancelled superseded weather-map requests and reused backend HTTP connections for weather batches.
