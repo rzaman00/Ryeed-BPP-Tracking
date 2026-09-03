@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -262,6 +262,36 @@ def test_live_batch_supports_arbitrary_callsigns_and_partial_errors(monkeypatch)
     assert "TEST2-2" in result["errors"]
 
 
+def test_fetch_aprs_uses_keyless_aprs_is_client(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    class FakeClient:
+        running = True
+
+        def __init__(self):
+            self.tracked = None
+
+        async def track(self, callsigns):
+            self.tracked = list(callsigns)
+
+        def snapshot(self, callsigns):
+            return {
+                "source": "APRS-IS",
+                "requested_callsigns": list(callsigns),
+                "stations": {},
+                "history": {},
+                "connection": {"connected": True},
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(appmod, "APRS_CLIENT", client)
+    result = asyncio.run(appmod.fetch_aprs(["kc3skw-8", "KC3SKW-9"]))
+    assert client.tracked == ["KC3SKW-8", "KC3SKW-9"]
+    assert result["source"] == "APRS-IS"
+    assert result["connection"]["connected"] is True
+
+
 def test_bundled_launch_sites_include_operational_fallbacks():
     import app as appmod
     data, warning = appmod.load_geojson(appmod.BUNDLED_LAUNCH_FILE)
@@ -271,6 +301,31 @@ def test_bundled_launch_sites_include_operational_fallbacks():
     assert "Claud E. Kitchens Outdoor School at Fairview" in names
     assert "Allegany College of Maryland" in names
     assert warning is None
+
+
+def test_packaged_launch_and_poi_data_are_complete_and_warning_free(monkeypatch, tmp_path):
+    import asyncio
+    import app as appmod
+
+    async def unexpected_remote(*args, **kwargs):
+        raise AssertionError("packaged launch data should not require a remote request")
+
+    monkeypatch.setattr(appmod, "fetch_json_url", unexpected_remote)
+    monkeypatch.setattr(appmod, "LAUNCH_CACHE_FILE", tmp_path / "launch_cache.geojson")
+    data, warnings, sources = asyncio.run(appmod.operational_launch_locations())
+    assert len(data["features"]) == 11
+    assert warnings == []
+    assert sources[0] == "local"
+    assert all(str(f["properties"].get("address", "")).strip() for f in data["features"])
+    clear_spring = next(f for f in data["features"] if appmod.launch_city(f) == "Clear Spring")
+    assert clear_spring["properties"]["address"] == "12627 Broadfording Road, Clear Spring, MD 21722"
+    westminster = next(f for f in data["features"] if appmod.launch_city(f) == "Westminster")
+    assert westminster["properties"]["address"] == "811 Uniontown Road, Westminster, MD 21158"
+
+    poi, warning = asyncio.run(appmod.operational_reference_data("poi"))
+    assert warning is None
+    assert len(poi["features"]) == 2
+    assert all(str(f["properties"].get("address", "")).strip() for f in poi["features"])
 
 
 def test_operational_launch_locations_survive_remote_failure(monkeypatch, tmp_path):
@@ -328,9 +383,12 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.4.0"
+    assert h["version"] == "3.6.0"
     assert h["airspace"] == "FAA live services with disk cache"
+    assert h["aprs_configured"] is True
+    assert "aprs_server" in h
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
+    assert c["aprs_credit"]["name"].startswith("APRS-IS")
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
 
 
@@ -587,7 +645,7 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
         # Current 5.5 m/s crosses the polygon. 5.0 m/s is shifted north and clears it.
         lat=39.0 if abs(req.ascent_rate_ms-5.5)<1e-9 else 39.2
         lon=-77.3
-        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[-76.9,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":-76.9,"latitude":lat},"ground_distance_m":1000}}
+        return {"features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat,0],[-76.9,lat,1000]]},"properties":{"stage":"ascent"}}],"summary":{"landing":{"longitude":-76.9,"latitude":lat},"ground_distance_m":1000,"flight_duration_s":3600}}
     monkeypatch.setattr(appmod,"operational_airspace",fake_airspace);monkeypatch.setattr(appmod,"run_burst",fake_run)
     req=appmod.OptimalSiteRequest(
         launch_sites=[appmod.OptimalSiteCandidate(site_id="x",name="Test",latitude=39.0,longitude=-77.3)],
@@ -597,6 +655,7 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
     assert site["viable"] is True
     assert site["best_ascent_rate_ms"] == 5.0
     assert site["site_status"] == "viable"
+    assert site["flight_duration_s"] == 3600
     assert result["gold_site_id"] is None
     assert site["tested_ascent_rates_ms"] == [5.0,5.5] or set(site["tested_ascent_rates_ms"]) == {5.0,5.5}
 
@@ -930,6 +989,59 @@ def test_weather_batch_reuses_one_http_client(monkeypatch):
     assert seen_clients == [clients[0], clients[0], clients[0]]
 
 
+def test_seventh_day_weather_requests_extended_forecast_and_gusts(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    appmod._weather_cache.clear()
+    launch = datetime.now(timezone.utc) + timedelta(days=7) - timedelta(minutes=2)
+    selected = launch.replace(minute=0, second=0, microsecond=0)
+    seen = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "latitude": 39.0,
+                "longitude": -77.0,
+                "hourly": {
+                    "time": [selected.strftime("%Y-%m-%dT%H:%M")],
+                    "temperature_2m": [72],
+                    "precipitation": [0],
+                    "rain": [0],
+                    "weather_code": [1],
+                    "wind_speed_10m": [7.5],
+                    "wind_direction_10m": [240],
+                    "wind_gusts_10m": [13.2],
+                    "surface_pressure": [1008],
+                },
+            }
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, params=None):
+            seen.append((url, dict(params or {})))
+            return Resp()
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
+    result = asyncio.run(appmod.fetch_launch_weather(39, -77, launch))
+    assert result["wind_gust_mph"] == 13.2
+    assert result["source"] == "Open-Meteo Best Match"
+    assert seen[0][1]["forecast_days"] == 16
+    assert seen[0][1]["past_days"] == 5
+    assert "start_date" not in seen[0][1]
+
+
 def test_frontend_main_module_passes_a_real_module_syntax_check():
     import shutil
     import subprocess
@@ -973,11 +1085,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.4.0'
+    assert h['version']=='3.6.0'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.4.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.6.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1000,10 +1112,56 @@ def test_v34_launch_details_time_control_and_themes():
     css=(base/'static'/'styles.css').read_text(encoding='utf-8')
     for item in ['launchTimeButton','launchTimePopover','clearPredictSites']:
         assert f'id="{item}"' in html
-    assert 'value="country"' in html and 'value="summer"' in html
+    assert 'value="country"' in html and 'value="summer"' in html and 'value="pride"' in html
     assert 'Open this launch site in Ventusky' in js
     assert 'showLaunchSiteDetails' in js and 'launchAddress' in js
     assert "gust<=5" in js and "gust<=15" in js
     assert 'Past predictions are not supported' in js
     assert 'html[data-theme="light"] #runPredicts' in css
     assert '.info-page{background:var(--ui-bg);color:var(--text)}' in css
+    assert 'country:{primary:\'#b58b4c\'' in js
+    assert 'summer:{primary:\'#087fbd\'' in js
+    assert 'pride:{primary:\'#e40303\'' in js
+    assert 'html[data-launch-theme="country"] .site-header{background:#c6a76c}' in css
+    assert 'html[data-launch-theme="summer"] .site-header,' in css
+    assert 'box-shadow:inset 0 -9px 0 #edcf81' in css
+    assert 'content:"☀"' in css
+    assert 'html[data-launch-theme="pride"] .site-header' in css
+    assert '#4a2d18,#a45127' not in css
+    assert '#075985,#0284c7' not in css
+
+
+def test_v35_readiness_and_basic_advanced_operations_contract():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    css=(base/'static'/'styles.css').read_text(encoding='utf-8')
+    for item in ['readinessTab','readinessView','readinessStatus','readinessFactorGusts','readinessFactorPrecipitation','readinessFactorAirspace','readinessFactorFreshness','readinessFactorLanding','readinessSort','refreshReadiness','readinessTableBody']:
+        assert f'id="{item}"' in html
+    for column in ['Wind','Gusts','Rain','Temperature','Forecast age','Best ascent','Flight time','Landing location','Airspace intrusion','Forecast map']:
+        assert f'>{column}<' in html
+    assert 'value="safest"' in html and 'value="gusts"' in html and 'value="flight"' in html
+    assert 'value="operations-basic" checked' in html and 'value="operations-advanced"' in html
+    assert 'advanced-control' in html and 'advanced-map-control' in html
+    assert "evaluateReadiness" in js and "sortReadinessRows" in js and "refreshReadiness" in js
+    assert "Promise.allSettled" in js and "flight_duration_s" in js
+    assert 'html[data-operation-mode="basic"] .advanced-control' in css
+    assert '.readiness-factor-grid' in css and '.readiness-table' in css
+
+
+def test_v36_live_tracking_and_basic_safety_contract():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    app_source=(base/'app.py').read_text(encoding='utf-8')
+    requirements=(base/'requirements.txt').read_text(encoding='utf-8')
+    for item in ['liveTrackingTab','liveControlStrip','runLivePredict','livePredictType','liveBurstAltitude','liveConnection']:
+        assert f'id="{item}"' in html
+    assert 'id="workspaceMode"' not in html
+    assert 'burst-altitude-control advanced-control' not in html
+    assert 'data-layer="sua" checked' in html and 'data-layer="tfr" checked' in html
+    assert "['sua','tfr'].includes(key)" in js
+    assert "setAppView('live')" in js and "setLivePredictionType" in js
+    assert 'APRSFI_API_KEY' not in app_source
+    assert 'APRSISClient' in app_source and 'rotate.aprs2.net' in app_source
+    assert 'aprslib==0.7.2' in requirements

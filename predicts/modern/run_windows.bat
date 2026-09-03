@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-set "BUILD_VERSION=3.4.0"
+set "BUILD_VERSION=3.6.0"
 echo [BPP Predicts] Starting stable build v%BUILD_VERSION%...
 
 rem Do not reuse a virtual environment from an older package. This avoids
@@ -27,7 +27,7 @@ if not exist ".venv\Scripts\python.exe" (
     call setup_windows.bat
     if errorlevel 1 goto :fail
   )
-  ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx, dotenv, pydantic, shapely" >nul 2>nul
+  ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx, dotenv, pydantic, shapely, aprslib" >nul 2>nul
   if errorlevel 1 (
     echo [BPP Predicts] Runtime dependencies are incomplete. Repairing...
     call setup_windows.bat
