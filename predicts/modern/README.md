@@ -1,42 +1,46 @@
-# BPP Predicts v2.5.0 — Standalone Predicts + Inflation Calculator
+# BPP Predicts v3.5.0 — Responsive Mission UI
 
-This build keeps the v2.4 operational predictor and adds a fully integrated inflation calculator based directly on the supplied `InflationCalculations2024.m`. No MATLAB installation is required.
+This build keeps the proven operational predictor and makes its dense map UI easier to operate:
+- A Readiness tab exposes GO/CAUTION/NO-GO decisions and every underlying safety factor.
+- A sortable comparison table places weather, trajectory, landing, airspace, and Ventusky data side by side.
+- Operations Basic is the clean default; Operations Advanced restores Float, sweeps, drawing, 3-D, airspace, reference, and utility controls.
+- Launch themes are a header dropdown and now style the complete top and bottom chrome.
+- Launch Weather uses distinct white dry markers, blue rain markers, and gust-severity rings.
+- Clicking a launch marker shows weather, address, coordinates, and a Ventusky link in one card.
+- BPP gust categories are Low 0–5 mph, Medium 5–15 mph, and High above 15 mph.
+- Time and time zone share one clock popover, and Clear All deselects every site.
+- Country Desert and Summer Beach join the existing launch themes.
+- Prediction times are limited to now through seven days ahead.
+- Header tabs and prediction controls wrap dynamically instead of clipping.
+- Geofence editing, prediction summaries, weather, and optimal status occupy separate map zones.
+- Optimal-site colors persist through normal map interaction until a new predicts run begins.
+- Secondary layer groups are collapsible.
 
-## Application tabs
+All established prediction, optimal-site, APRS, airspace, inflation-calculator, export, and drawing functionality is retained.
 
-The local application has exactly two primary tabs:
+# BPP Predicts v3.5.0
 
-- **Predicts** — launch-site, custom-site, live APRS, airspace, drawing, export, sweep, and trajectory workflows.
-- **Inflation Calculator** — the MATLAB-equivalent launch inflation calculation.
+Standalone University of Maryland Balloon Payload Program prediction and launch-planning application.
 
-The previous BPP website navigation links are removed from the local interface.
+## Run on Windows
+From the repository root, double-click `START_BPP_PREDICTS.bat`, or run it from a terminal. The launcher verifies `/api/health` before opening the browser and prevents an older local BPP build from being mistaken for this release.
 
-## Burst altitude
+## Major capabilities
+- Burst and stitched-float trajectories.
+- Integrated MATLAB-equivalent inflation calculator and automatic/manual burst altitude.
+- Preset and custom launch sites, custom oriented geofences, 2-D/3-D map modes.
+- FAA Class B/C/D/E, SUA and TFR layers with altitude-aware scoring.
+- Live APRS multi-callsign prediction using packet latitude, longitude, altitude and time.
+- Fast/current and all-site optimal-site searches with optional ascent-rate sweep.
+- Transparent launch-readiness summaries and sortable selected-site comparison.
+- Basic and Advanced operational control modes.
+- Current and future prediction dates within the seven-day model window.
+- Launch weather: wind, gusts, rain and temperature plus a dedicated weather map mode.
+- Launch-specific visual themes without altering operational/safety colors.
+- KML/geofence export, parameter sweep, address query, drawing tools, and prediction summaries.
 
-Burst predictions default to **Automatic (Inflation Calculator)**. The calculator output is copied into the burst-altitude field and refreshed whenever its launch conditions or desired ascent rate change. Switch the Burst Altitude selector to **Manual** to edit the field exactly as before.
+## APRS
+Create `predicts/modern/.env` from `.env.example` and set `APRSFI_API_KEY=...`. Never commit a real API key.
 
-The MATLAB model reports burst height **above launch site**, and v2.5 intentionally preserves that model/output rather than silently changing the equations.
-
-## Launch-site labels
-
-Past launch sites are displayed as:
-
-`City - Location`
-
-For example: `Clear Spring - Claud E. Kitchens Outdoor School at Fairview`.
-
-## Inflation model provenance
-
-The original supplied MATLAB source is bundled unchanged at `reference/InflationCalculations2024.m`. The Python port preserves the constants and equations: drag coefficient 0.25, gas constants, 2–3 m launch-diameter bracket, scale-lift calculation, PSI conversion, 10.5 m Hwoyee 1600 burst diameter, and the 7238.3 m exponential-density burst-height approximation.
-
-## Start
-
-Windows repository root:
-
-```powershell
-.\START_BPP_PREDICTS.bat
-```
-
-Verify: `http://127.0.0.1:8000/api/health` should report `2.5.0`.
-
-Live APRS still requires `APRSFI_API_KEY` in `.env`. Prediction, APRS, map tiles, and live FAA data require internet access when those services are used.
+## Verify
+Open `http://127.0.0.1:8000/api/health`; `version` must be `3.5.0`.

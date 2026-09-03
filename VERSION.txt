@@ -1,2 +1,1 @@
-BPP Predicts current build: 2.5.0
-Standalone Predicts + Inflation Calculator
+3.5.0
