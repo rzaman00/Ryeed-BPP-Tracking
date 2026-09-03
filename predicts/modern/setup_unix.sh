@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-echo "[BPP Predicts v3.7.0] Checking local Python environment..."
+echo "[BPP Predicts v3.6.0] Checking local Python environment..."
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ -x .venv/bin/python ]]; then
   if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then

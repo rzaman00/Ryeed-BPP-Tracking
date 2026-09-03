@@ -33,10 +33,8 @@ function finiteNumber(value) {
 export function evaluateReadiness(weather, optimal, forecastAgeMinutes) {
   const gust = finiteNumber(weather?.wind_gust_mph);
   const precipitation = finiteNumber(weather?.precipitation_in ?? weather?.rain_in ?? 0);
-  const intrusion = finiteNumber(optimal?.airspace_horizontal_intrusion_m ?? optimal?.airspace_intrusion_m);
-  const waterCrossing = finiteNumber(optimal?.water_crossing_m);
+  const intrusion = finiteNumber(optimal?.airspace_intrusion_m);
   const age = finiteNumber(forecastAgeMinutes);
-  const conflictLayers = Array.isArray(optimal?.conflict_layers) ? optimal.conflict_layers : [];
 
   const factors = {
     gusts: !Number.isFinite(gust)
@@ -54,8 +52,8 @@ export function evaluateReadiness(weather, optimal, forecastAgeMinutes) {
     airspace: !optimal || !Number.isFinite(intrusion)
       ? factor('no-go', 'Airspace analysis unavailable')
       : intrusion > 0
-        ? factor('no-go', `${intrusion.toFixed(0)} m crossing · ${conflictLayers.join(', ') || 'controlled airspace'}`)
-        : factor('go', 'No B/C/D, SUA, or TFR crossing'),
+        ? factor('no-go', `${intrusion.toFixed(0)} m path intrusion`)
+        : factor('go', 'No 3-D intrusion'),
     freshness: !Number.isFinite(age)
       ? factor('no-go', 'Forecast freshness unavailable')
       : age > 180
@@ -63,15 +61,11 @@ export function evaluateReadiness(weather, optimal, forecastAgeMinutes) {
         : age > 60
           ? factor('caution', `${Math.round(age)} min old`)
           : factor('go', age < 1 ? 'Updated less than 1 min ago' : `Updated ${Math.round(age)} min ago`),
-    landing: !optimal || !Number.isFinite(waterCrossing)
+    landing: !optimal
       ? factor('no-go', 'Landing-risk analysis unavailable')
-      : optimal.landing_in_water
-        ? factor('no-go', 'Predicted landing is in mapped water')
-        : waterCrossing > 0
-          ? factor('no-go', `${waterCrossing.toFixed(0)} m Chesapeake Bay crossing`)
-          : optimal.landing_in_high_risk_airspace
+      : optimal.landing_in_high_risk_airspace
         ? factor('no-go', 'Landing inside restricted/SUA/TFR airspace')
-        : factor('go', 'No water crossing; landing outside high-risk airspace'),
+        : factor('go', 'Landing outside high-risk airspace'),
   };
   const values = Object.values(factors);
   const severity = Math.max(...values.map(item => READINESS_SEVERITY[item.status]));
@@ -104,8 +98,7 @@ export function sortReadinessRows(rows, mode = 'safest') {
     return READINESS_SEVERITY[ar.status] - READINESS_SEVERITY[br.status]
       || ar.noGoCount - br.noGoCount
       || ar.cautionCount - br.cautionCount
-      || finiteOrInfinity(a.optimal?.airspace_horizontal_intrusion_m ?? a.optimal?.airspace_intrusion_m) - finiteOrInfinity(b.optimal?.airspace_horizontal_intrusion_m ?? b.optimal?.airspace_intrusion_m)
-      || finiteOrInfinity(a.optimal?.water_crossing_m) - finiteOrInfinity(b.optimal?.water_crossing_m)
+      || finiteOrInfinity(a.optimal?.airspace_intrusion_m) - finiteOrInfinity(b.optimal?.airspace_intrusion_m)
       || finiteOrInfinity(a.weather?.wind_gust_mph) - finiteOrInfinity(b.weather?.wind_gust_mph)
       || String(a.site_name).localeCompare(String(b.site_name));
   });

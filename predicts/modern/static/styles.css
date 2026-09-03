@@ -595,21 +595,7 @@ html[data-theme="dark"] .table-ventusky{color:#8dd5ff;border-color:#246c9c;backg
 @media(max-width:900px){.readiness-heading{align-items:stretch;flex-direction:column}.readiness-actions{justify-content:flex-start}.readiness-summary-main{grid-template-columns:auto 1fr}.readiness-updated{grid-column:1/-1}.readiness-factor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.readiness-factor:last-child{grid-column:1/-1}}
 @media(max-width:560px){.readiness-page{padding:16px 10px 32px}.readiness-actions{display:grid;grid-template-columns:1fr 1fr}.readiness-actions select,#refreshReadiness{width:100%}.readiness-summary-main{grid-template-columns:1fr}.readiness-factor-grid{grid-template-columns:1fr}.readiness-factor:last-child{grid-column:auto}.readiness-summary-card{padding:13px}}
 
-/* v3.7 transparent readiness criteria + full ChaseMapper handoff */
-.app-tab{text-decoration:none}
-.readiness-conditions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:0 0 15px}
-.readiness-conditions article{display:flex;flex-direction:column;gap:4px;border:1px solid var(--ui-border);border-radius:11px;background:var(--surface);padding:10px 12px;box-shadow:var(--soft-shadow)}
-.readiness-conditions span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:800}
-.readiness-conditions strong{font-size:14px;line-height:1.35}
-.readiness-criteria-card{border:1px solid var(--ui-border);border-radius:16px;background:var(--surface);box-shadow:var(--soft-shadow);padding:16px;margin-bottom:15px}
-.criteria-heading{display:flex;align-items:end;justify-content:space-between;gap:22px;margin-bottom:12px}.criteria-heading h2{margin:2px 0 0;font-size:20px}.criteria-heading p{max-width:720px;margin:0;color:var(--text-muted);font-size:13px;line-height:1.45}
-.criteria-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.criteria-grid article{border:1px solid var(--ui-border);border-left-width:4px;border-radius:10px;background:var(--surface-2);padding:11px 12px}.criteria-grid article.go{border-left-color:#1f9d55}.criteria-grid article.caution{border-left-color:#d7a820}.criteria-grid article.no-go{border-left-color:#d83a45}.criteria-grid strong{font-size:13px}.criteria-grid p{margin:5px 0 0;color:var(--text-muted);font-size:12px;line-height:1.45}
-.readiness-reason-cell{min-width:260px;max-width:360px;color:var(--text-muted);font-size:12px;line-height:1.45}
-.readiness-table{min-width:1660px}
-@media(max-width:900px){.readiness-conditions{grid-template-columns:repeat(2,minmax(0,1fr))}.criteria-heading{align-items:start;flex-direction:column;gap:7px}.criteria-grid{grid-template-columns:1fr}}
-@media(max-width:560px){.readiness-conditions{grid-template-columns:1fr 1fr}.readiness-conditions article{padding:9px}.readiness-conditions strong{font-size:12px}}
-
-/* v3.7 complete Live CHASE integration + Basic safety layers */
+/* v3.6 separate live tracking + Basic safety layers */
 .live-control-strip{border-bottom-color:color-mix(in srgb,var(--launch-primary) 55%,var(--ui-border));background:var(--surface)}
 .live-control-strip .control-field{background:var(--surface);min-width:132px}
 .live-control-strip .live-callsign-field{min-width:320px}

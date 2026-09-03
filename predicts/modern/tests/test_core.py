@@ -170,6 +170,128 @@ def test_historical_float_second_stage_failure_uses_noaa_fallback(monkeypatch):
     assert asyncio.run(appmod.run_float(req)) is fallback
 
 
+def test_normalize_callsigns_typed_multi():
+    from app import normalize_callsigns
+
+    assert normalize_callsigns("kc3skw-8, KC3SKW-9  kc3skw-8;KC3SKW-10") == [
+        "KC3SKW-8", "KC3SKW-9", "KC3SKW-10"
+    ]
+    with pytest.raises(ValueError):
+        normalize_callsigns("bad/callsign")
+
+
+def test_live_prediction_uses_aprs_position_altitude_and_time(monkeypatch):
+    import asyncio
+    import app as appmod
+    from app import LivePredictBatchRequest
+
+    captured = {}
+
+    async def fake_run_burst(req, meta):
+        captured["launch"] = req.launch
+        captured["launch_datetime"] = req.launch_datetime
+        captured["meta"] = meta
+        return {"type": "FeatureCollection", "features": [], "summary": {"launch": {}, "landing": {}}, "request": {}}
+
+    monkeypatch.setattr(appmod, "run_burst", fake_run_burst)
+    settings = LivePredictBatchRequest(callsigns=["KC3SKW-8"], mode="burst")
+    station = {
+        "callsign": "KC3SKW-8",
+        "latitude": 39.1234,
+        "longitude": -77.5678,
+        "altitude_m": 5432.1,
+        "time": 1788026400,
+        "lasttime": 1788026400,
+    }
+    result = asyncio.run(appmod.build_live_prediction(settings, "KC3SKW-8", station))
+
+    assert captured["launch"].latitude == 39.1234
+    assert captured["launch"].longitude == -77.5678
+    assert captured["launch"].altitude_m == 5432.1
+    assert captured["meta"]["live_start_altitude_m"] == 5432.1
+    assert result["live"]["used_position"]["altitude_m"] == 5432.1
+    assert result["live"]["used_altitude_m"] == 5432.1
+    assert int(captured["launch_datetime"].timestamp()) == 1788026400
+
+
+def test_live_prediction_refuses_missing_altitude():
+    import asyncio
+    import app as appmod
+    from app import LivePredictBatchRequest
+
+    settings = LivePredictBatchRequest(callsigns=["KC3SKW-8"], mode="burst")
+    station = {
+        "callsign": "KC3SKW-8",
+        "latitude": 39.1234,
+        "longitude": -77.5678,
+        "altitude_m": None,
+        "time": 1788026400,
+    }
+    with pytest.raises(appmod.ExternalServiceError, match="no altitude"):
+        asyncio.run(appmod.build_live_prediction(settings, "KC3SKW-8", station))
+
+
+def test_live_batch_supports_arbitrary_callsigns_and_partial_errors(monkeypatch):
+    import asyncio
+    import app as appmod
+    from app import LivePredictBatchRequest
+
+    async def fake_fetch(callsigns, force=False):
+        assert callsigns == ["TEST1-1", "TEST2-2"]
+        return {
+            "source": "aprs.fi",
+            "source_url": "https://aprs.fi/",
+            "fetched_at": "2026-08-29T22:00:00Z",
+            "stations": {
+                "TEST1-1": {"callsign": "TEST1-1", "latitude": 39.0, "longitude": -77.0, "altitude_m": 1000.0, "time": 1788031200},
+                "TEST2-2": {"callsign": "TEST2-2", "latitude": 39.1, "longitude": -77.1, "altitude_m": 2000.0, "time": 1788031200},
+            },
+        }
+
+    async def fake_build(settings, callsign, station):
+        if callsign == "TEST2-2":
+            raise appmod.ExternalServiceError("simulated station failure")
+        return {"features": [], "summary": {}, "live": {"used_altitude_m": station["altitude_m"]}}
+
+    monkeypatch.setattr(appmod, "fetch_aprs", fake_fetch)
+    monkeypatch.setattr(appmod, "build_live_prediction", fake_build)
+    req = LivePredictBatchRequest(callsigns=["test1-1", "test2-2"])
+    result = asyncio.run(appmod.live_predict_batch(req))
+    assert result["requested_callsigns"] == ["TEST1-1", "TEST2-2"]
+    assert result["results"]["TEST1-1"]["live"]["used_altitude_m"] == 1000.0
+    assert "TEST2-2" in result["errors"]
+
+
+def test_fetch_aprs_uses_keyless_aprs_is_client(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    class FakeClient:
+        running = True
+
+        def __init__(self):
+            self.tracked = None
+
+        async def track(self, callsigns):
+            self.tracked = list(callsigns)
+
+        def snapshot(self, callsigns):
+            return {
+                "source": "APRS-IS",
+                "requested_callsigns": list(callsigns),
+                "stations": {},
+                "history": {},
+                "connection": {"connected": True},
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(appmod, "APRS_CLIENT", client)
+    result = asyncio.run(appmod.fetch_aprs(["kc3skw-8", "KC3SKW-9"]))
+    assert client.tracked == ["KC3SKW-8", "KC3SKW-9"]
+    assert result["source"] == "APRS-IS"
+    assert result["connection"]["connected"] is True
+
+
 def test_bundled_launch_sites_include_operational_fallbacks():
     import app as appmod
     data, warning = appmod.load_geojson(appmod.BUNDLED_LAUNCH_FILE)
@@ -261,10 +383,12 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.7.0"
+    assert h["version"] == "3.6.0"
     assert h["airspace"] == "FAA live services with disk cache"
-    assert h["live_tracking"] == "complete ChaseMapper server on port 5001"
-    assert c["live_tracking"]["architecture"] == "complete ChaseMapper"
+    assert h["aprs_configured"] is True
+    assert "aprs_server" in h
+    assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
+    assert c["aprs_credit"]["name"].startswith("APRS-IS")
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
 
 
@@ -274,8 +398,8 @@ def test_ui_contract_has_required_controls_and_wiring():
     html = (base / "static" / "index.html").read_text(encoding="utf-8")
     js = (base / "static" / "app.js").read_text(encoding="utf-8")
     required_ids = [
-        "runPredicts", "findOptimalCurrent", "findOptimalAll", "optimalAscentSweep",
-        "predictSiteList", "customPredictSiteList",
+        "runPredicts", "findOptimalCurrent", "findOptimalAll", "optimalAscentSweep", "refreshLive", "callsignPicker", "addCallsignButton", "customCallsign",
+        "saveCustomCallsign", "callsignChips", "predictSiteList", "customPredictSiteList",
         "drawingToggle", "deleteDrawing", "deleteAllDrawings", "downloadDrawings", "saveDrawingName",
         "zoomPredicts", "downloadKml", "downloadGeofence", "openSweep", "queryAddresses", "aboutMap",
     ]
@@ -508,7 +632,7 @@ def test_ui_has_two_optimal_buttons_three_status_colors_and_no_blue():
     for status in ["site-best","site-viable","site-nogo"]: assert status in css
     assert "site-preferred" not in css
     assert "status-blue" not in css and "Blue —" not in html
-    for color in ["Gold — preferred + viable (Clear Spring / Hancock)","Green — clear of operational airspace and water","Red — airspace/water crossing or landing no-go"]: assert color in html
+    for color in ["Gold — preferred + viable (Clear Spring / Hancock)","Green — viable / clear at crossing altitude","Red — conflict at balloon altitude / landing no-go"]: assert color in html
 
 
 def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch):
@@ -537,7 +661,7 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
 
 
 
-def test_v37_operational_rule_flags_footprint_but_keeps_3d_detail():
+def test_v29_altitude_aware_airspace_does_not_flag_path_above_class_d():
     import app as appmod
     airspace={"controlled":{"type":"FeatureCollection","features":[{
         "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":3000,"LOWER_UOM":"FT","UPPER_UOM":"FT"},
@@ -546,10 +670,7 @@ def test_v37_operational_rule_flags_footprint_but_keeps_3d_detail():
     idx=appmod.build_airspace_spatial_indexes(airspace)
     high={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,5000],[-76.8,39.0,5000]]}}]}
     low={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,300],[-76.8,39.0,300]]}}]}
-    high_score=appmod.score_prediction_against_airspace(high,idx)
-    assert high_score["clear_of_airspace"] is False
-    assert high_score["airspace_horizontal_intrusion_m"] > 10000
-    assert high_score["airspace_3d_intrusion_m"] == 0
+    assert appmod.score_prediction_against_airspace(high,idx)["clear_of_airspace"] is True
     assert appmod.score_prediction_against_airspace(low,idx)["airspace_intrusion_m"] > 10000
 
 
@@ -639,38 +760,19 @@ def test_v29_identical_optimal_request_uses_short_cache(monkeypatch):
     assert len(calls)==1
 
 
-def test_v37_crossing_altitude_is_reported_without_weakening_no_go_rule():
+def test_v29_crossing_altitude_uses_airspace_ceiling_not_2d_footprint():
     import app as appmod
     airspace={"controlled":{"type":"FeatureCollection","features":[{
         "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":10000,"LOWER_UOM":"FT","UPPER_UOM":"FT","LOCAL_TYPE":"CLASS_D"},
         "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-77.0,38.9],[-77.0,39.1],[-77.2,39.1],[-77.2,38.9]]]}
     }]}}
     idx=appmod.build_airspace_spatial_indexes(airspace)
-    # The line crosses the polygon horizontally at ~20,000 ft MSL: operational
-    # no-go, while the separate 3-D metric correctly reports no altitude intrusion.
+    # The line crosses the polygon horizontally at ~20,000 ft MSL: clear overflight.
     above={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,6100],[-76.9,39.0,6100]]}}]}
     # Same 2-D crossing at ~5,000 ft MSL: conflict.
     inside={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,1524],[-76.9,39.0,1524]]}}]}
-    above_score=appmod.score_prediction_against_airspace(above,idx)
-    inside_score=appmod.score_prediction_against_airspace(inside,idx)
-    assert above_score["clear_of_airspace"] is False
-    assert above_score["airspace_3d_intrusion_m"] == 0
-    assert inside_score["clear_of_airspace"] is False
-    assert inside_score["airspace_3d_intrusion_m"] > 0
-
-
-def test_v37_chesapeake_crossing_is_no_go_even_with_land_landing():
-    import app as appmod
-    index=appmod._load_water_hazard_index()
-    crossing={
-        "features":[{"geometry":{"type":"LineString","coordinates":[[-76.8,39.2,1000],[-75.9,39.2,1000]]}}],
-        "summary":{"landing":{"longitude":-75.9,"latitude":39.2}},
-    }
-    score=appmod.score_prediction_against_water(crossing,index)
-    assert score["water_crossing_m"] > 1000
-    assert score["landing_in_water"] is False
-    assert score["clear_of_water"] is False
-    assert "Chesapeake Bay main stem" in score["water_hazards"]
+    assert appmod.score_prediction_against_airspace(above,idx)["clear_of_airspace"] is True
+    assert appmod.score_prediction_against_airspace(inside,idx)["clear_of_airspace"] is False
 
 
 def test_v29_nonviable_preferred_site_is_red_and_no_blue(monkeypatch):
@@ -983,11 +1085,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.7.0'
+    assert h['version']=='3.6.0'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.7.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.6.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1036,7 +1138,7 @@ def test_v35_readiness_and_basic_advanced_operations_contract():
     css=(base/'static'/'styles.css').read_text(encoding='utf-8')
     for item in ['readinessTab','readinessView','readinessStatus','readinessFactorGusts','readinessFactorPrecipitation','readinessFactorAirspace','readinessFactorFreshness','readinessFactorLanding','readinessSort','refreshReadiness','readinessTableBody']:
         assert f'id="{item}"' in html
-    for column in ['Wind','Gusts','Rain','Temperature','Forecast age','Best ascent','Flight time','Landing location','Airspace / water','Forecast map']:
+    for column in ['Wind','Gusts','Rain','Temperature','Forecast age','Best ascent','Flight time','Landing location','Airspace intrusion','Forecast map']:
         assert f'>{column}<' in html
     assert 'value="safest"' in html and 'value="gusts"' in html and 'value="flight"' in html
     assert 'value="operations-basic" checked' in html and 'value="operations-advanced"' in html
@@ -1047,25 +1149,19 @@ def test_v35_readiness_and_basic_advanced_operations_contract():
     assert '.readiness-factor-grid' in css and '.readiness-table' in css
 
 
-def test_v37_complete_chasemapper_and_basic_safety_contract():
+def test_v36_live_tracking_and_basic_safety_contract():
     base=Path(__file__).resolve().parents[1]
     html=(base/'static'/'index.html').read_text(encoding='utf-8')
     js=(base/'static'/'app.js').read_text(encoding='utf-8')
     app_source=(base/'app.py').read_text(encoding='utf-8')
-    repo=base.parents[1]
-    assert 'id="liveTrackingTab"' in html
-    assert 'href="http://127.0.0.1:5001/"' in html
-    for item in ['liveControlStrip','runLivePredict','livePredictType','liveBurstAltitude','liveConnection']:
-        assert f'id="{item}"' not in html
+    requirements=(base/'requirements.txt').read_text(encoding='utf-8')
+    for item in ['liveTrackingTab','liveControlStrip','runLivePredict','livePredictType','liveBurstAltitude','liveConnection']:
+        assert f'id="{item}"' in html
     assert 'id="workspaceMode"' not in html
     assert 'burst-altitude-control advanced-control' not in html
     assert 'data-layer="sua" checked' in html and 'data-layer="tfr" checked' in html
-    assert 'data-layer="controlled" checked' in html
-    assert "['controlled','sua','tfr'].includes(key)" in js
-    assert "setAppView('live')" not in js and '/api/live' not in app_source
-    chase=repo/'predicts'/'chasemapper'
-    assert (chase/'docker-compose.yml').exists()
-    assert (chase/'horusmapper.py').exists()
-    assert (chase/'chasemapper'/'aprsis.py').exists()
-    assert (chase/'chasemapper'/'spot.py').exists()
-    assert (chase/'chasemapper'/'parcel_proxy.py').exists()
+    assert "['sua','tfr'].includes(key)" in js
+    assert "setAppView('live')" in js and "setLivePredictionType" in js
+    assert 'APRSFI_API_KEY' not in app_source
+    assert 'APRSISClient' in app_source and 'rotate.aprs2.net' in app_source
+    assert 'aprslib==0.7.2' in requirements

@@ -14,7 +14,7 @@ if not defined PYTHON_CMD (
   goto :fail
 )
 
-echo [BPP Predicts v3.7.0] Checking local Python environment...
+echo [BPP Predicts v3.6.0] Checking local Python environment...
 
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" -m pip --version >nul 2>nul
@@ -45,7 +45,7 @@ if not exist ".env" (
 )
 
 echo.
-> ".venv\.bpp_build" echo 3.7.0
+> ".venv\.bpp_build" echo 3.6.0
 echo Setup complete. Run run_windows.bat or the top-level START_BPP_PREDICTS.bat.
 exit /b 0
 
@@ -67,7 +67,7 @@ goto :verify_after_rebuild
 if errorlevel 1 goto :fail
 if not exist ".env" copy /Y ".env.example" ".env" >nul
 echo.
-> ".venv\.bpp_build" echo 3.7.0
+> ".venv\.bpp_build" echo 3.6.0
 echo Setup complete after rebuilding the virtual environment.
 exit /b 0
 

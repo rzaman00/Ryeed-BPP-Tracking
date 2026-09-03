@@ -9,15 +9,12 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-import shutil
 from pathlib import Path
 
-BUILD_VERSION = "3.7.0"
+BUILD_VERSION = "3.6.0"
 HOST = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")
 PREFERRED_PORT = int(os.getenv("BPP_PREDICTS_PORT", "8000"))
 ROOT = Path(__file__).resolve().parent
-CHASE_ROOT = ROOT.parent / "chasemapper"
-CHASE_PORT = 5001
 
 
 def health(port: int, timeout: float = 0.55) -> dict | None:
@@ -118,7 +115,7 @@ def stop_bpp_server(port: int, data: dict) -> None:
 
 
 def remove_old_bpp_instances() -> bool:
-    """Stop old BPP Predicts servers; return True if this build is already running."""
+    """Stop old BPP Predicts servers; return True if v3.6.0 is already on preferred port."""
     current_on_preferred = False
     ports = sorted(set([PREFERRED_PORT, *range(8000, 8011)]))
     for port in ports:
@@ -148,57 +145,8 @@ def open_current(port: int) -> None:
     webbrowser.open(url, new=2)
 
 
-def start_live_chase() -> bool:
-    """Start the complete vendored ChaseMapper stack when Docker is available."""
-    if os.getenv("BPP_SKIP_LIVE_CHASE", "").strip().lower() in {"1", "true", "yes"}:
-        print("[BPP Live CHASE] Startup skipped by BPP_SKIP_LIVE_CHASE.")
-        return False
-    if port_is_open(CHASE_PORT):
-        print(f"[BPP Live CHASE] Already available at http://127.0.0.1:{CHASE_PORT}/")
-        return True
-    if not CHASE_ROOT.exists():
-        print("[BPP Live CHASE] The vendored ChaseMapper directory is missing.")
-        return False
-    if not shutil.which("docker"):
-        print("[BPP Live CHASE] Docker Desktop was not found. Predicts will still run; install/start Docker Desktop to use Live CHASE.")
-        return False
-    try:
-        check = subprocess.run(
-            ["docker", "compose", "version"],
-            cwd=CHASE_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=12,
-            check=False,
-        )
-        if check.returncode != 0:
-            print("[BPP Live CHASE] Docker Compose is unavailable. Predicts will still run.")
-            return False
-        print("[BPP Live CHASE] Starting the complete ChaseMapper server (the first build can take several minutes)...")
-        result = subprocess.run(
-            ["docker", "compose", "up", "-d", "--build"],
-            cwd=CHASE_ROOT,
-            check=False,
-        )
-        if result.returncode != 0:
-            print("[BPP Live CHASE] Docker could not start ChaseMapper. Review the Docker output above.")
-            return False
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            if port_is_open(CHASE_PORT):
-                print(f"[BPP Live CHASE] Ready at http://127.0.0.1:{CHASE_PORT}/")
-                return True
-            time.sleep(0.5)
-        print("[BPP Live CHASE] Container started but port 5001 is not ready yet. It may still be initializing.")
-        return False
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"[BPP Live CHASE] Could not start Docker: {exc}")
-        return False
-
-
 def main() -> int:
     print(f"[BPP Predicts] Current build: v{BUILD_VERSION}")
-    start_live_chase()
     already_current = remove_old_bpp_instances()
     if already_current:
         data = health(PREFERRED_PORT, timeout=1.2)
