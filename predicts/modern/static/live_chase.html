@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Starting Live CHASE</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,Segoe UI,Arial,sans-serif;background:#08111d;color:#f5f8fc}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 20%,#183451 0,#08111d 52%)}
+    main{width:min(620px,100%);padding:34px;border:1px solid #36516e;border-radius:22px;background:rgba(10,22,36,.94);box-shadow:0 22px 70px rgba(0,0,0,.38)}
+    .mark{width:58px;height:58px;display:grid;place-items:center;border-radius:18px;background:#0b79b7;font-size:28px;margin-bottom:22px}
+    h1{font-size:clamp(28px,5vw,42px);margin:0 0 12px}p{font-size:17px;line-height:1.55;color:#bbcad9;margin:0 0 20px}
+    .status{padding:16px 18px;border:1px solid #36516e;border-radius:13px;background:#101f30;color:#ecf4fb;font-weight:700}
+    .status.error,.status.blocked{border-color:#a84747;background:#331919}.status.ready{border-color:#28a66a;background:#123525}
+    .spinner{display:inline-block;width:14px;height:14px;margin-right:10px;border:2px solid #6f8ba5;border-top-color:#78cbff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
+    .blocked .spinner,.error .spinner,.ready .spinner{display:none}.help{margin-top:22px;padding-top:20px;border-top:1px solid #2a4057;font-size:15px}
+    button,a.button{display:inline-flex;align-items:center;justify-content:center;margin-top:18px;padding:11px 16px;border:1px solid #5f87aa;border-radius:10px;background:#0b79b7;color:#fff;text-decoration:none;font:700 15px inherit;cursor:pointer}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true">⌖</div>
+    <h1>Live CHASE</h1>
+    <p>Predicts is ready. The complete ChaseMapper server runs separately and may need a few minutes on its first launch.</p>
+    <div id="status" class="status starting" role="status" aria-live="polite"><span class="spinner"></span><span id="message">Checking Live CHASE…</span></div>
+    <div class="help">
+      <strong>If startup is blocked</strong>
+      <p>Install or start Docker Desktop, keep the BPP Predicts launcher window open, and press Retry. You do not need to run both BPP start files.</p>
+      <button id="retry" type="button">Retry connection</button>
+      <a class="button" href="/">Back to Predicts</a>
+    </div>
+  </main>
+  <script>
+    const statusElement=document.getElementById('status');
+    const messageElement=document.getElementById('message');
+    let timer;
+    async function check(){
+      clearTimeout(timer);
+      try{
+        const response=await fetch('/api/live-chase/status',{cache:'no-store'});
+        const data=await response.json();
+        statusElement.className=`status ${data.status||'starting'}`;
+        messageElement.textContent=data.message||'Waiting for Live CHASE…';
+        if(data.status==='ready'){location.replace(data.url);return;}
+      }catch{statusElement.className='status error';messageElement.textContent='Predicts could not check the Live CHASE server.';}
+      timer=setTimeout(check,2500);
+    }
+    document.getElementById('retry').addEventListener('click',check);
+    check();
+  </script>
+</body>
+</html>

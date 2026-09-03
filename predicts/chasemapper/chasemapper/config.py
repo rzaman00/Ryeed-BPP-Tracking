@@ -1,0 +1,432 @@
+#!/usr/bin/env python
+#
+#   Project Horus - Browser-Based Chase Mapper - Config Reader
+#
+#   Copyright (C) 2018  Mark Jessop <vk5qi@rfhead.net>
+#   Released under GNU GPL v3 or later
+#
+import logging
+import os
+
+try:
+    # Python 2
+    from ConfigParser import RawConfigParser
+except ImportError:
+    # Python 3
+    from configparser import RawConfigParser
+
+
+default_config = {
+    # Start location for the map (until either a chase car position, or balloon position is available.)
+    "default_lat": -34.9,
+    "default_lon": 138.6,
+    "default_alt": 0,
+    "payload_max_age": 1440,
+    "thunderforest_api_key": "none",
+    "stadia_api_key": "none",
+    # Predictor settings
+    "pred_enabled": True,  # Enable running and display of predicted flight paths.
+    "offline_predictions": False,  # Use an offline GFS model and predictor instead of Tawhiri.
+    # Default prediction settings (actual values will be used once the flight is underway)
+    "pred_model": "Disabled",
+    "pred_desc_rate": 6.0,
+    "pred_burst": 28000,
+    # CUSF float-profile (GHOUL) settings. Global toggle — applies to
+    # whichever telemetry profile is active. When float_enabled is True
+    # the predictor uses Tawhiri's float_profile (ascend to
+    # float_altitude, drift until float_duration_hours past launch).
+    "float_enabled": False,
+    "float_altitude": 25000.0,
+    "float_duration_hours": 24.0,
+    "show_abort": True,  # Show a prediction of an 'abort' paths (i.e. if the balloon bursts *now*)
+    "pred_update_rate": 15,  # Update predictor every 15 seconds.
+    # Range Rings
+    "range_rings_enabled": False,
+    "range_ring_quantity": 5,
+    "range_ring_spacing": 1000,
+    "range_ring_weight": 1.5,
+    "range_ring_color": "red",
+    "range_ring_custom_color": "#FF0000",
+    # Chase Car Speedometer
+    "chase_car_speed": True,
+    # Bearing processing
+    "max_bearings": 300,
+    "max_bearing_age": 1440 * 60,
+    "car_speed_gate": 10,
+    "bearing_length": 10,
+    "bearing_weight": 1.0,
+    "bearing_color": "black",
+    "bearing_custom_color": "#FF0000",
+    "bearings_only_mode": False,
+    "doa_confidence_threshold": 4.0,
+    # TimeSync Hunting Settings (not in config file, but needs to be shared between clients)
+    "time_seq_enabled": False,
+    "time_seq_times": [0,0,0,0],
+    "time_seq_active": 25,
+    "time_seq_cycle": 120,
+    "offline_tile_layer_max_native_zoom": {},
+
+    # History
+    "reload_last_position": False,
+    # Optional KML overlays to display on the main map.
+    "kml_overlays": [],
+}
+
+
+def _csv_callsigns(config, section, key):
+    """Comma-separated callsigns, upper-cased. Missing key -> empty list."""
+    try:
+        raw = config.get(section, key)
+    except Exception:
+        return []
+    return [c.strip().upper() for c in raw.split(",") if c.strip()]
+
+
+def parse_config_file(filename):
+    """ Parse a Configuration File """
+
+    chase_config = default_config.copy()
+
+    config = RawConfigParser()
+    config.read(filename)
+
+    # Map Defaults
+    chase_config["flask_host"] = config.get("map", "flask_host")
+    chase_config["flask_port"] = config.getint("map", "flask_port")
+    chase_config["default_lat"] = config.getfloat("map", "default_lat")
+    chase_config["default_lon"] = config.getfloat("map", "default_lon")
+    chase_config["payload_max_age"] = config.getint("map", "payload_max_age")
+    chase_config["thunderforest_api_key"] = config.get("map", "thunderforest_api_key")
+
+    # GPSD Settings
+    chase_config["car_gpsd_host"] = config.get("gpsd", "gpsd_host")
+    chase_config["car_gpsd_port"] = config.getint("gpsd", "gpsd_port")
+
+    # Serial GPS Settings
+    chase_config["car_serial_port"] = config.get("gps_serial", "gps_port")
+    chase_config["car_serial_baud"] = config.getint("gps_serial", "gps_baud")
+
+    # Habitat Settings
+    chase_config["habitat_upload_enabled"] = config.getboolean(
+        "habitat", "habitat_upload_enabled"
+    )
+    chase_config["habitat_call"] = config.get("habitat", "habitat_call")
+    chase_config["habitat_update_rate"] = config.getint(
+        "habitat", "habitat_update_rate"
+    )
+
+    # Predictor
+    chase_config["pred_enabled"] = config.getboolean("predictor", "predictor_enabled")
+    chase_config["offline_predictions"] = config.getboolean(
+        "predictor", "offline_predictions"
+    )
+    chase_config["pred_burst"] = config.getfloat("predictor", "default_burst")
+    chase_config["pred_desc_rate"] = config.getfloat(
+        "predictor", "default_descent_rate"
+    )
+    chase_config["pred_binary"] = config.get("predictor", "pred_binary")
+    chase_config["pred_gfs_directory"] = config.get("predictor", "gfs_directory")
+    chase_config["pred_model_download"] = config.get("predictor", "model_download")
+
+    # Optional float-profile settings (GHOUL toggle). All optional —
+    # defaults disable float mode, and the UI lets the user set them
+    # at runtime regardless.
+    try:
+        chase_config["float_enabled"] = config.getboolean(
+            "predictor", "float_enabled"
+        )
+    except Exception:
+        chase_config["float_enabled"] = False
+    try:
+        chase_config["float_altitude"] = config.getfloat(
+            "predictor", "float_altitude"
+        )
+    except Exception:
+        chase_config["float_altitude"] = 25000.0
+    try:
+        chase_config["float_duration_hours"] = config.getfloat(
+            "predictor", "float_duration_hours"
+        )
+    except Exception:
+        chase_config["float_duration_hours"] = 24.0
+
+    # Range Ring Settings
+    chase_config["range_rings_enabled"] = config.getboolean(
+        "range_rings", "range_rings_enabled"
+    )
+    chase_config["range_ring_quantity"] = config.getint(
+        "range_rings", "range_ring_quantity"
+    )
+    chase_config["range_ring_spacing"] = config.getint(
+        "range_rings", "range_ring_spacing"
+    )
+    chase_config["range_ring_weight"] = config.getfloat(
+        "range_rings", "range_ring_weight"
+    )
+    chase_config["range_ring_color"] = config.get("range_rings", "range_ring_color")
+    chase_config["range_ring_custom_color"] = config.get(
+        "range_rings", "range_ring_custom_color"
+    )
+
+    # Bearing Processing
+    chase_config["max_bearings"] = config.getint("bearings", "max_bearings")
+    chase_config["max_bearing_age"] = (
+        config.getint("bearings", "max_bearing_age") * 60
+    )  # Convert to seconds
+    if chase_config["max_bearing_age"] < 60:
+        chase_config[
+            "max_bearing_age"
+        ] = 60  # Make sure this number is something sane, otherwise things will break
+    chase_config["car_speed_gate"] = (
+        config.getfloat("bearings", "car_speed_gate") / 3.6
+    )  # Convert to m/s
+    chase_config["bearing_length"] = config.getfloat("bearings", "bearing_length")
+    chase_config["bearing_weight"] = config.getfloat("bearings", "bearing_weight")
+    chase_config["bearing_color"] = config.get("bearings", "bearing_color")
+    chase_config["bearing_custom_color"] = config.get(
+        "bearings", "bearing_custom_color"
+    )
+
+    # Offline Map Settings
+    chase_config["tile_server_enabled"] = config.getboolean(
+        "offline_maps", "tile_server_enabled"
+    )
+    chase_config["tile_server_path"] = config.get("offline_maps", "tile_server_path")
+
+    # Determine valid offline map layers.
+    chase_config["offline_tile_layers"] = []
+    chase_config["offline_tile_layer_max_native_zoom"] = {}
+    if chase_config["tile_server_enabled"]:
+        for _dir in os.listdir(chase_config["tile_server_path"]):
+            _layer_path = os.path.join(chase_config["tile_server_path"], _dir)
+            if os.path.isdir(_layer_path):
+                chase_config["offline_tile_layers"].append(_dir)
+                _zoom_levels = []
+                for _zoom_dir in os.listdir(_layer_path):
+                    _zoom_path = os.path.join(_layer_path, _zoom_dir)
+                    if _zoom_dir.isdigit() and os.path.isdir(_zoom_path):
+                        _zoom_levels.append(int(_zoom_dir))
+
+                if len(_zoom_levels) > 0:
+                    chase_config["offline_tile_layer_max_native_zoom"][_dir] = max(
+                        _zoom_levels
+                    )
+        logging.info("Found Map Layers: %s" % str(chase_config["offline_tile_layers"]))
+
+    # Optional KML overlays.
+    chase_config["kml_overlays"] = []
+    if config.has_section("kml_overlays"):
+        _overlay_count = config.getint("kml_overlays", "overlay_count", fallback=0)
+    else:
+        _overlay_count = 0
+
+    for i in range(1, _overlay_count + 1):
+        _overlay_name = config.get("kml_overlays", "overlay_%d_name" % i, fallback="")
+        _overlay_path = config.get("kml_overlays", "overlay_%d_path" % i, fallback="")
+        _overlay_visible = config.getboolean(
+            "kml_overlays", "overlay_%d_visible" % i, fallback=False
+        )
+
+        if _overlay_name == "" or _overlay_path == "":
+            logging.warning("Skipping KML overlay %d with missing name or path.", i)
+            continue
+
+        chase_config["kml_overlays"].append(
+            {
+                "id": str(i),
+                "name": _overlay_name,
+                "path": _overlay_path,
+                "visible": _overlay_visible,
+            }
+        )
+
+    try:
+        chase_config["chase_car_speed"] = config.getboolean("speedo", "chase_car_speed")
+    except:
+        logging.info("Missing Chase Car Speedo Setting, using default (disabled)")
+        chase_config["chase_car_speed"] = False
+
+    try:
+        chase_config["default_alt"] = config.getfloat("map", "default_alt")
+    except:
+        logging.info("Missing default_alt setting, using default (0m)")
+        chase_config["default_alt"] = 0
+
+    try:
+        chase_config["stadia_api_key"] = config.get("map", "stadia_api_key")
+    except:
+        logging.info("Missing Stadia API Key setting, using default (none)")
+        chase_config["stadia_api_key"] = "none"
+
+    try:
+        chase_config["turn_rate_threshold"] = config.getfloat("bearings", "turn_rate_threshold")
+    except:
+        logging.info("Missing turn rate gate setting, using default (4m/s)")
+        chase_config["turn_rate_threshold"] = 4.0
+
+    try:
+        chase_config["ascent_rate_averaging"] = config.getint("predictor", "ascent_rate_averaging")
+    except:
+        logging.info("Missing ascent_rate_averaging setting, using default (10)")
+        chase_config["ascent_rate_averaging"] = 10
+
+    try:
+        chase_config["bearings_only_mode"] = config.getboolean("bearings", "bearings_only_mode")
+    except:
+        logging.info("Missing bearing_only_mode setting, using default (False)")
+        chase_config["bearings_only_mode"] = False
+
+    try:
+        chase_config["doa_confidence_threshold"] = config.getfloat("bearings", "doa_confidence_threshold")
+    except:
+        logging.info("Missing DoA Confidence Threshold Setting, using default (4.0)")
+        chase_config["doa_confidence_threshold"] = 4.0
+
+    # Global APRS-IS server/login settings (callsigns are per-profile, read below).
+    try:
+        chase_config["aprsis_server"] = config.get("aprsis", "aprsis_server")
+        chase_config["aprsis_port"] = config.getint("aprsis", "aprsis_port")
+        chase_config["aprsis_login_callsign"] = config.get("aprsis", "aprsis_login_callsign")
+    except Exception:
+        logging.info("Missing or incomplete [aprsis] config section, using defaults.")
+        chase_config["aprsis_server"] = "rotate.aprs2.net"
+        chase_config["aprsis_port"] = 14580
+        chase_config["aprsis_login_callsign"] = "N0CALL"
+
+    # SPOT GPS tracker public feeds. Feed IDs are read from env vars
+    # (see [spot] section in horusmapper.cfg.example).
+    chase_config["spot_enabled"] = False
+    chase_config["spot_poll_interval"] = 300
+    chase_config["spot_feeds"] = []
+    try:
+        chase_config["spot_enabled"] = config.getboolean("spot", "spot_enabled")
+        chase_config["spot_poll_interval"] = config.getint("spot", "spot_poll_interval")
+        # spot_feeds format: "callsign:ENV_VAR, callsign:ENV_VAR, ..."
+        raw = config.get("spot", "spot_feeds")
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if not pair or ":" not in pair:
+                continue
+            cs, env = pair.split(":", 1)
+            cs = cs.strip()
+            env = env.strip()
+            if cs and env:
+                chase_config["spot_feeds"].append((cs, env))
+    except Exception:
+        logging.info("Missing or incomplete [spot] config section, SPOT disabled.")
+        chase_config["spot_enabled"] = False
+
+    # Telemetry Source Profiles
+
+    _profile_count = config.getint("profile_selection", "profile_count")
+    _default_profile = config.getint("profile_selection", "default_profile")
+
+    chase_config["selected_profile"] = ""
+    chase_config["profiles"] = {}
+
+    # Unit Selection
+
+    chase_config["unitselection"] = config.get(
+        "units", "unitselection", fallback="metric"
+    )
+    if chase_config["unitselection"] != "imperial":
+        chase_config[
+            "unitselection"
+        ] = "metric"  # unless imperial is explicitly requested do metric
+    chase_config["switch_miles_feet"] = config.get(
+        "units", "switch_miles_feet", fallback="400"
+    )
+
+    for i in range(1, _profile_count + 1):
+        _profile_section = "profile_%d" % i
+        try:
+            _profile_name = config.get(_profile_section, "profile_name")
+            _profile_telem_source_type = config.get(
+                _profile_section, "telemetry_source_type"
+            )
+            _profile_telem_source_port = config.getint(
+                _profile_section, "telemetry_source_port"
+            )
+            _profile_car_source_type = config.get(_profile_section, "car_source_type")
+            _profile_car_source_port = config.getint(
+                _profile_section, "car_source_port"
+            )
+
+            _profile_online_tracker = config.get(_profile_section, "online_tracker")
+
+            # Per-profile APRS-IS callsigns. Optional — fall back to empty
+            # lists so profiles without these keys still work.
+            _profile_aprsis_balloons = _csv_callsigns(
+                config, _profile_section, "aprsis_balloon_callsigns"
+            )
+            _profile_aprsis_cars = _csv_callsigns(
+                config, _profile_section, "aprsis_car_callsigns"
+            )
+            try:
+                _profile_aprsis_active = config.get(
+                    _profile_section, "aprsis_active_car_callsign"
+                ).strip().upper()
+            except Exception:
+                _profile_aprsis_active = (
+                    _profile_aprsis_cars[0] if _profile_aprsis_cars else ""
+                )
+
+            chase_config["profiles"][_profile_name] = {
+                "name": _profile_name,
+                "telemetry_source_type": _profile_telem_source_type,
+                "telemetry_source_port": _profile_telem_source_port,
+                "car_source_type": _profile_car_source_type,
+                "car_source_port": _profile_car_source_port,
+                "online_tracker": _profile_online_tracker,
+                "aprsis_balloon_callsigns": _profile_aprsis_balloons,
+                "aprsis_car_callsigns": _profile_aprsis_cars,
+                "aprsis_active_car_callsign": _profile_aprsis_active,
+            }
+            if _default_profile == i:
+                chase_config["selected_profile"] = _profile_name
+
+        except Exception as e:
+            logging.error("Error reading profile section %d - %s" % (i, str(e)))
+
+    if len(chase_config["profiles"].keys()) == 0:
+        logging.critical("Could not read any profile data!")
+        return None
+
+    if chase_config["selected_profile"] not in chase_config["profiles"]:
+        logging.critical("Default profile selection does not exist.")
+        return None
+
+        # History
+
+    chase_config["reload_last_position"] = config.getboolean(
+        "history", "reload_last_position", fallback=False
+    )
+
+    return chase_config
+
+
+def read_config(filename, default_cfg="horusmapper.cfg.example"):
+    """ Read in a Horus Mapper configuration file,and return as a dict. """
+
+    try:
+        config_dict = parse_config_file(filename)
+    except Exception as e:
+        logging.error("Could not parse %s, trying default: %s" % (filename, str(e)))
+        try:
+            config_dict = parse_config_file(default_cfg)
+        except Exception as e:
+            logging.critical("Could not parse example config file! - %s" % str(e))
+            config_dict = None
+
+    return config_dict
+
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s:%(message)s",
+        stream=sys.stdout,
+        level=logging.DEBUG,
+    )
+    print(read_config(sys.argv[1]))

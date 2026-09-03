@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-Write-Host "[BPP Predicts v3.6.0] Checking local Python environment..." -ForegroundColor Cyan
+Write-Host "[BPP Predicts v3.7.2] Checking local Python environment..." -ForegroundColor Cyan
 
 $venvPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 $launcher = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } elseif (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { throw 'Python 3.11+ was not found in PATH.' }
@@ -26,8 +26,8 @@ if (Test-Path $venvPython) {
 if ($LASTEXITCODE -ne 0) { New-BppVenv; & $venvPython -m ensurepip --upgrade; & $venvPython -m pip install --upgrade pip }
 & $venvPython -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
-& $venvPython -c 'import fastapi, uvicorn, httpx, dotenv, pydantic, shapely, aprslib'
+& $venvPython -c 'import fastapi, uvicorn, httpx, dotenv, pydantic, shapely'
 if ($LASTEXITCODE -ne 0) { throw 'Dependency verification failed.' }
 
-if (-not (Test-Path '.env')) { Copy-Item '.env.example' '.env'; Write-Host 'Created .env with no-key APRS-IS defaults.' }
+if (-not (Test-Path '.env')) { Copy-Item '.env.example' '.env'; Write-Host 'Created .env with local Predicts defaults.' }
 Write-Host 'Setup complete.' -ForegroundColor Green

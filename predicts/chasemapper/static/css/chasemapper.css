@@ -1,0 +1,266 @@
+body {
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+}
+html, body {
+    height: 100%;
+    width: 100%;
+}
+/* Let the map use auto width so the sidebar plugin's left margin (mobile)
+   shrinks it instead of overflowing and pushing right-edge controls off-screen. */
+#map {
+    height: 100%;
+}
+
+/* Keep the top-right controls (layer selector, follow/zoom buttons) stacked above
+   the top-center summary table, so the expanded layer list isn't hidden behind it.
+   All Leaflet corners default to z-index:1000, and the top-center corner is added
+   later in the DOM, so it wins the tie without an explicit bump here. */
+.leaflet-control-container .leaflet-top.leaflet-right {
+    z-index: 1001;
+}
+
+.slimContainer {
+    position: relative;
+    margin: 20px auto;
+    width: 290px;
+}
+.slimContainer hr {
+    margin-bottom: 10px;
+}
+.slimContainer .row {
+    width: 280px;
+    display: block;
+    margin: 5px;
+    vertical-align: middle;
+    position: relative;
+}
+.slimContainer .row.info {
+    margin-top: 10px;
+}
+.slimContainer .row > span {
+    float: left;
+}
+.slimContainer .row.option > span {
+    width: 270px;
+}
+.slimContainer .row.option > span {
+    line-height: 30px;
+}
+.slimContainer .row > span.r {
+    float: right;
+}
+
+.paramRow {
+	margin: 5px;
+	display:flex;
+	align-items: center;
+}
+
+.paramSelector {
+	display: inline-block;
+	margin-left: auto;
+}
+.paramEntry {
+	display: inline-block;
+	margin-left: auto;
+	text-align: right;
+	padding-right: 0.2em;
+	width: 10em;
+}
+
+.paramEntryLeft {
+	display: inline-block;
+	margin-left: auto;
+	text-align: left;
+	padding-right: 0.2em;
+	width: 10em;
+}
+
+.predictorModelValue {
+	display: inline-block;
+	margin-left: auto;
+	text-align: right;
+}
+
+.timeToLanding {
+	color:red;
+	font-weight: bold;
+	font-size:5em;
+}
+
+.chaseCarSpeed {
+	color:black;
+	font-weight: bold;
+	font-size:3em;
+}
+
+.logTimeData {
+	color:black;
+	font-weight: bold;
+	font-size:3em;
+}
+
+.bearingData {
+	color:red;
+	font-weight: bold;
+	font-size:5em;
+}
+
+.dataAgeHeader {
+	color:black;
+	font-weight: bold;
+	text-decoration: underline;
+	font-size:1em;
+}
+.dataAgeOK {
+	color:black;
+	font-weight: bold;
+	font-size:1em;
+}
+.dataAgeBad {
+	color:red;
+	font-weight: bold;
+	font-size:1.5em;
+}
+
+.largeTableRow {
+	font-size:200%;
+}
+
+.logText {
+	font-size:70%;
+}
+
+#followPayloadButton {
+	width:45px;
+	height:45px;
+	font-size:20px;
+	line-height:45px;
+}
+
+#followCarButton {
+	width:45px;
+	height:45px;
+	font-size:20px;
+	line-height:45px;
+}
+
+#followCarButton {
+	width:45px;
+	height:45px;
+	font-size:20px;
+	line-height:45px;
+}
+
+#bearingCW10Deg, #bearingCW5Deg, #bearingCW1Deg, #bearingCCW10Deg, #bearingCCW5Deg, #bearingCCW1Deg {
+	width:45px;
+	height:45px;
+	font-size:20px;
+	line-height:45px;
+}
+
+.custom_label {
+    background: rgba(0, 0, 0, 0) !important;
+    border: none !important;
+    font-size: 12px;
+    font-weight: bold;
+	color: black;
+	text-shadow:
+		-1px -1px 2px #FFF,  
+		1px -1px 2px #FFF,
+		-1px 1px 2px #FFF,
+		 1px 1px 2px #FFF;
+    box-shadow: none !important;
+}
+
+.leaflet-control-container .leaflet-routing-container-hide {
+    display: none;
+}
+
+.centerWrapper:before {
+    content:'';
+    height: 100%;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+.center_btn {
+	background: rgba(0, 0, 0, 0);
+	right:10px;
+    display:inline-block;
+    vertical-align: middle;
+    float: left;
+
+}
+
+.ui-dialog { z-index: 1000 !important ;}
+
+.form-switch {
+	display: flex !important;
+	margin: 5px;
+	flex-direction: row-reverse !important;
+	justify-content: space-between !important;
+  }
+
+/* Sidebar slide-away handle is mobile-only; hidden on desktop. */
+#sidebarHandle {
+    display: none;
+}
+
+/* Mobile: hide lat/lon from telem table (visible on map) and speed from summary table */
+@media (max-width: 767px) {
+    #telem_table .tabulator-col[tabulator-field="lat"],
+    #telem_table .tabulator-col[tabulator-field="lon"],
+    #telem_table .tabulator-cell[tabulator-field="lat"],
+    #telem_table .tabulator-cell[tabulator-field="lon"] {
+        display: none !important;
+    }
+
+    #summary_table .tabulator-col[tabulator-field="speed"],
+    #summary_table .tabulator-cell[tabulator-field="speed"] {
+        display: none !important;
+    }
+
+    /* Animate the settings sidebar sliding in and out. */
+    #sidebar {
+        transition: transform 0.3s ease;
+    }
+    /* When stowed, slide the whole sidebar off-screen to the left... */
+    body.sidebar-stowed #sidebar {
+        transform: translateX(-100%);
+    }
+    /* ...and let the map reclaim the ~40px the tab strip normally reserves. */
+    body.sidebar-stowed #map.sidebar-map {
+        margin-left: 0 !important;
+    }
+
+    /* Thin handle at the left edge to bring the sidebar back. */
+    #sidebarHandle {
+        display: block;
+        position: absolute;
+        top: 50%;
+        left: 0;
+        transform: translateY(-50%);
+        width: 22px;
+        height: 60px;
+        line-height: 60px;
+        text-align: center;
+        font-size: 20px;
+        color: #333;
+        background: #fff;
+        box-shadow: 0 1px 5px rgba(0, 0, 0, 0.65);
+        border-radius: 0 4px 4px 0;
+        z-index: 2001;
+        cursor: pointer;
+    }
+}
+
+/* Very small screens: also hide elevation from summary table */
+@media (max-width: 480px) {
+    #summary_table .tabulator-col[tabulator-field="elevation"],
+    #summary_table .tabulator-cell[tabulator-field="elevation"] {
+        display: none !important;
+    }
+}

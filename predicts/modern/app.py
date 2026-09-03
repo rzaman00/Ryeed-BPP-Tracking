@@ -9,7 +9,6 @@ import os
 import re
 import time
 from collections import defaultdict
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -18,18 +17,18 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import LineString, Point, shape
 from shapely.strtree import STRtree
 
-from aprs_is import APRSISClient
-
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DATA_DIR = ROOT / "data"
+WATER_HAZARDS_FILE = DATA_DIR / "operational_water_hazards.geojson"
+LIVE_CHASE_STATUS_FILE = ROOT / "cache" / "live_chase_status.json"
 CACHE_DIR = ROOT / "cache"
 AIRSPACE_CACHE_DIR = CACHE_DIR / "airspace"
 LEGACY_DATA = ROOT.parent / "BalloonPredictionMap" / "BalloonBaseMap" / "assets" / "data"
@@ -38,14 +37,7 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
-MAX_LIVE_CALLSIGNS = 8
-
-APRSIS_SERVER = os.getenv("APRSIS_SERVER", "rotate.aprs2.net").strip() or "rotate.aprs2.net"
-APRSIS_PORT = int(os.getenv("APRSIS_PORT", "14580"))
-APRSIS_LOGIN_CALLSIGN = os.getenv("APRSIS_LOGIN_CALLSIGN", "KC3SKW").strip() or "KC3SKW"
-
-BUILD_VERSION = "3.6.0"
+BUILD_VERSION = "3.7.2"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -67,19 +59,7 @@ WEATHER_CACHE_TTL_S = 15 * 60.0
 _weather_cache: dict[tuple[float, float, str], tuple[float, dict[str, Any]]] = {}
 
 
-APRS_CLIENT = APRSISClient(APRSIS_SERVER, APRSIS_PORT, APRSIS_LOGIN_CALLSIGN)
-
-
-@asynccontextmanager
-async def app_lifespan(_app: FastAPI):
-    await APRS_CLIENT.start(DEFAULT_CALLSIGNS)
-    try:
-        yield
-    finally:
-        await APRS_CLIENT.stop()
-
-
-app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION, lifespan=app_lifespan)
+app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
 
 
@@ -247,25 +227,6 @@ def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
     }
 
 
-class LivePredictSettings(BaseModel):
-    mode: Literal["burst", "float"] = "burst"
-    phase: Literal["auto", "ascending", "descending"] = "auto"
-    ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
-    descent_rate_ms: float = Field(default=9.0, gt=0, le=50)
-    burst_altitude_m: float = Field(default=28000, gt=100)
-    float_altitude_m: float = Field(default=22000, gt=100)
-    float_ascent_rate_ms: float = Field(default=1.0, gt=0, le=10)
-    float_duration_min: float = Field(default=60, gt=0, le=24 * 60)
-
-
-class LivePredictRequest(LivePredictSettings):
-    callsign: str = Field(min_length=1, max_length=20)
-
-
-class LivePredictBatchRequest(LivePredictSettings):
-    callsigns: list[str] = Field(min_length=1, max_length=MAX_LIVE_CALLSIGNS)
-
-
 class OptimalSiteCandidate(BaseModel):
     site_id: str = Field(min_length=1, max_length=160)
     name: str = Field(min_length=1, max_length=160)
@@ -304,33 +265,6 @@ class OptimalSiteRequest(BaseModel):
 
 class ExternalServiceError(RuntimeError):
     pass
-
-
-def normalize_callsigns(values: str | list[str] | tuple[str, ...], max_count: int = MAX_LIVE_CALLSIGNS) -> list[str]:
-    """Normalize typed APRS callsigns while preserving user order.
-
-    Users may separate callsigns with commas, semicolons, spaces, or newlines.
-    APRS SSIDs such as KC3SKW-8 are accepted.
-    """
-    raw_values = [values] if isinstance(values, str) else list(values)
-    tokens: list[str] = []
-    for value in raw_values:
-        tokens.extend(part for part in re.split(r"[,;\s]+", str(value).strip()) if part)
-
-    callsigns: list[str] = []
-    seen: set[str] = set()
-    for token in tokens:
-        callsign = token.upper()
-        if not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{0,14}", callsign):
-            raise ValueError(f"Invalid APRS callsign: {token}")
-        if callsign not in seen:
-            callsigns.append(callsign)
-            seen.add(callsign)
-    if not callsigns:
-        raise ValueError("Enter at least one APRS callsign")
-    if len(callsigns) > max_count:
-        raise ValueError(f"Live tracking is limited to {max_count} callsigns at a time")
-    return callsigns
 
 
 def utc_iso(dt: datetime) -> str:
@@ -987,120 +921,6 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     return {"type": "FeatureCollection", "features": features, "summary": summary, "request": {"ascent": first.get("request"), "float_descent": second.get("request")}}
 
 
-# APRS live tracking ---------------------------------------------------------
-async def fetch_aprs(callsigns: str | list[str] | tuple[str, ...], force: bool = False) -> dict[str, Any]:
-    requested = normalize_callsigns(callsigns)
-    if not APRS_CLIENT.running:
-        await APRS_CLIENT.start(requested)
-    else:
-        await APRS_CLIENT.track(requested)
-    return APRS_CLIENT.snapshot(requested)
-
-
-def infer_phase(callsign: str) -> str:
-    points = [p for p in APRS_CLIENT.history(callsign) if p.get("altitude_m") is not None]
-    if len(points) < 2:
-        return "unknown"
-    a, b = points[-2], points[-1]
-    if not a.get("time") or not b.get("time") or b["time"] <= a["time"]:
-        return "unknown"
-    rate = (b["altitude_m"] - a["altitude_m"]) / (b["time"] - a["time"])
-    if rate > 0.5:
-        return "ascending"
-    if rate < -0.5:
-        return "descending"
-    return "level"
-
-
-def station_observation_datetime(station: dict[str, Any]) -> datetime:
-    timestamp = station.get("time") or station.get("lasttime")
-    if timestamp:
-        try:
-            return datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            pass
-    return datetime.now(timezone.utc)
-
-
-async def build_live_prediction(settings: LivePredictSettings, callsign: str, station: dict[str, Any]) -> dict[str, Any]:
-    """Run a prediction from the latest APRS 3D position.
-
-    Live predictions intentionally require altitude. Falling back to zero/ground level
-    would make the remaining ascent/descent timing and landing location misleading.
-    """
-    alt = station.get("altitude_m")
-    if alt is None:
-        raise ExternalServiceError(
-            f"The latest APRS packet for {callsign} has no altitude. "
-            "Live prediction was not run because it must start from the balloon's reported altitude."
-        )
-
-    phase = settings.phase
-    inferred = infer_phase(callsign)
-    if phase == "auto":
-        phase = inferred if inferred in ("ascending", "descending") else "ascending"
-
-    launch = LaunchPoint(
-        name=f"{callsign} live position",
-        latitude=station["latitude"],
-        longitude=station["longitude"],
-        altitude_m=float(alt),
-    )
-    approximation = None
-    burst_alt = settings.burst_altitude_m
-    float_alt = settings.float_altitude_m
-    ascent_rate = settings.ascent_rate_ms
-
-    if phase == "descending":
-        current_alt = float(alt)
-        # Tawhiri's standard profile begins with ascent. A short, fast ascent to a point
-        # just above the current altitude produces an immediate transition to descent.
-        burst_alt = current_alt + 20
-        ascent_rate = 20
-        approximation = "Live descending prediction uses a near-immediate burst approximation from the latest APRS 3D position."
-
-    if burst_alt <= alt:
-        burst_alt = float(alt) + 100
-    if float_alt <= alt:
-        float_alt = float(alt) + 100
-
-    observation_time = station_observation_datetime(station)
-    pred = PredictRequest(
-        mode=settings.mode,
-        launch=launch,
-        launch_datetime=observation_time,
-        ascent_rate_ms=ascent_rate,
-        descent_rate_ms=settings.descent_rate_ms,
-        burst_altitude_m=burst_alt,
-        float_altitude_m=float_alt,
-        float_ascent_rate_ms=settings.float_ascent_rate_ms,
-        float_duration_min=settings.float_duration_min,
-    )
-    meta = {
-        "live_callsign": callsign,
-        "live_phase": phase,
-        "live_start_altitude_m": float(alt),
-        "live_observation_time": utc_iso(observation_time),
-        "approximation": approximation,
-    }
-    result = await (run_float(pred, meta) if settings.mode == "float" and phase != "descending" else run_burst(pred, meta))
-    packet_age_s = max(0, int((datetime.now(timezone.utc) - observation_time).total_seconds()))
-    result["live"] = {
-        "station": station,
-        "phase": phase,
-        "inferred_phase": inferred,
-        "used_position": {
-            "latitude": station["latitude"],
-            "longitude": station["longitude"],
-            "altitude_m": float(alt),
-        },
-        "used_altitude_m": float(alt),
-        "observation_time": utc_iso(observation_time),
-        "packet_age_s": packet_age_s,
-    }
-    return result
-
-
 # Operational BPP data -------------------------------------------------------
 # The modern application can use a fully-resolved legacy checkout when present, but
 # it does not depend on Git LFS being installed. Launch/reference data can be pulled
@@ -1603,9 +1423,8 @@ def _polygon_records(collection: dict[str, Any], layer: str) -> list[dict[str, A
 def build_airspace_spatial_indexes(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Build reusable R-trees once for a full optimal-site sweep.
 
-    Each spatial record keeps the FAA vertical floor/ceiling. This prevents a HAB
-    trajectory at 50,000+ ft from being marked as conflicting with a Class D circle
-    whose ceiling is only a few thousand feet MSL.
+    Each record retains the FAA vertical floor/ceiling so the API can report both
+    the conservative footprint rule and the technically precise 3-D intrusion.
     """
     layers: dict[str, dict[str, Any]] = {}
     all_records: list[dict[str, Any]] = []
@@ -1692,6 +1511,70 @@ def _prediction_segments(prediction: dict[str, Any]) -> list[dict[str, Any]]:
     return segments
 
 
+def _load_water_hazard_index() -> dict[str, Any]:
+    """Load the small, bundled operational water-no-go dataset.
+
+    The predictor must remain useful offline, so the Chesapeake safety rule does
+    not depend on a live map or coastline API being available during a launch.
+    """
+    try:
+        collection = json.loads(WATER_HAZARDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Operational water-hazard data is unavailable: {exc}") from exc
+    records: list[dict[str, Any]] = []
+    for feature in collection.get("features", []):
+        try:
+            geometry = shape(feature.get("geometry") or {})
+        except Exception:
+            continue
+        if geometry.is_empty or geometry.geom_type not in ("Polygon", "MultiPolygon"):
+            continue
+        records.append({"geometry": geometry, "feature": feature})
+    geometries = [record["geometry"] for record in records]
+    return {
+        "records": records,
+        "geometries": geometries,
+        "tree": STRtree(geometries) if geometries else None,
+    }
+
+
+def _horizontal_overlap_m(line: Any, polygon: Any) -> float:
+    try:
+        return _geometry_haversine_length_m(line.intersection(polygon))
+    except Exception:
+        return 0.0
+
+
+def score_prediction_against_water(prediction: dict[str, Any], index: dict[str, Any]) -> dict[str, Any]:
+    total = 0.0
+    hazard_names: set[str] = set()
+    for segment in _prediction_segments(prediction):
+        line = segment["line"]
+        segment_overlap = 0.0
+        for record in _queried_records(index, line):
+            overlap = _horizontal_overlap_m(line, record["geometry"])
+            if overlap <= 0:
+                continue
+            segment_overlap += overlap
+            properties = record.get("feature", {}).get("properties") or {}
+            hazard_names.add(str(properties.get("name") or "mapped water"))
+        total += min(segment_overlap, _geometry_haversine_length_m(line))
+    total = 0.0 if total < 25.0 else total
+    landing = (prediction.get("summary") or {}).get("landing") or {}
+    landing_in_water = False
+    try:
+        landing_point = Point(float(landing["longitude"]), float(landing["latitude"]))
+        landing_in_water = bool(_queried_geometries(index, landing_point))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {
+        "water_crossing_m": total,
+        "water_hazards": sorted(hazard_names),
+        "landing_in_water": landing_in_water,
+        "clear_of_water": total == 0.0 and not landing_in_water,
+    }
+
+
 def _interval_vertical_fraction(alt1: float, alt2: float, lower: float, upper: float) -> float:
     if lower <= min(alt1, alt2) and max(alt1, alt2) <= upper:
         return 1.0
@@ -1765,31 +1648,52 @@ def _segment_intrusion_m(segment: dict[str, Any], index: dict[str, Any]) -> floa
 
 
 def score_prediction_against_airspace(prediction: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
-    """Score real 3-D trajectory interference with FAA airspace.
+    """Score both operational horizontal crossings and true 3-D intrusion.
 
-    Horizontal polygon overlap only counts when the balloon altitude overlaps the
-    feature's vertical floor/ceiling. This fixes the prior false-red behavior where
-    a high-altitude balloon merely passing above a Class B/C/D polygon was marked
-    as an airspace violation.
+    BPP launch-site selection is intentionally conservative: a trajectory that
+    crosses the footprint of B/C/D, SUA, or TFR airspace is a no-go even when the
+    predicted balloon altitude is above that feature.  The altitude-aware result is
+    retained separately for technical review instead of silently making a crossing
+    appear clear.
     """
     segments = _prediction_segments(prediction)
     if not segments:
         raise ValueError("Prediction contained no trajectory to score against airspace")
-    by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
-    total = 0.0
+    horizontal_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
+    vertical_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
+    horizontal_total = 0.0
+    vertical_total = 0.0
     for segment in segments:
-        total += _segment_intrusion_m(segment, indexes.get("all", {}))
+        line = segment["line"]
+        segment_length = _geometry_haversine_length_m(line)
+        horizontal_total += min(
+            sum(_horizontal_overlap_m(line, record["geometry"]) for record in _queried_records(indexes.get("all", {}), line)),
+            segment_length,
+        )
+        vertical_total += _segment_intrusion_m(segment, indexes.get("all", {}))
         for layer, index in indexes.get("layers", {}).items():
-            by_layer[layer] += _segment_intrusion_m(segment, index)
+            horizontal_by_layer[layer] += min(
+                sum(_horizontal_overlap_m(line, record["geometry"]) for record in _queried_records(index, line)),
+                segment_length,
+            )
+            vertical_by_layer[layer] += _segment_intrusion_m(segment, index)
     # Ignore tiny GIS boundary slivers/rounding artifacts.
-    total = 0.0 if total < 25.0 else total
-    by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in by_layer.items()}
-    conflicts = [layer for layer, value in by_layer.items() if value > 0]
+    horizontal_total = 0.0 if horizontal_total < 25.0 else horizontal_total
+    vertical_total = 0.0 if vertical_total < 25.0 else vertical_total
+    horizontal_by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in horizontal_by_layer.items()}
+    vertical_by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in vertical_by_layer.items()}
+    conflicts = [layer for layer, value in horizontal_by_layer.items() if value > 0]
     return {
-        "airspace_intrusion_m": total,
-        "airspace_intrusion_by_layer_m": by_layer,
+        # Keep the historical fields mapped to the operational horizontal rule so
+        # older frontends cannot accidentally classify a crossing as viable.
+        "airspace_intrusion_m": horizontal_total,
+        "airspace_intrusion_by_layer_m": horizontal_by_layer,
+        "airspace_horizontal_intrusion_m": horizontal_total,
+        "airspace_horizontal_intrusion_by_layer_m": horizontal_by_layer,
+        "airspace_3d_intrusion_m": vertical_total,
+        "airspace_3d_intrusion_by_layer_m": vertical_by_layer,
         "conflict_layers": conflicts,
-        "clear_of_airspace": total == 0.0,
+        "clear_of_airspace": horizontal_total == 0.0,
     }
 
 
@@ -1849,7 +1753,7 @@ def preferred_site_priority(name: str) -> int:
     return 99
 
 
-def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, float]:
+def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, float, float]:
     """Rank by airspace safety and BPP preference, never by driving distance.
 
     A viable Clear Spring/Hancock result is preferred (Clear Spring first when both
@@ -1860,13 +1764,14 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
     preference = preferred_site_priority(candidate.get("site_name", "")) if candidate.get("preferred") else 99
     adjustment = float(candidate.get("ascent_rate_adjustment_ms") or 0.0)
     if viable and preference < 99:
-        return (0, preference, adjustment, 0.0)
+        return (0, preference, adjustment, 0.0, 0.0)
     if viable:
-        return (1, 0, adjustment, 0.0)
+        return (1, 0, adjustment, 0.0, 0.0)
     return (
         2,
-        1 if candidate.get("landing_in_high_risk_airspace") else 0,
+        1 if candidate.get("landing_in_high_risk_airspace") or candidate.get("landing_in_water") else 0,
         float(candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
+        float(candidate.get("water_crossing_m") or 0.0),
         adjustment,
     )
 
@@ -1887,28 +1792,52 @@ async def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/live-chase", response_class=HTMLResponse)
+async def live_chase_waiting_page():
+    return FileResponse(STATIC / "live_chase.html")
+
+
+@app.get("/api/live-chase/status")
+async def live_chase_status():
+    running = False
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", 5001), timeout=0.4)
+        writer.close()
+        await writer.wait_closed()
+        running = True
+    except (OSError, asyncio.TimeoutError):
+        pass
+    if running:
+        return {"status": "ready", "message": "Live CHASE is ready.", "url": "http://127.0.0.1:5001/"}
+    status = {"status": "starting", "message": "Waiting for Live CHASE to start…"}
+    try:
+        candidate = json.loads(LIVE_CHASE_STATUS_FILE.read_text(encoding="utf-8"))
+        if isinstance(candidate, dict):
+            status.update({key: candidate[key] for key in ("status", "message", "updated_at") if key in candidate})
+    except (OSError, ValueError):
+        pass
+    return {**status, "url": "http://127.0.0.1:5001/"}
+
+
 @app.get("/api/health")
 async def health():
     return {
         "status": "ok", "version": BUILD_VERSION, "tawhiri_url": TAWHIRI_API_URL,
-        "aprs_configured": True, "aprs_connected": APRS_CLIENT.connected,
-        "aprs_server": f"{APRSIS_SERVER}:{APRSIS_PORT}", "legacy_data_directory": str(LEGACY_DATA),
+        "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
-        "optimal_site": "active/all-site viability ranking with crossing-altitude airspace checks and preferred-site gold logic",
+        "optimal_site": "conservative B/C/D, SUA, TFR and Chesapeake water-crossing safety ranking",
         "prediction_window": "current time through 7 days in the future",
         "launch_weather": "Open-Meteo forecast",
+        "live_tracking": "complete ChaseMapper server on port 5001",
     }
 
 
 @app.get("/api/config")
 async def config():
     return {
-        "callsigns": DEFAULT_CALLSIGNS, "default_callsigns": DEFAULT_CALLSIGNS,
-        "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
-        "aprs_configured": True,
-        "aprs_connection": APRS_CLIENT.snapshot(DEFAULT_CALLSIGNS)["connection"],
-        "aprs_credit": {"name": "APRS-IS via UMD CHASE pattern", "url": "https://github.com/huonghuy/chasemapper-aprs"},
+        "prediction_modes": ["burst", "float"],
+        "live_tracking": {"name": "BPP Live CHASE", "url": "http://127.0.0.1:5001/", "architecture": "complete ChaseMapper"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
         "prediction_window_days": 7,
         "weather": True,
@@ -2025,10 +1954,10 @@ async def predict(req: PredictRequest):
 
 @app.post("/api/optimal-site")
 async def optimal_site(req: OptimalSiteRequest):
-    """Evaluate supplied sites using altitude-aware airspace intersections.
+    """Evaluate supplied sites using conservative operational safety rules.
 
-    A site is viable when at least one requested ascent-rate scenario has no scored
-    3-D airspace intrusion and its landing is outside restricted/SUA/TFR polygons.
+    A site is viable when a tested ascent-rate scenario has no horizontal crossing
+    of requested airspace, no Chesapeake/water crossing, and a safe landing area.
     Gold is reserved exclusively for a viable preferred operational site: Clear
     Spring first, otherwise Hancock. Other viable sites are green; conflicts are red.
     Geographic distance to UMD (or anywhere else) is never part of the ranking.
@@ -2060,6 +1989,10 @@ async def optimal_site(req: OptimalSiteRequest):
 
     indexes = build_airspace_spatial_indexes(collections)
     high_risk_index = _high_risk_airspace_index(collections)
+    try:
+        water_index = _load_water_hazard_index()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     semaphore = asyncio.Semaphore(10)
     sweep_rates = req.ascent_rate_sweep_ms or default_ascent_rate_sweep(req.ascent_rate_ms)
     if req.ascent_rate_ms not in sweep_rates:
@@ -2088,36 +2021,43 @@ async def optimal_site(req: OptimalSiteRequest):
         async with semaphore:
             prediction = await (run_float(pred_req) if req.mode == "float" else run_burst(pred_req))
         score = score_prediction_against_airspace(prediction, indexes)
+        water_score = score_prediction_against_water(prediction, water_index)
         high_risk_landing = landing_in_high_risk_airspace(prediction, high_risk_index)
         summary = prediction.get("summary") or {}
         return {
             "ascent_rate_ms": rate,
             "burst_altitude_m": burst_altitude,
             **score,
+            **water_score,
             "landing_in_high_risk_airspace": high_risk_landing,
             "landing": summary.get("landing"),
             "flight_duration_s": summary.get("flight_duration_s"),
             "ground_distance_m": summary.get("ground_distance_m"),
-            "clear_and_safe": bool(score["clear_of_airspace"] and not high_risk_landing),
+            "clear_and_safe": bool(score["clear_of_airspace"] and water_score["clear_of_water"] and not high_risk_landing),
         }
 
     async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
         scenarios: list[dict[str, Any]] = []
         scenario_errors: dict[str, str] = {}
-        for rate in sweep_rates:
-            try:
-                scenario = await predict_at_rate(site, rate)
-                scenarios.append(scenario)
-                if scenario["clear_and_safe"]:
-                    break
-            except Exception as exc:
-                scenario_errors[f"{rate:g}"] = str(exc)
+        # Run the complete rate sweep concurrently; the shared semaphore caps
+        # upstream load across all sites while avoiding a slow serial five-rate
+        # wait when an operator evaluates only one or two launch locations.
+        outcomes = await asyncio.gather(
+            *(predict_at_rate(site, rate) for rate in sweep_rates),
+            return_exceptions=True,
+        )
+        for rate, outcome in zip(sweep_rates, outcomes):
+            if isinstance(outcome, Exception):
+                scenario_errors[f"{rate:g}"] = str(outcome)
+            else:
+                scenarios.append(outcome)
         if not scenarios:
             raise ExternalServiceError(f"No ascent-rate scenario succeeded: {scenario_errors}")
         scenarios.sort(key=lambda x: (
             0 if x["clear_and_safe"] else 1,
-            0 if not x["landing_in_high_risk_airspace"] else 1,
-            float(x["airspace_intrusion_m"]),
+            0 if not x["landing_in_high_risk_airspace"] and not x["landing_in_water"] else 1,
+            float(x["airspace_horizontal_intrusion_m"]),
+            float(x["water_crossing_m"]),
             abs(float(x["ascent_rate_ms"]) - req.ascent_rate_ms),
         ))
         best = scenarios[0]
@@ -2136,14 +2076,23 @@ async def optimal_site(req: OptimalSiteRequest):
             "best_airspace_intrusion_m": best["airspace_intrusion_m"],
             "airspace_intrusion_m": best["airspace_intrusion_m"],
             "airspace_intrusion_by_layer_m": best["airspace_intrusion_by_layer_m"],
+            "airspace_horizontal_intrusion_m": best["airspace_horizontal_intrusion_m"],
+            "airspace_horizontal_intrusion_by_layer_m": best["airspace_horizontal_intrusion_by_layer_m"],
+            "airspace_3d_intrusion_m": best["airspace_3d_intrusion_m"],
+            "airspace_3d_intrusion_by_layer_m": best["airspace_3d_intrusion_by_layer_m"],
             "conflict_layers": best["conflict_layers"],
             "clear_of_airspace": best["clear_of_airspace"],
             "landing_in_high_risk_airspace": best["landing_in_high_risk_airspace"],
+            "water_crossing_m": best["water_crossing_m"],
+            "water_hazards": best["water_hazards"],
+            "landing_in_water": best["landing_in_water"],
+            "clear_of_water": best["clear_of_water"],
             "landing": best["landing"],
             "flight_duration_s": best["flight_duration_s"],
             "ground_distance_m": best["ground_distance_m"],
             "tested_ascent_rates_ms": [x["ascent_rate_ms"] for x in scenarios],
             "scenario_errors": scenario_errors,
+            "decision_reasons": [],
         }
 
     outcomes = await asyncio.gather(*(evaluate(site) for site in req.launch_sites), return_exceptions=True)
@@ -2169,6 +2118,21 @@ async def optimal_site(req: OptimalSiteRequest):
             candidate["site_status"] = "viable"
         else:
             candidate["site_status"] = "no-go"
+        reasons: list[str] = []
+        if candidate["conflict_layers"]:
+            labels = ", ".join(str(layer).upper() for layer in candidate["conflict_layers"])
+            reasons.append(f"NO-GO: trajectory crosses {labels} airspace")
+        if candidate["water_crossing_m"] > 0:
+            hazards = ", ".join(candidate["water_hazards"]) or "mapped water"
+            reasons.append(f"NO-GO: trajectory crosses {hazards} ({candidate['water_crossing_m'] / 1609.344:.1f} mi)")
+        if candidate["landing_in_water"]:
+            reasons.append("NO-GO: predicted landing is in mapped water")
+        if candidate["landing_in_high_risk_airspace"]:
+            reasons.append("NO-GO: predicted landing is inside restricted/SUA/TFR airspace")
+        if candidate["viable"]:
+            reasons.append("GO: airspace, water, and landing-risk checks are clear")
+        reasons.append(f"Best tested ascent rate: {candidate['best_ascent_rate_ms']:g} m/s")
+        candidate["decision_reasons"] = reasons
 
     viable_count = sum(1 for item in ranking if item["viable"])
     recommended = gold_candidate or next((item for item in ranking if item["viable"]), ranking[0])
@@ -2193,6 +2157,12 @@ async def optimal_site(req: OptimalSiteRequest):
         "airspace_layers": layers,
         "airspace_sources": sources,
         "warnings": warnings,
+        "selection_criteria": {
+            "go": "No B/C/D, SUA, or TFR footprint crossing; no mapped-water crossing; landing outside water and high-risk airspace.",
+            "caution": "Readiness weather rules may downgrade a geometrically viable site for medium gusts, precipitation, or forecast age.",
+            "no_go": "Any operational-airspace crossing, mapped-water crossing, water landing, or high-risk landing.",
+            "ranking": "Viability first, then preferred BPP sites, then the smallest ascent-rate adjustment. Distance is not used.",
+        },
         "cache_hit": False,
     }
     _OPTIMAL_RESULT_CACHE[cache_key] = (time.monotonic(), response_payload)
@@ -2201,91 +2171,6 @@ async def optimal_site(req: OptimalSiteRequest):
         _OPTIMAL_RESULT_CACHE.pop(oldest, None)
     return response_payload
 
-
-@app.get("/api/live")
-async def live(
-    callsign: str | None = Query(default=None),
-    callsigns: str | None = Query(default=None),
-):
-    try:
-        requested = normalize_callsigns(callsigns or callsign or list(DEFAULT_CALLSIGNS))
-        data = await fetch_aprs(requested)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ExternalServiceError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    # Keep the single-callsign response shape for backwards compatibility.
-    if callsign is not None and callsigns is None and len(requested) == 1:
-        name = requested[0]
-        station = data["stations"].get(name)
-        return {
-            "source": data["source"],
-            "source_url": data["source_url"],
-            "fetched_at": data["fetched_at"],
-            "station": station,
-            "phase": infer_phase(name),
-            "history": data.get("history", {}).get(name, []),
-        }
-
-    return {
-        **data,
-        "phase": {name: infer_phase(name) for name in requested},
-        "history": data.get("history", {name: APRS_CLIENT.history(name) for name in requested}),
-        "connection": data.get("connection", {}),
-    }
-
-
-@app.post("/api/live/predict")
-async def live_predict(req: LivePredictRequest):
-    try:
-        callsign = normalize_callsigns(req.callsign, max_count=1)[0]
-        data = await fetch_aprs([callsign], force=True)
-        station = data["stations"].get(callsign)
-        if not station:
-            raise ExternalServiceError(f"No live APRS-IS packet has been received for {callsign} yet")
-        return await build_live_prediction(req, callsign, station)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ExternalServiceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.post("/api/live/predict-batch")
-async def live_predict_batch(req: LivePredictBatchRequest):
-    try:
-        callsigns = normalize_callsigns(req.callsigns)
-        data = await fetch_aprs(callsigns, force=True)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ExternalServiceError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    errors: dict[str, str] = {}
-    jobs: list[tuple[str, Any]] = []
-    for callsign in callsigns:
-        station = data["stations"].get(callsign)
-        if not station:
-            errors[callsign] = f"No live APRS-IS packet has been received for {callsign} yet"
-            continue
-        jobs.append((callsign, build_live_prediction(req, callsign, station)))
-
-    outcomes = await asyncio.gather(*(job for _, job in jobs), return_exceptions=True) if jobs else []
-    results: dict[str, dict[str, Any]] = {}
-    for (callsign, _), outcome in zip(jobs, outcomes):
-        if isinstance(outcome, Exception):
-            errors[callsign] = str(outcome)
-        else:
-            results[callsign] = outcome
-
-    return {
-        "source": data["source"],
-        "source_url": data["source_url"],
-        "fetched_at": data["fetched_at"],
-        "requested_callsigns": callsigns,
-        "results": results,
-        "errors": errors,
-    }
 
 if __name__ == "__main__":
     host = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")

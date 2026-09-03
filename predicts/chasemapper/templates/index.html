@@ -1,0 +1,1474 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>BPP Live CHASE Mapper</title>
+
+    <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/leaflet.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/leaflet-sidebar.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/leaflet-control-topcenter.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/Leaflet.PolylineMeasure.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/leaflet-routing-machine.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/easy-button.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/tabulator_simple.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/font-awesome.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/jquery-ui.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/chasemapper.css') }}" rel="stylesheet">
+    <style>
+      #bpp-suite-nav{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2500;display:flex;gap:12px;align-items:center;padding:7px 12px;border:1px solid #5d7086;border-radius:999px;background:rgba(12,20,30,.94);color:#fff;box-shadow:0 4px 18px rgba(0,0,0,.35);font:600 13px/1.2 Arial,sans-serif}
+      #bpp-suite-nav a{color:#78cbff;text-decoration:none}
+      #bpp-suite-nav a:hover{text-decoration:underline}
+    </style>
+
+
+    <!-- I should probably feel bad for using so many libraries, but apparently this is the way thing are done :-/ -->
+    <script src="{{ url_for('static', filename='js/jquery-3.3.1.min.js')}}"></script>
+    <script src="{{ url_for('static', filename='js/jquery-ui.min.js')}}"></script>
+    <script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/leaflet.js') }}"></script>
+    <!-- Leaflet plugins... -->
+    <script src="{{ url_for('static', filename='js/leaflet.rotatedMarker.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/leaflet-control-topcenter.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/leaflet-sidebar.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/Leaflet.Control.Custom.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/Leaflet.PolylineMeasure.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/easy-button.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/leaflet-omnivore.min.js') }}"></script>
+
+    <script src="{{ url_for('static', filename='js/tabulator.min.js') }}"></script>
+
+    <script src="{{ url_for('static', filename='js/d3.v3.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/micropolar-v0.2.2.js') }}"></script>
+
+    <!-- Custom scripts -->
+    <script src="{{ url_for('static', filename='js/habitat.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/sondehub.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/overlays.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/tables.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/balloon.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/predictions.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/car.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bearings.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/recovery_overlays.js') }}"></script>
+<script src="{{ url_for('static', filename='js/geofence_overlay.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/ui_persist.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/paho-mqtt.js') }}"></script>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+    <script type="text/javascript" charset="utf-8">
+
+        // Object which will contain balloon markers and traces.
+        // properties for each key in this object (key = callsign)
+        //  latest_data - latest sonde telemetry object from SondeDecoded
+        //  marker: Leaflet marker object.
+        //  path: Leaflet polyline object.
+        //  pred_marker: Leaflet marker for predicted landing position.
+        //  pred_path: Leaflet polyline object for predicted path.
+        //  burst_marker: Leaflet marker for burst prediction.
+        //  abort_marker: Leaflet marker for abort landing prediction.
+        //  abort_path: Leaflet marker for abort prediction track.
+        var balloon_positions = {};
+        var initial_load_complete = false;
+
+        // The sonde we are currently following on the map
+        var balloon_currently_following = "none";
+
+        // Other chase vehicles
+        var chase_vehicles = {};
+        // Only add chase cars which are (initially) within this range limit (km).
+        var vehicle_max_range = 200.0;
+
+        // Chase car position.
+        // properties will contain:
+        //   latest_data: [lat,lon, alt] (latest car position)
+        //   heading: Car heading (to point icon appropriately.)
+        //   marker: Leaflet marker
+        var chase_car_position = {latest_data: [], heading:0, marker: 'NONE', path: 'NONE'};
+
+        // Home position marker
+        var home_marker = 'NONE';
+
+        // Data Age variables - these are updated regularly to indicate
+        // if we haven't received data in a while.
+        var payload_data_age = 0.0;
+        var car_data_age = 0.0;
+        var pred_data_age = 0.0;
+
+        // Other markers which may be added. (TBD, probably other chase car positions via the LoRa payload?)
+        var misc_markers = {};
+
+        // Habitat chase cars
+        var habitat_chase_cars = {};
+
+        // Functions defined later.
+        var setChaseCarTrack;
+
+        // Global dark mode setting
+        var dark_mode = false;
+        var dark_mode_layers = ["Alidade Smooth Dark", "Dark Matter"];
+
+        // Leaflet map instance.
+        var map;
+        // Routing Engine
+        var router;
+
+
+        // Socket.IO Settings
+        var namespace = '/chasemapper';
+        // Socket.IO instance.
+        var socket;
+
+        $(document).ready(function() {
+
+            // Connect to the Socket.IO server.
+            // The connection URL has the following format:
+            //     http[s]://<domain>:<port>[/<namespace>]
+            socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port + namespace);
+
+
+            // Grab the System config on startup.
+            // Refer to config.py for the contents of the configuration blob.
+            $.ajax({
+                  url: "/get_config",
+                  dataType: 'json',
+                  async: false, // Yes, this is deprecated...
+                  success: function(data) {
+                    serverSettingsUpdate(data);
+                    // Initial geofence draw — done after the map exists,
+                    // so defer until then if needed.
+                    if (window.GeofenceOverlay && typeof map !== 'undefined') {
+                        GeofenceOverlay.onConfig(data);
+                    } else {
+                        // map not ready yet (this AJAX runs before map init);
+                        // stash and replay once GeofenceOverlay.init runs.
+                        window._pendingGeofenceConfig = data;
+                    }
+                  }
+            });
+
+            // Handler for further settings updates supplied by the server
+            // (i.e. when another client makes a change)
+            socket.on('server_settings_update', function(data){
+                serverSettingsUpdate(data);
+                // Re-Connect to websockets if necessary.
+                startSondeHubWebsockets();
+                // Refresh per-profile geofence overlay from latest config.
+                if (window.GeofenceOverlay) { GeofenceOverlay.onConfig(data); }
+            });
+
+            // Per-profile geofence: a separate event so single-profile uploads
+            // don't have to round-trip the whole config blob.
+            socket.on('geofence_update', function(msg){
+                if (window.GeofenceOverlay) { GeofenceOverlay.onSocketUpdate(msg); }
+            });
+
+            // Add handlers for various text fields.
+            // Use the jquery on-changed call for text entry fields,
+            // so they only fire after they lose focus.
+            $("#burstAlt").change(function(){
+                clientSettingsUpdate();
+            });
+            // Live meters→feet conversion next to the field. Fires on every
+            // keystroke; clientSettingsUpdate stays on 'change' so we don't
+            // spam the server while the user is mid-typing.
+            $("#burstAlt").on('input', function(){
+                updateAltFeet('burstAlt', 'burstAltFeet');
+            });
+            $("#descentRate").change(function(){
+                clientSettingsUpdate();
+            });
+            $("#floatAltitude").change(function(){
+                clientSettingsUpdate();
+            });
+            $("#floatAltitude").on('input', function(){
+                updateAltFeet('floatAltitude', 'floatAltitudeFeet');
+            });
+            $("#floatDuration").change(function(){
+                clientSettingsUpdate();
+                // Re-render canonical "h:mm" form on commit so e.g. "2.5"
+                // becomes "2:30" and "1:90" becomes "2:30".
+                var _h = parseDurationHours($('#floatDuration').val());
+                if (!isNaN(_h)) $('#floatDuration').val(formatDurationHours(_h));
+                updateDurationHours('floatDuration', 'floatDurationHours');
+            });
+            $("#floatDuration").on('input', function(){
+                updateDurationHours('floatDuration', 'floatDurationHours');
+            });
+            $("#predUpdateRate").change(function(){
+                clientSettingsUpdate();
+            });
+            $("#habitatUpdateRate").change(function(){
+                clientSettingsUpdate();
+            });
+            $("#habitatCall").change(function(){
+                clientSettingsUpdate();
+            });
+
+            // Handlers for range ring settings.
+            $("#ringQuantity").change(function(){
+                updateRangeRings();
+            });
+            $("#ringSpacing").change(function(){
+                updateRangeRings();
+            });
+            $("#ringWeight").change(function(){
+                updateRangeRings();
+            });
+            $("#ringColorSelect").change(function(){
+                updateRangeRings();
+            });
+            $("#ringCustomColor").change(function(){
+                updateRangeRings();
+            });
+
+            // Handlers for bearing settings
+            $("#bearingWeight").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingLength").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingConfidenceThreshold").change(function(){
+                updateBearingSettings();
+                clientSettingsUpdate();
+            });
+            $("#bearingMaximumAge").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingMinOpacity").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingMaxOpacity").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingColorSelect").change(function(){
+                updateBearingSettings();
+            });
+            $("#bearingCustomColor").change(function(){
+                updateBearingSettings();
+            });
+            $("#timeSeqActiveTime").change(function(){
+                updateTimeSeqParameters();
+            });
+            $("#timeSeqCycleTime").change(function(){
+                updateTimeSeqParameters();
+            });
+
+            // Changes to the telemetry source profile selection works a bit differently, as we 
+            // need to do a fair bit of work on the server when these occur. These have a dedicated
+            // socketio message.
+            $("#profileSelect").change(function(){
+                clearLaunchPreview({reason: "profile_change"});
+                // On a profile selection change, emit a message to the client.
+                socket.emit('profile_change', this.value);
+
+                // Remove chase car if switching to a profile which does not have live position updates.
+                _profile = this.value;
+                reconfigureCarMarker(this.value);
+
+                // Swap the geofence overlay immediately from cache so the
+                // user doesn't have to wait for the server round-trip.
+                if (window.GeofenceOverlay) { GeofenceOverlay.onProfileChange(this.value); }
+            });
+
+            // Handle arrival of new log data.
+            socket.on('log_event', function(msg) {
+                $('#log_data').prepend('<br>' + $('<div/>').text(msg.timestamp + " [" + msg.level + "]: " + msg.msg).html());
+                // Scroll to the bottom of the log table
+                $("#log_data").scrollTop($("#log_data")[0].scrollHeight);
+            });
+
+            //
+            // LEAFLET MAP SETUP
+            //
+            // Setup a basic Leaflet map
+            map = L.map('map').setView([chase_config.default_lat, chase_config.default_lon], 8);
+
+            // Initialise recovery overlays module (FAA airspace + MD parcels). Toggles default off.
+            if (window.RecoveryOverlays) { RecoveryOverlays.init(map); }
+
+            // Initialise per-profile geofence overlay (HAB Bounder KML uploads).
+            if (window.GeofenceOverlay) {
+                GeofenceOverlay.init(map);
+                // Replay any config that arrived before the map was ready.
+                if (window._pendingGeofenceConfig) {
+                    GeofenceOverlay.onConfig(window._pendingGeofenceConfig);
+                    window._pendingGeofenceConfig = null;
+                }
+            }
+
+            // Add OSM Map Layer
+            var osm_map = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // Add OSM Topo Map Layer
+            var osm_topo_map = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://wiki.openstreetmap.org/wiki/OpenTopoMap">OpenTopoMap</a> contributors'
+            });
+
+            // Add ESRI Satellite Map layers.
+            var esrimapLink = 
+            '<a href="http://www.esri.com/">Esri</a>';
+            var esriwholink = 
+            'i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community';
+            var esri_sat_map = L.tileLayer(
+            'http://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 
+            {
+                attribution: '&copy; '+esrimapLink+', '+esriwholink,
+                maxZoom: 18,
+            });
+            // Dark Matter map layer, one of the maps suitable for 'dark mode'
+            var dark_matter_map = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://carto.com/help/building-maps/basemap-list/">Carto</a>'
+            });
+
+            
+
+            var map_layers = {'OSM':osm_map, 'OpenTopo':osm_topo_map, 'ESRI Satellite':esri_sat_map, 'Dark Matter':dark_matter_map};
+
+            // Add ThunderForest layers, if we have a key provided.
+            if (chase_config.thunderforest_api_key !== 'none'){
+                // Thunderforest Outdoors layer.
+                var thunderforest_outdoors = L.tileLayer('https://tile.thunderforest.com/outdoors/{z}/{x}/{y}.png?apikey='+chase_config.thunderforest_api_key, 
+                {
+                    attribution: '&copy; <a href="http://www.thunderforest.com">Thunderforest</a>, Data &copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+                });
+                map_layers['Outdoors (Terrain)'] = thunderforest_outdoors;
+
+            }
+
+            if (chase_config.stadia_api_key !== 'none'){
+                // Stadia Alidade Smooth Dark Layer.
+                var alidade_smooth_dark = L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?apikey='+chase_config.stadia_api_key, 
+                {
+                    attribution: '&copy; <a href="https://stadiamaps.com/">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
+                });
+                map_layers['Alidade Smooth Dark'] = alidade_smooth_dark;
+
+            }
+
+            // Add Offline map layers, if we have any.
+            for (var i = 0, len = chase_config.offline_tile_layers.length; i < len; i++) {
+                var _layer_name = chase_config.offline_tile_layers[i];
+                map_layers['Offline - ' + _layer_name] = L.tileLayer(
+                    location.protocol + '//' + document.domain + ':' + location.port + '/tiles/'+_layer_name+'/{z}/{x}/{y}.png',
+                    getOfflineTileLayerOptions(_layer_name)
+                );
+            }
+
+            // Add configured KML overlays, if any.
+            var overlay_layers = loadConfiguredKmlOverlays(chase_config, map);
+
+            // Add measurement control.
+
+            if (chase_config['unitselection'] == "imperial") {
+                L.control.polylineMeasure({
+                    position: 'topleft',
+                    unit: 'landmiles',
+                    showClearControl: true,
+                }).addTo(map);
+            }
+
+
+            if (chase_config['unitselection'] == "metric") { 
+                L.control.polylineMeasure({
+                    position: 'topleft',
+                    unit: 'metres',
+                    showClearControl: true,
+                }).addTo(map);
+            }
+
+
+            
+            // Add layer selection control (top right).
+            map.addControl(new L.Control.Layers(map_layers, overlay_layers));
+
+            // Add map scale.
+            if (chase_config['unitselection'] == "imperial") { L.control.scale({imperial: true, metric: false}).addTo(map) ;}
+            if (chase_config['unitselection'] == "metric") { L.control.scale({imperial: false, metric: true}).addTo(map) ;}
+
+
+
+            // Units for rings
+            if (chase_config['unitselection'] == "imperial") { document.getElementById("ring_spacing").innerHTML = "Ring Spacing (ft)";}
+            if (chase_config['unitselection'] == "metric")   { document.getElementById("ring_spacing").innerHTML = "Ring Spacing (m)";}
+
+            // Add sidebar to map (where all of our controls are!)
+            var sidebar = L.control.sidebar('sidebar').addTo(map);
+
+            // Add custom controls, which show various sets of data.
+
+            // Telemetry table - shows all payload telemetry.
+            L.control.custom({
+                position: 'bottomright',
+                content : "<div class='centerWrapper'><div id='telem_table_btn' class='center_btn'><i class='fa fa-angle-right fa-4x text-center'></i></div><div id='telem_table' style='float:right;'></div></div>",
+                classes : 'btn-group-horizonal btn-group-sm',
+                id: 'telem_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Allow hiding of the telemetry table. This function is in tables.js
+            $("#telem_table_btn").click(toggleTelemTableHide);
+
+
+            // Summary display - a 'quick-look' of where the currently tracked payload is and what it's doing.
+            L.control.custom({
+                position: 'topcenter',
+                content : "<div id='summary_table'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'summary_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Data age display - shows how old the various datasets are.
+            L.control.custom({
+                position: 'topleft',
+                content : "<div class='dataAgeHeader'>Data Age</div><div id='payload_age' class='dataAgeOK'></div><div id='car_age' class='dataAgeOK'></div><div id='car_warning' class='dataAgeOK'></div><div id='pred_age' class='dataAgeOK'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'age_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Chase Car Speed Display
+            L.control.custom({
+                position: 'bottomleft',
+                content : "<div class='dataAgeHeader' id='chase_car_speed_header'></div><div id='chase_car_speed' class='chaseCarSpeed'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'speed_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+            // Chase Car Heading Display
+            L.control.custom({
+                position: 'bottomleft',
+                content : "<div class='dataAgeHeader' id='chase_car_heading_header'></div><div id='chase_car_heading' class='chaseCarSpeed'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'heading_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Time-to-landing display - shows the time until landing for the currently tracked payload.
+            L.control.custom({
+                position: 'bottomleft',
+                content : "<div id='time_to_landing' class='timeToLanding'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'ttl_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Time-to-landing display - shows the time until landing for the currently tracked payload.
+            L.control.custom({
+                position: 'bottomcenter',
+                content : "<div id='timeseq_notice' class='timeToLanding'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'ttl_display',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            L.control.custom({
+                position: 'bottomright',
+                content : "<div id='bearing_table'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'bearing_data',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            L.control.custom({
+                position: 'bottomright',
+                content : "<div id='bearing_plot'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'bearing_plot_control',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+            // Used to show log replay time information, if received.
+            L.control.custom({
+                position: 'bottomcenter',
+                content : "<div id='log_time' class='chaseCarSpeed'></div>",
+                classes : 'btn-group-vertical btn-group-sm',
+                id: 'log_time_control',
+                style   :
+                {
+                    margin: '5px',
+                    padding: '0px 0 0 0',
+                    cursor: 'pointer',
+                }
+            })
+            .addTo(map);
+
+
+
+            // Follow buttons - these just set the radio buttons on the settings pane.
+            // TODO: Figure out how to centre the icons under iOS's Safari browser.
+            // Also TODO: Find a decent balloon icon!
+            L.easyButton('fa-paper-plane', function(btn, map){
+                $('input:radio[name=autoFollow]').val(['payload']);
+            }, 'Follow Payload', 'followPayloadButton', {
+                position: 'topright'
+            }
+            ).addTo(map);
+
+            L.easyButton('fa-car', function(btn, map){
+                $('input:radio[name=autoFollow]').val(['car']);
+            }, 'Follow Chase Car', 'followCarButton', {
+                position: 'topright'
+            }
+            ).addTo(map);
+
+            map.zoomControl.setPosition('topright');
+
+            // Experimental routing control
+            // Currently disabled, as there is currently not enough control around how the map is re-panned
+            // after a route is calculated.
+            // router = L.Routing.control({
+            //     waypoints: [null],
+            //     show: false,
+            //     showAlternatives: false
+            // }).addTo(map);
+
+            // Handler for when the user manually moves the map. This turns off
+            // the auto-follow options.
+            // Note we have to use 'dragend' else map movements from auto-follow would trigger this.
+            function mapMovedEvent(e){
+                // The user has panned the map, stop following things.
+                $('input:radio[name=autoFollow]').val(['none']);
+            }
+            map.on('dragend',mapMovedEvent);
+
+
+            map.on('baselayerchange', function (e) {
+                if(dark_mode_layers.includes(e.name)){
+                    dark_mode = true;
+                }else {
+                    dark_mode = false;
+                }
+            });
+
+            initTables();
+
+            $('#sidebarHandle').click(function(){
+                var stowed = $('body').toggleClass('sidebar-stowed').hasClass('sidebar-stowed');
+                $('#sidebarHandle i').attr('class', stowed ? 'fa fa-angle-right' : 'fa fa-angle-left');
+                // Let Leaflet recalculate after the slide/margin transition completes.
+                setTimeout(function(){ map.invalidateSize(); }, 350);
+            });
+
+            // On mobile, start with the sidebar stowed away.
+            if (window.innerWidth < 768) {
+                $('body').addClass('sidebar-stowed');
+                setTimeout(function(){ map.invalidateSize(); }, 350);
+            }
+
+
+            // Grab the recent archive of telemetry data
+            // This should only ever be run once - on page load.
+            $.ajax({
+                  url: "/get_telemetry_archive",
+                  dataType: 'json',
+                  async: true,
+                  success: function(data) {
+
+                    for (callsign in data){
+                        add_new_balloon(data[callsign]);
+                    }
+                    // Update telemetry table
+                    updateTelemetryTable();
+                    initial_load_complete = true;
+                  }
+            });
+
+            // Initialise bearings
+            initialiseBearings();
+
+            // Initial setup of station marker, if using a profile which uses it.
+            reconfigureCarMarker(chase_config.selected_profile);
+
+
+            // Telemetry event handler.
+            // We will get one of these mesages with every new balloon position
+            socket.on('telemetry_event', function(data) {
+                handleTelemetry(data);
+            });
+
+            socket.on('modem_stats_event', function(data) {
+                handleModemStats(data);
+            });
+
+            // Predictor Functions
+            socket.on('predictor_model_update', function(data){
+                var _model_data = data.model;
+                $("#predictorModelValue").text(_model_data);
+            });
+        
+            socket.on('predictor_update', function(data){
+                handlePrediction(data);
+            });
+
+            socket.on('launch_preview_update', function(data){
+                handleLaunchPreview(data);
+            });
+
+            socket.on('launch_preview_clear', function(data){
+                clearLaunchPreview(data);
+            });
+
+            socket.on('launch_preview_status', function(data){
+                handleLaunchPreviewStatus(data);
+            });
+
+            socket.on('bearing_change', function(data){
+                bearingUpdate(data);
+            });
+
+            socket.on('bearing_plot_update', function(data){
+                bearingPlotUpdate(data);
+            });
+
+            socket.on('server_bearings_cleared', function(data){
+                destroyAllBearings();
+            });
+
+
+            $("#downloadModel").click(function(){
+                socket.emit('download_model', {data: 'plzkthx'});
+            });
+
+            $("#runLaunchPreview").click(function(){
+                var enteredRate = window.prompt(
+                    "Balloon ascent rate in metres per second:",
+                    "5.5"
+                );
+                if (enteredRate === null) return;
+                var ascentRate = Number(enteredRate);
+                if (!Number.isFinite(ascentRate) || ascentRate <= 0) {
+                    setLaunchPreviewStatus("Ascent rate must be a positive number.", true);
+                    return;
+                }
+                socket.emit("launch_preview_request", {
+                    profile: chase_config.selected_profile,
+                    ascent_rate: ascentRate
+                });
+            });
+
+            $("#clearPayloadData").click(function(){
+                var _confirm = confirm("Really clear all Payload data?");
+                if (_confirm == true){
+                    socket.emit('payload_data_clear', {data: 'plzkthx'});
+
+                    // Clear all payload markers and tracks from the map/
+                    for (_callsign in balloon_positions){
+                        balloon_positions[_callsign].marker.remove();
+                        balloon_positions[_callsign].path.remove();
+                        balloon_positions[_callsign].pred_path.remove();
+                        balloon_positions[_callsign].abort_path.remove();
+                        // Clear out the markers if they exist.
+                        if (balloon_positions[_callsign].abort_marker != null){
+                            balloon_positions[_callsign].abort_marker.remove();
+                        }
+                        if (balloon_positions[_callsign].burst_marker != null){
+                            balloon_positions[_callsign].burst_marker.remove();
+                        }
+                        if (balloon_positions[_callsign].pred_marker != null){
+                            balloon_positions[_callsign].pred_marker.remove();
+                        }
+                    }
+                    // Reset the balloon positions object to nothing.
+                    balloon_positions = {};
+                    balloon_currently_following = "none";
+                    // Update tables.
+                    updateTelemetryTable();
+                    updateSummaryDisplay();
+                    // Clear the time-to-landing display.
+                    $('#time_to_landing').text("");
+                }
+            });
+
+            $("#clearCarData").click(function(){
+                var _confirm = confirm("Really clear all Chase Car data?");
+                if (_confirm == true){
+                    socket.emit('car_data_clear', {data: 'plzkthx'});
+                    if (chase_car_position.marker !== "NONE"){
+                        chase_car_position.marker.remove();
+                    }
+                    if (chase_car_position.path !== "NONE"){
+                        chase_car_position.path.remove();
+                    }
+
+                    chase_car_position = {latest_data: [], heading:0, marker: 'NONE', path: 'NONE'};
+
+                }
+            });
+
+            // Function to show/hide chase car track tail.
+            setChaseCarTrack = function(){
+                // Read state of checkbox
+                var _car_track_enabled = document.getElementById("chaseCarTrack").checked;
+                // Only continue if we have chase car data to show/hide.
+                if (chase_car_position !== "NONE"){
+                    if (_car_track_enabled == false){
+                        chase_car_position.path.remove();
+                    }else{
+                        chase_car_position.path.addTo(map);
+                    }
+                }
+            };
+
+            // Tell the server we are connected and ready for data.
+            socket.on('connect', function() {
+                socket.emit('client_connected', {data: 'I\'m connected!'});
+                // This will cause the server to emit a few messages telling us to fetch data.
+            });
+
+            socket.on('aprsis_state', function(data) {
+                aprsisUpdateUI(data);
+            });
+
+
+            // Data age update.
+            var age_update_rate = 500;
+            window.setInterval(function () {
+                // Update the data age displays.
+                payload_data_age += age_update_rate/1000.0;
+                car_data_age += age_update_rate/1000.0;
+                pred_data_age += age_update_rate/1000.0;
+
+                if (balloon_currently_following === 'none'){
+                    $("#payload_age").text("Payload: No Data.");
+                }else{
+                    $("#payload_age").text("Payload: " + payload_data_age.toFixed(1)+"s");
+                    if (payload_data_age > payload_bad_age){
+                        $("#payload_age").removeClass();
+                        $("#payload_age").addClass('dataAgeBad');
+                    }else{
+                        $("#payload_age").removeClass();
+                        $("#payload_age").addClass('dataAgeOK');
+                    }
+                }
+
+                if(chase_car_position.latest_data.length == 0){
+                    $("#car_age").text("Car GPS: No Data.");
+                }else{
+                    $("#car_age").text("Car GPS: " + car_data_age.toFixed(1)+"s");
+                    if (car_data_age > car_bad_age){
+                        $("#car_age").removeClass();
+                        $("#car_age").addClass('dataAgeBad');
+                    }else{
+                        $("#car_age").removeClass();
+                        $("#car_age").addClass('dataAgeOK');
+                    }
+                }
+
+                if (chase_config['pred_enabled']==false){
+                    $("#pred_age").text("Predictions: No Data.");
+                }else{
+                    $("#pred_age").text("Predictions: " + pred_data_age.toFixed(1)+"s");
+                }
+
+                updateTimeSeqClock();
+            }, age_update_rate);
+
+            // Start connection to Sondehub Websockets.
+            startSondeHubWebsockets();
+
+            // Sadly we can't request location information unless chasemapper is served up via HTTPS
+            // which is a bit difficult to make happen.
+            // window.setInterval(function(){
+            //     if(document.getElementById('useDevicePosition').checked){
+            //         if(navigator.geolocation){
+            //             car_bad_age = 20.0;
+            //             navigator.geolocation.getCurrentPosition(devicePositionCallback,devicePositionError,{enableHighAccuracy:true});
+            //         }
+            //     }
+            // }, 5000);
+
+
+            window.setInterval(function(){
+                if(Object.keys(bearing_store).length > 0 || timeSeqEnabled == true){
+                    refreshServerTime();
+                }
+            },10000); 
+
+            // Enable bearings only mode if it's set.
+            toggleBearingsOnlyMode();
+
+            // Restore day-scoped UI state (autofollow, airspace toggles, parcels).
+            // We do this AFTER RecoveryOverlays.init() so its change-handlers
+            // are wired and dispatching 'change' actually loads overlays.
+            if (window.UIPersist) {
+                UIPersist.restoreRadioGroup('autoFollow', 'autoFollow');
+
+                var airspaceIds = [
+                    'toggle-airspace', 'toggle-class-b', 'toggle-class-c',
+                    'toggle-class-d', 'toggle-class-e', 'toggle-sua',
+                    'toggle-tfr', 'toggle-parcels'
+                ];
+                airspaceIds.forEach(function (id) {
+                    UIPersist.restoreCheckbox(id, id);
+                });
+                UIPersist.restoreInputValue('parcel-radius', 'parcel-radius');
+
+                // Trigger handlers so restored overlays actually render.
+                if (document.getElementById('toggle-airspace') &&
+                    document.getElementById('toggle-airspace').checked) {
+                    airspaceIds.forEach(function (id) {
+                        var el = document.getElementById(id);
+                        if (el && el.checked) el.dispatchEvent(new Event('change'));
+                    });
+                }
+                if (document.getElementById('toggle-parcels') &&
+                    document.getElementById('toggle-parcels').checked) {
+                    document.getElementById('toggle-parcels')
+                        .dispatchEvent(new Event('change'));
+                }
+                var pr = document.getElementById('parcel-radius');
+                if (pr) pr.dispatchEvent(new Event('input'));
+            }
+
+            // Hydrate the chase-car path from today's server-side cache so
+            // the trail survives a page refresh.
+            $.ajax({
+                url: "/get_car_track",
+                dataType: 'json',
+                async: true,
+                success: function (points) {
+                    if (!points || !points.length) return;
+                    var latlngs = points.map(function (p) { return [p[1], p[2]]; });
+                    var last = points[points.length - 1];
+                    chase_car_position.latest_data = [last[1], last[2], last[3] || 0];
+                    chase_car_position.heading = last[4] || 0;
+
+                    // Pre-create marker AND path so the next live fix takes
+                    // the 'else' branch (addLatLng) and preserves history.
+                    chase_car_position.marker = L.marker(
+                        chase_car_position.latest_data,
+                        { title: "Chase Car", icon: carIcon, rotationOrigin: "center center" }
+                    ).addTo(map);
+                    chase_car_position.path = L.polyline(
+                        latlngs, { title: "Chase Car", color: 'black', weight: 1.5 }
+                    );
+                    if (document.getElementById("chaseCarTrack").checked) {
+                        chase_car_position.path.addTo(map);
+                    }
+                }
+            });
+        });
+
+        function aprsisUpdateUI(state) {
+            var sel = $("#aprsisCarSelect");
+            sel.empty();
+            (state.car_callsigns || []).forEach(function(cs) {
+                var opt = $("<option>").val(cs).text(cs);
+                if (cs === state.active_car) opt.prop("selected", true);
+                sel.append(opt);
+            });
+
+            $("#aprsisProfileLabel").text(
+                state.profile_name ? "(profile: " + state.profile_name + ")" : ""
+            );
+
+            // Render car/balloon lists with remove buttons.
+            renderCallsignList("#aprsisCarList", state.car_callsigns || [], "car");
+            renderCallsignList("#aprsisBalloonList", state.balloon_callsigns || [], "balloon");
+
+            $("#aprsisStatus").text(state.connected ? "Connected" : "Not active");
+            setLaunchPreviewLocked(!!state.launch_preview_locked);
+        }
+
+        function renderCallsignList(selector, callsigns, kind) {
+            var $el = $(selector);
+            $el.empty();
+            if (callsigns.length === 0) {
+                $el.text("none");
+                return;
+            }
+            callsigns.forEach(function(cs, i) {
+                if (i > 0) $el.append(", ");
+                var $tag = $("<span>").text(cs);
+                var $x = $("<a>")
+                    .text("×")
+                    .attr("href", "#")
+                    .css({"margin-left": "2px", "color": "#c00", "text-decoration": "none"})
+                    .on("click", function(e) {
+                        e.preventDefault();
+                        aprsisRemove(cs, kind);
+                    });
+                $tag.append($x);
+                $el.append($tag);
+            });
+        }
+
+        function aprsisRemove(callsign, kind) {
+            socket.emit("aprsis_remove_callsign", {callsign: callsign, kind: kind});
+        }
+
+        function aprsisSetCar() {
+            socket.emit("aprsis_set_car_callsign", {callsign: $("#aprsisCarSelect").val()});
+        }
+
+        function aprsisAddCar() {
+            var cs = $("#aprsisAddCar").val().trim().toUpperCase();
+            if (!cs) return;
+            socket.emit("aprsis_add_car_callsign", {callsign: cs});
+            $("#aprsisAddCar").val("");
+        }
+
+        function aprsisAddBalloon() {
+            var cs = $("#aprsisAddBalloon").val().trim().toUpperCase();
+            if (!cs) return;
+            socket.emit("aprsis_add_balloon_callsign", {callsign: cs});
+            $("#aprsisAddBalloon").val("");
+        }
+    </script>
+</head>
+<body>
+    <nav id="bpp-suite-nav" aria-label="BPP application navigation">
+      <a href="http://127.0.0.1:8000/">← Predicts &amp; Readiness</a>
+      <span>Live CHASE</span>
+    </nav>
+
+        <!-- Dialog boxes. These are activated from the telemetry table - see tables.js -->
+        <div id="telemetry-select-dialog" title="Payload Selection" style='display:none;'>
+            <div class="paramRow">
+                <b>Current Position:</b> <div style='float:right;' id='telemDialogPosition'></div><br/>
+            </div>
+            <div class="paramRow">
+                <b>Predicted Landing:</b> <div style='float:right;' id='telemDialogPredPosition'></div><br/>
+            </div>
+            <div class="paramRow">
+                <b>Select Action:</b><br/>
+            </div>
+        </div>
+
+        <div id="mark-recovered-dialog" title="Mark Payload Recovered" style='display:none;'>
+            <div class="paramRow">
+                <b>Last Position:</b> <div style='float:right;' id='recoveryPosition'></div><br/>
+            </div>
+            <div class="paramRow">
+                <b>Recovery Successful:</b> <input type="checkbox" class="paramSelector" id="recoverySuccessful" checked><br/>
+            </div>
+            <div class="paramRow">
+                <b>Use Car Position:</b> <input type="checkbox" class="paramSelector" id="recoveryCarPosition" onclick='setRecoveryCarPosition();'><br/>
+            </div>
+            <div class="paramRow">
+                <b>Title:</b><input type="text" class="paramEntry" size="40" id="customRecoveryTitle"><br/>
+            </div>
+            <div class="paramRow">
+                <b>Message:</b><input type="text" class="paramEntry" size="40" id="customRecoveryMessage"><br/>
+            </div>
+        </div>
+
+        <div id="sidebar" class="sidebar collapsed">
+        <!-- Nav tabs -->
+        <div class="sidebar-tabs">
+            <ul role="tablist">
+                <li><a href="#home" role="tab"><i class="fa fa-bars"></i></a></li>
+                <li><a href="#settings" role="tab"><i class="fa fa-gear"></i></a></li>
+                <li><a href="#car-settings" role="tab"><i class="fa fa-car"></i></a></li>
+                <li><a href="#df-settings" role="tab"><i class="fa fa-compass"></i></a></li>
+                <li><a href="#recovery" role="tab" title="Recovery Overlays"><i class="fa fa-life-ring"></i></a></li>
+            </ul>
+        </div>
+
+        <!-- Tab panes -->
+        <div class="sidebar-content">
+            <div class="sidebar-pane" id="home">
+                <div class="paramRow">
+                    <b>Chasemapper Version: </b> <div id="chasemapper_version" class="paramEntry">Unknown</div></br>
+                </div>
+            </br>
+                <h1 class="sidebar-header">
+                    Log Messages
+                    <span class="sidebar-close"><i class="fa fa-caret-left"></i></span>
+                </h1>
+
+                <div id="log_data" class="logText"></div>
+
+            </div>
+
+            <div class="sidebar-pane" id="settings">
+                <h1 class="sidebar-header">Settings<span class="sidebar-close"><i class="fa fa-caret-left"></i></span></h1>
+                </hr>
+                <h3>Data Source</h3>
+                <select id="profileSelect" name="profileSelect">
+                </select>
+
+                <h4 style="margin-top:8px;">Choppies Geofence</h4>
+                <div style="font-size:12px; color:#6b7280;">
+                    Upload a choppies Flight.KML <i>or</i> draw the geofence
+                    directly on the map for the selected profile.
+                </div>
+                <div style="margin-top:4px;">
+                    <input type="file" id="geofence-file" accept=".kml,.KML,application/vnd.google-earth.kml+xml" />
+                </div>
+                <div style="margin-top:6px; font-size:12px;">
+                    <label>Min Alt (m)
+                        <input type="number" id="geofence-min-alt" value="-500" step="100" style="width:80px;">
+                    </label>
+                    <label style="margin-left:8px;">Max Alt (m)
+                        <input type="number" id="geofence-max-alt" value="23000" step="500" style="width:90px;">
+                    </label>
+                </div>
+                <div style="margin-top:4px; font-size:12px;">
+                    Remain
+                    <label style="margin-left:4px;"><input type="radio" name="geofence-remain" value="inside" checked> inside</label>
+                    <label style="margin-left:6px;"><input type="radio" name="geofence-remain" value="outside"> outside</label>
+                </div>
+                <div style="margin-top:6px;">
+                    <button type="button" id="geofence-draw">Draw on map</button>
+                    <button type="button" id="geofence-finish" disabled>Finish</button>
+                    <button type="button" id="geofence-cancel-draw" disabled>Cancel</button>
+                </div>
+                <div style="margin-top:4px;">
+                    <label style="font-size:13px;">
+                        <input type="checkbox" id="geofence-visible" checked> Show on map
+                    </label>
+                    <button type="button" id="geofence-clear" disabled style="margin-left:8px;">Clear</button>
+                    <button type="button" id="geofence-restore" disabled style="margin-left:4px;">Restore</button>
+                </div>
+                <div style="margin-top:4px;">
+                    <button type="button" id="geofence-copy" disabled>Copy choppies waypoints</button>
+                </div>
+                <div id="geofence-status" style="font-size:12px; margin-top:4px; color:#6b7280;"></div>
+
+                <h3>Map</h3>
+                <h4>Auto-Follow</h4>
+                <form>
+                  <input type="radio" name="autoFollow" value="payload" checked> Payload<br>
+                  <input type="radio" name="autoFollow" value="car"> Chase Car<br>
+                  <input type="radio" name="autoFollow" value="none"> None
+                </form>
+                </hr>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="chaseCarTrack" onclick='setChaseCarTrack();' checked>
+                    <label class="form-check-label" for="chaseCarTrack">
+                      <b>Show Car Track </b>
+                    </label>
+                </div>
+                
+                </hr>
+                <h3>Predictor</h3>
+                <div class="paramRow" id="predictorModel">
+                    <b>Current Model </b> <div class="predictorModelValue" id="predictorModelValue">Disabled</div>
+                </div>
+                <div class="paramRow">
+                    <b>Download Model </b> <button type="button" class="paramSelector" id="downloadModel">Download</button>
+                </div>
+                <div class="paramRow">
+                    <b>Launch Preview </b><button type="button" class="paramSelector" id="runLaunchPreview">Run Launch Preview</button>
+                </div>
+                <div id="launchPreviewStatus" style="font-size:12px; margin:2px 0 8px; color:#6b7280;"></div>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="predictorEnabled" onclick='clientSettingsUpdate();'>
+                    <label class="form-check-label" for="predictorEnabled">
+                      <b>Enable Predictions </b>
+                    </label>
+                </div>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="abortPredictionEnabled" onclick='clientSettingsUpdate();'>
+                    <label class="form-check-label" for="abortPredictionEnabled">
+                      <b>Show 'Abort' Predictions </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Burst Altitude (m)</b>
+                    <span class="altFeet" id="burstAltFeet" style="color:#6b7280; font-size:12px; margin-left:auto; padding-right:6px;"></span>
+                    <input type="text" class="paramEntry" id="burstAlt" style="margin-left:0;"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Descent Rate</b><input type="text" class="paramEntry" id="descentRate"><br/>
+                </div>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="floatEnabled" onclick='clientSettingsUpdate();'>
+                    <label class="form-check-label" for="floatEnabled">
+                      <b>Float Mode (GHOUL) </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Float Altitude (m)</b>
+                    <span class="altFeet" id="floatAltitudeFeet" style="color:#6b7280; font-size:12px; margin-left:auto; padding-right:6px;"></span>
+                    <input type="text" class="paramEntry" id="floatAltitude" style="margin-left:0;"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Float Duration (hh:mm)</b>
+                    <span id="floatDurationHours" style="color:#6b7280; font-size:12px; margin-left:auto; padding-right:6px;"></span>
+                    <input type="text" class="paramEntry" id="floatDuration" placeholder="2:30" style="margin-left:0;"><br/>
+                </div>
+                <div style="font-size:12px; color:#6b7280;">
+                    Applies to the active telemetry profile (Command,
+                    HAPL, BITS, …). Requires Tawhiri (online) for
+                    accurate float trajectories; offline predictor
+                    falls back to burst-at-float-altitude.
+                </div>
+                <div class="paramRow">
+                    <b>Update Rate</b><input type="text" class="paramEntry" id="predUpdateRate"><br/>
+                </div>
+                </hr>
+                </hr>
+                <h3>Other</h3>
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="clearPayloadData">Clear Payload Data</button></br>
+                </div>
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="clearCarData">Clear Chase-Car Track</button></br>
+                </div>
+            
+            </div>
+
+            <div class="sidebar-pane" id="car-settings">
+                <h1 class="sidebar-header">
+                    Car Settings
+                    <span class="sidebar-close"><i class="fa fa-caret-left"></i></span>
+                </h1>
+
+                <!--
+                <h3>Car Position Source</h3>
+                <div class="paramRow">
+                    <b>Use Device Position:</b> <input type="checkbox" class="paramSelector" id="useDevicePosition">
+                </div>
+                --> 
+
+                <h3>APRS-IS <span id="aprsisProfileLabel" style="font-weight:normal;font-size:0.8em;color:#888;"></span></h3>
+                <div id="aprsisSection">
+                    <div class="paramRow">
+                        <b>Active Car</b>
+                        <select id="aprsisCarSelect" onchange="aprsisSetCar()" style="margin-left:4px;"></select>
+                    </div>
+                    <div class="paramRow">
+                        <b>Cars</b>
+                        <span id="aprsisCarList" style="font-size:0.85em;">---</span>
+                    </div>
+                    <div class="paramRow">
+                        <b>Add Car</b>
+                        <input type="text" class="paramEntry" id="aprsisAddCar" placeholder="e.g. KD9ABC-9" style="width:90px;">
+                        <button onclick="aprsisAddCar()">Add</button>
+                    </div>
+                    <div class="paramRow">
+                        <b>Balloons</b>
+                        <span id="aprsisBalloonList" style="font-size:0.85em;">---</span>
+                    </div>
+                    <div class="paramRow">
+                        <b>Add Balloon</b>
+                        <input type="text" class="paramEntry" id="aprsisAddBalloon" placeholder="e.g. KC3SKW-10" style="width:90px;">
+                        <button onclick="aprsisAddBalloon()">Add</button>
+                    </div>
+                    <div class="paramRow">
+                        <b>Status</b> <span id="aprsisStatus">---</span>
+                    </div>
+                    <div class="paramRow" style="font-size:0.8em;color:#888;">
+                        Callsigns are per-profile. Click × to remove.
+                    </div>
+                </div>
+
+                <h3>Chase Car Upload</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="showOtherCars" onclick="show_sondehub_vehicles();">
+                    <label class="form-check-label" for="showOtherCars">
+                      <b>Show Nearby Chase-Cars </b>
+                    </label>
+                </div>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="habitatUploadEnabled" onclick='clientSettingsUpdate();'>
+                    <label class="form-check-label" for="habitatUploadEnabled">
+                      <b>Chase-Car Position Upload </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Online Tracker Callsign </b><input type="text" class="paramEntry" id="habitatCall"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Update Rate (seconds) </b><input type="text" class="paramEntry" id="habitatUpdateRate"><br/>
+                </div>
+
+                <h3>Range Rings</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="rangeRingsEnabled" onclick='updateRangeRings();'>
+                    <label class="form-check-label" for="rangeRingsEnabled">
+                      <b>Enable Range Rings </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Ring Qty</b><input type="text" class="paramEntry" id="ringQuantity" value="5"><br/>
+                </div>
+                <div class="paramRow">
+                    <b> <p><p id="ring_spacing">Ring Spacing (m) </p></p></b><input type="text" class="paramEntry" id="ringSpacing" value="1000"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Ring Weight (px) </b><input type="text" class="paramEntry" id="ringWeight" value="2"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Ring Color</b>
+                    <select class="paramSelector" id="ringColorSelect" name="ringColorSelect">
+                    <option value='red'>Red</option>
+                    <option value='black'>Black</option>
+                    <option value='green'>Green</option>
+                    <option value='blue'>Blue</option>
+                    <option value='custom'>Custom</option>
+                    </select>
+                    <br/>
+                </div>
+                <div class="paramRow">
+                    <b>Custom Color</b><input type="text" class="paramEntry" id="ringCustomColor" value="#FF0000"><br/>
+                </div>
+
+                <h3>Speed/Heading Display</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="showCarSpeed">
+                    <label class="form-check-label" for="showCarSpeed">
+                      <b>Show Chase-Car Speed </b>
+                    </label>
+                </div>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="showCarHeading">
+                    <label class="form-check-label" for="showCarHeading">
+                      <b>Show Chase-Car Heading </b>
+                    </label>
+                </div>
+                <h3>GPS/Heading Status</h3>
+                <div class="paramRow">
+                    <b>SVs Tracked </b> <div class="predictorModelValue" id='numSVStatus'>---</div>
+                </div>
+                <div class="paramRow">
+                    <b>Heading </b> <div class="predictorModelValue" id='headingStatus'>---</div>
+                </div>
+
+
+            </div>
+
+            <div class="sidebar-pane" id="df-settings">
+                <h1 class="sidebar-header">
+                    DF Settings
+                    <span class="sidebar-close"><i class="fa fa-caret-left"></i></span>
+                </h1>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="bearingsEnabled" checked onclick='toggleBearingsEnabled();'>
+                    <label class="form-check-label" for="bearingsEnabled">
+                      <b>Enable Bearings </b>
+                    </label>
+                </div>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="bearingsOnlyMode" onclick='toggleBearingsOnlyMode();'>
+                    <label class="form-check-label" for="bearingsOnlyMode">
+                      <b>Bearing-Only Mode </b>
+                    </label>
+                </div>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="tdoaEnabled" checked>
+                    <label class="form-check-label" for="tdoaEnabled">
+                      <b>Enable TDOA Plot </b>
+                    </label>
+                </div>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="bigTDOAEnabled">
+                    <label class="form-check-label" for="bigTDOAEnabled">
+                      <b>Big TDOA Plot </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Confidence Threshold</b><input type="text" class="paramEntry" id="bearingConfidenceThreshold" value="5.0"><br/>
+                </div>
+
+                <div class="paramRow">
+                    <b>Maximum Age (min)</b><input type="text" class="paramEntry" id="bearingMaximumAge" value="10"><br/>
+                </div>
+
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="showStationaryBearings">
+                    <label class="form-check-label" for="showStationaryBearings">
+                      <b>Show Stationary Bearings </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="clearBearingsBtn" onclick='destroyAllBearings();'>Clear Map</button></br>
+                </div>
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="flushBearingsBtn" onclick='flushBearings();'>Flush Bearing Store</button></br>
+                </div>
+
+                <h3>Bearing Sources</h3>
+                <div id="bearing_source_selector"></div>
+
+                <h3>Bearing Style</h3>
+                <div class="paramRow">
+                    <b>Bearing Length (km)</b><input type="text" class="paramEntry" id="bearingLength" value="10"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Bearing Weight (px)</b><input type="text" class="paramEntry" id="bearingWeight" value="1.0"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Manual Bearing Weight (px)</b><input type="text" class="paramEntry" id="manualBearingWeight" value="4.0"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Bearing Min Opacity</b><input type="text" class="paramEntry" id="bearingMinOpacity" value="0.1"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Bearing Max Opacity</b><input type="text" class="paramEntry" id="bearingMaxOpacity" value="0.8"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Bearing Color</b>
+                    <select class="paramSelector" id="bearingColorSelect" name="bearingColorSelect">
+                    <option value='black'>Black</option>
+                    <option value='white'>White</option>
+                    <option value='red'>Red</option>
+                    <option value='green'>Green</option>
+                    <option value='blue'>Blue</option>
+                    <option value='custom'>Custom</option>
+                    </select>
+                    <br/>
+                </div>
+                <div class="paramRow">
+                    <b>Custom Color</b><input type="text" class="paramEntry" id="bearingCustomColor" value="#FF0000"><br/>
+                </div>
+
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="redrawBearingsBtn" onclick='redrawBearings();'>Redraw Bearings</button></br>
+                </div>
+
+                <h3>Manual Bearing Entry</h3>
+                <div class="paramRow">
+                    <input type="text" id="bearingManualEntry" value="0"><br/><button type="button" class="paramSelector" id="manualBearingBtn" onclick='manualBearing();'>Plot</button></br>
+                </div>
+                <div> 
+                    <a href="/bearing" target="_blank" rel="noopener noreferrer">EasyBearing</a></br><a href="/oclock" target="_blank" rel="noopener noreferrer">O'Clock Entry</a>
+                </div>
+                <h3>Mt Gambier</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" value="" id="timeSeqEnabled" onclick='toggleTimeSeqEnabled();'>
+                    <label class="form-check-label" for="bearingsEnabled">
+                      <b>Enable Time-Seq Mode </b>
+                    </label>
+                </div>
+                <div class="paramRow">
+                    <b>Active Time (s)</b><input type="text" class="paramEntry" id="timeSeqActiveTime" value="25"><br/>
+                </div>
+                <div class="paramRow">
+                    <b>Cycle Time (s)</b><input type="text" class="paramEntry" id="timeSeqCycleTime" value="120"><br/>
+                </div>
+                <div class="paramRow">
+                    <button type="button" class="paramSelector" id="timeSeqSet0" onclick='setTimeSeq(0);'>Set 0</button><button type="button" class="paramSelector" id="timeSeqSet1" onclick='setTimeSeq(1);'>Set 1</button><button type="button" class="paramSelector" id="timeSeqSet2" onclick='setTimeSeq(2);'>Set 2</button><button type="button" class="paramSelector" id="timeSeqSet3" onclick='setTimeSeq(3);'>Set 3</button><button type="button" class="paramSelector" id="timeSeqSetAll" onclick='setAllTimeSeq();'>Set All</button><button type="button" class="paramSelector" id="timeSeqSetClr" onclick='setTimeSeq(-1);'>Clr</button></br>
+                </div>
+                <div class="paramRow">
+                    <div class="form-check-label" id='timeSeqStatus'></div>
+                </div>
+            </div>
+
+            <div class="sidebar-pane" id="recovery">
+                <h1 class="sidebar-header">Recovery Overlays<span class="sidebar-close"><i class="fa fa-caret-left"></i></span></h1>
+
+                <h3>Airspace</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" id="toggle-airspace">
+                    <label class="form-check-label" for="toggle-airspace"><b>Enable Airspace Overlays</b></label>
+                </div>
+                <div style="margin-left: 1.25em;">
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-class-b">
+                        <label class="form-check-label" for="toggle-class-b"><span style="color:#1f4ed8;">&#9632;</span> Class B</label>
+                    </div>
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-class-c">
+                        <label class="form-check-label" for="toggle-class-c"><span style="color:#7c3aed;">&#9632;</span> Class C</label>
+                    </div>
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-class-d">
+                        <label class="form-check-label" for="toggle-class-d"><span style="color:#0ea5e9;">&#9632;</span> Class D</label>
+                    </div>
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-class-e">
+                        <label class="form-check-label" for="toggle-class-e"><span style="color:#64748b;">&#9632;</span> Class E</label>
+                    </div>
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-sua">
+                        <label class="form-check-label" for="toggle-sua"><span style="color:#dc2626;">&#9632;</span> Special Use</label>
+                    </div>
+                    <div class="form-switch form-check-reverse">
+                        <input class="form-check-input" type="checkbox" role="switch" id="toggle-tfr">
+                        <label class="form-check-label" for="toggle-tfr"><span style="color:#f97316;">&#9632;</span> TFRs</label>
+                    </div>
+                </div>
+                <div style="margin-top: 0.5em;">
+                    <button type="button" id="airspace-refresh-btn" class="btn btn-sm btn-outline-secondary">Refresh from FAA</button>
+                </div>
+                <div class="status" id="airspace-status" style="font-style: italic; color: #6b7280; font-size: 0.85em; margin-top: 0.5em;"></div>
+
+                <h3>Parcels (MD)</h3>
+                <div class="form-switch form-check-reverse">
+                    <input class="form-check-input" type="checkbox" role="switch" id="toggle-parcels">
+                    <label class="form-check-label" for="toggle-parcels"><b>Show MD Parcels Near Landing</b></label>
+                </div>
+                <div class="paramRow" style="margin-top: 0.5em;">
+                    <b>Radius:</b>
+                    <input type="range" id="parcel-radius" min="0.25" max="1.0" step="0.25" value="0.5" style="vertical-align: middle;">
+                    <span id="parcel-radius-val">0.50 mi</span>
+                </div>
+                <div class="status" id="parcel-status" style="font-style: italic; color: #6b7280; font-size: 0.85em; margin-top: 0.5em;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="map" class="sidebar-map"></div>
+
+    <div id="sidebarHandle"><i class="fa fa-angle-right"></i></div>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Config (contains personal/local settings - use the .example as the template)
+horusmapper.cfg
+docker-compose.yml
+
+# GFS data (downloaded at runtime, no need to track)
+gfs/
+
+# Airspace / TFR cache (refreshed at runtime by recovery overlays)
+cache/
+
+# Logs (runtime generated)
+log_files/
+*.log
+
+# macOS junk
+.DS_Store
+
+# Wheels (built artifacts)
+wheels/
+
+# Common editor dirs
+.vscode/
+.idea/
+.env
+*.md
+.rtk/
+.codegraph/
+.codex/
+.agents/
+CLAUDE.md
