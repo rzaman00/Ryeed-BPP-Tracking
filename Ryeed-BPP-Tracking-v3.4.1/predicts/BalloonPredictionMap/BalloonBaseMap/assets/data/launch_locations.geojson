@@ -1,0 +1,210 @@
+{
+    "type"    : "FeatureCollection",
+    "name"    : "launch_locations",
+    "crs"     : {
+        "type"      : "name",
+        "properties": {
+            "name": "urn:ogc:def:crs:OGC:1.3:CRS84"
+        }
+    },
+    "features": [
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Clear Spring Elementary School",
+                "phone"  : 3017668074,
+                "address": "12627 Broadfording Road, Clear Spring, MD 21722",
+                "url"    : "<a href='http:\/\/wcpsmd.com\/schools\/elementary-schools\/clear-spring-elementary'>link<\/a>",
+                "longitude"     : -77.934144,
+                "latitude"      : 39.657178
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.934144,
+                    39.657178
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Allegany College of Maryland",
+                "phone"  : 3017845000,
+                "address": "12401 Willowbrook Rd, Cumberland, MD 21502",
+                "url"    : "<a href='https:\/\/www.allegany.edu'>link<\/a>",
+                "longitude"     : -78.72835,
+                "latitude"      : 39.65163
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -78.72835,
+                    39.65163
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Everett Area Elementary Schools",
+                "phone"  : 8146529114,
+                "address": "165 E 1st Avenue, Everett, PA 15537",
+                "url"    : "<a href='https:\/\/www.everettasd.org'>link<\/a>",
+                "longitude"     : -78.358934,
+                "latitude"      : 40.004937
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -78.358934,
+                    40.004937
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Faust Junior High School / Chambersburg Area MS - North",
+                "phone"  : 7172613366,
+                "address": "1957 Scotland Ave, Chambersburg, PA 17201",
+                "url"    : "<a href='https:\/\/camsn.casdonline.org'>link<\/a>",
+                "longitude"     : -77.634621,
+                "latitude"      : 39.957275
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.634621,
+                    39.957275
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Emittsburg Elementary School",
+                "phone"  : 2402361750,
+                "address": "300 South Seton Avenue, Emmitsburg, MD 21727",
+                "url"    : "<a href='https:\/\/education.fcps.org\/ees'>link<\/a>",
+                "longitude"     : -77.329201,
+                "latitude"      : 39.703497
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.329201,
+                    39.703497
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Hancock Elementary School",
+                "phone"  : 3017668178,
+                "address": "289 West Main Street, Hancock, MD 21750",
+                "url"    : "<a href='http:\/\/wcpsmd.com\/schools\/high-schools\/hancock-high'>link<\/a>",
+                "longitude"     : -78.19681,
+                "latitude"      : 39.696802
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -78.19681,
+                    39.696802
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Westminster Elementary School",
+                "phone"  : 4107513222,
+                "address": "811 Uniontown Road, Westminster, MD 21158",
+                "url"    : "<a href='https:\/\/www.carrollk12.org\/schools\/elementary\/wes\/Pages\/default.asp'>link<\/a>",
+                "longitude"     : -77.025882,
+                "latitude"      : 39.579275
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.025882,
+                    39.579275
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Hagerstown Community College",
+                "phone"  : 2405002238,
+                "address": "11400 Robinwood Drive, Hagerstown, MD 21742",
+                "url"    : "<a href='http:\/\/www.hagerstowncc.edu'>link<\/a>",
+                "longitude"     : -77.672274,
+                "latitude"      : 39.629549
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.672274,
+                    39.629549
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "James Wood High School",
+                "phone"  : 5406675226,
+                "address": "161 Apple Pie Ridge Road, Winchester, VA 22603",
+                "url"    : "<a href='https:\/\/jwh.frederick.k12.va.us'>link<\/a>",
+                "longitude"     : -78.18307,
+                "latitude"      : 39.21205
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -78.18307,
+                    39.21205
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Harpers Ferry Middle School",
+                "phone"  : 3045356357,
+                "address": "1710 West Washington Street, Harpers Ferry, WV 25425",
+                "url"    : "<a href='https:\/\/hfms.jeff.k12.wv.us'>link<\/a>",
+                "longitude"     : -77.756622,
+                "latitude"      : 39.323833
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.756622,
+                    39.323833
+                ]
+            }
+        },
+        {
+            "type"      : "Feature",
+            "properties": {
+                "name"   : "Valley Elementary School",
+                "phone"  : 2402363000,
+                "address": "3519 Jefferson Pike, Jefferson, MD 21755",
+                "url"    : "<a href='https:\/\/education.fcps.org\/ves\/home'>link<\/a>",
+                "longitude"     : -77.547824,
+                "latitude"      : 39.359031
+            },
+            "geometry"  : {
+                "type"       : "Point",
+                "coordinates": [
+                    -77.547824,
+                    39.359031
+                ]
+            }
+        }
+    ]
+}
