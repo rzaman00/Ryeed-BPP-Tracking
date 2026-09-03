@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-echo "[BPP Predicts v3.5.0] Checking local Python environment..."
+echo "[BPP Predicts v3.6.0] Checking local Python environment..."
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ -x .venv/bin/python ]]; then
   if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
@@ -15,6 +15,6 @@ fi
 .venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -c 'import fastapi, uvicorn, httpx, dotenv, pydantic, shapely'
+.venv/bin/python -c 'import fastapi, uvicorn, httpx, dotenv, pydantic, shapely, aprslib'
 [[ -f .env ]] || cp .env.example .env
 echo "Setup complete."

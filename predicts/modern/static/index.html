@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.5.0" rel="stylesheet" />
+  <link href="static/styles.css?v=3.6.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -19,11 +19,12 @@
     <nav class="app-tabs" aria-label="Application sections">
       <button class="app-tab active" id="predictsTab" type="button" data-app-view="predicts">Predicts</button>
       <button class="app-tab" id="readinessTab" type="button" data-app-view="readiness">Readiness</button>
+      <button class="app-tab" id="liveTrackingTab" type="button" data-app-view="live">Live Tracking</button>
       <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.5.0</span>
+      <span class="build-badge" id="buildBadge">v3.6.0</span>
       <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
@@ -32,10 +33,7 @@
   </header>
 
   <section id="predictsView" class="app-view">
-  <section class="control-strip" aria-label="Prediction controls">
-    <label class="control-field mode-field advanced-control"><span>Mode</span>
-      <select id="workspaceMode"><option value="predict">Predict</option><option value="live">Live Track</option></select>
-    </label>
+  <section id="predictControlStrip" class="control-strip prediction-control-strip" aria-label="Prediction controls">
     <label class="control-field advanced-control"><span>Predict Type</span>
       <select id="predictType"><option value="burst">Burst</option><option value="float">Float</option></select>
     </label>
@@ -52,7 +50,7 @@
     </div>
 
     <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
-    <div class="control-field burst-control burst-altitude-control advanced-control"><span>Burst Altitude</span>
+    <div class="control-field burst-control burst-altitude-control"><span>Burst Altitude</span>
       <select id="burstAltitudeMode" aria-label="Burst altitude source"><option value="auto" selected>Automatic (Inflation Calculator)</option><option value="manual">Manual</option></select>
       <div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="100" min="1000" disabled><small id="burstFeet">Calculating…</small></div>
     </div>
@@ -61,24 +59,31 @@
     <label class="control-field float-control advanced-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
     <label class="control-field"><span>S.L. Descent Rate (m/s)</span><input id="descentRate" type="number" value="9" step="0.5" min="0.1"></label>
 
-    <div class="control-field live-only advanced-control hidden live-callsign-field"><span>Tracked Callsigns</span>
+    <button id="runPredicts" class="run-button" type="button"><span class="run-label">Run Predicts</span><span class="run-state" id="runState"></span></button>
+    <label class="optimal-sweep-toggle predict-only advanced-control" title="Off is fastest. On also tries current ±0.5 and ±1.0 m/s."><input id="optimalAscentSweep" type="checkbox"><span><strong>Optimal ascent sweep</strong><small id="optimalSweepModeLabel">Current rate only</small></span></label>
+    <button id="findOptimalCurrent" class="optimal-button predict-only advanced-control" type="button" title="Checks selected preset sites plus every custom launch point"><span class="optimal-label">Find Optimal: Current Sites</span><span class="run-state" id="optimalCurrentState"></span></button>
+    <button id="findOptimalAll" class="optimal-button optimal-all-button predict-only advanced-control" type="button" title="Checks the complete deduplicated preset launch-site list"><span class="optimal-label">Find Optimal: All Sites</span><span class="run-state" id="optimalAllState"></span></button>
+  </section>
+  <section id="liveControlStrip" class="control-strip live-control-strip hidden" aria-label="Live tracking controls">
+    <div class="control-field live-callsign-field"><span>Tracked Callsigns</span>
       <div class="callsign-picker-row">
         <select id="callsignPicker" aria-label="Choose APRS callsign"><option value="KC3SKW-8">KC3SKW-8</option><option value="KC3SKW-9">KC3SKW-9</option><option value="KC3SKW-10">KC3SKW-10</option><option value="__custom__">Add another callsign…</option></select>
         <button id="addCallsignButton" class="callsign-add" type="button">Add</button>
       </div>
       <div id="customCallsignRow" class="callsign-custom-row hidden"><input id="customCallsign" type="text" placeholder="e.g. W3ABC-11" maxlength="15" spellcheck="false"><button id="saveCustomCallsign" type="button">Add callsign</button></div>
       <div id="callsignChips" class="callsign-chips" aria-label="Selected live callsigns"></div>
-      <small class="callsign-help">Each live predict uses the latest APRS latitude, longitude, altitude, and packet time.</small>
+      <small class="callsign-help">Read-only APRS-IS stream · no API key required</small>
     </div>
-    <label class="control-field live-only advanced-control hidden"><span>Flight Phase</span>
-      <select id="livePhase"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select>
-    </label>
-
-    <button id="runPredicts" class="run-button" type="button"><span class="run-label">Run Predicts</span><span class="run-state" id="runState"></span></button>
-    <label class="optimal-sweep-toggle predict-only advanced-control" title="Off is fastest. On also tries current ±0.5 and ±1.0 m/s."><input id="optimalAscentSweep" type="checkbox"><span><strong>Optimal ascent sweep</strong><small id="optimalSweepModeLabel">Current rate only</small></span></label>
-    <button id="findOptimalCurrent" class="optimal-button predict-only advanced-control" type="button" title="Checks selected preset sites plus every custom launch point"><span class="optimal-label">Find Optimal: Current Sites</span><span class="run-state" id="optimalCurrentState"></span></button>
-    <button id="findOptimalAll" class="optimal-button optimal-all-button predict-only advanced-control" type="button" title="Checks the complete deduplicated preset launch-site list"><span class="optimal-label">Find Optimal: All Sites</span><span class="run-state" id="optimalAllState"></span></button>
-    <button id="refreshLive" class="utility-button live-only advanced-control hidden" type="button">Refresh APRS</button>
+    <label class="control-field"><span>Predict Type</span><select id="livePredictType"><option value="burst">Burst</option><option value="float">Float</option></select></label>
+    <label class="control-field"><span>Flight Phase</span><select id="livePhase"><option value="auto">Auto</option><option value="ascending">Ascending</option><option value="descending">Descending</option></select></label>
+    <label class="control-field"><span>Ascent Rate (m/s)</span><input id="liveAscentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
+    <label class="control-field"><span>Burst Altitude (m)</span><div class="input-with-note"><input id="liveBurstAltitude" type="number" value="28000" step="100" min="1000"><small id="liveBurstFeet">91,864 ft</small></div></label>
+    <label class="control-field live-float-control hidden"><span>Float Altitude (m)</span><input id="liveFloatAltitude" type="number" value="22000" step="1000" min="1000"></label>
+    <label class="control-field live-float-control hidden"><span>Float Rate (m/s)</span><input id="liveFloatRate" type="number" value="1" step="0.5" min="0.1"></label>
+    <label class="control-field live-float-control hidden"><span>Float Duration (min)</span><input id="liveFloatDuration" type="number" value="60" step="20" min="1"></label>
+    <label class="control-field"><span>Descent Rate (m/s)</span><input id="liveDescentRate" type="number" value="9" step="0.5" min="0.1"></label>
+    <button id="runLivePredict" class="run-button" type="button"><span>Run Live Predict</span><span class="run-state" id="liveRunState"></span></button>
+    <button id="refreshLive" class="utility-button" type="button">Refresh APRS</button>
   </section>
   <div id="optimalResult" class="optimal-result hidden" aria-live="polite"></div>
 
@@ -123,18 +128,18 @@
         <label><span>USGS Topo</span><input type="radio" name="basemap" value="usgs"></label>
         <label><span>Esri Dark Gray</span><input type="radio" name="basemap" value="dark"></label>
       </section>
-      <section class="layer-group advanced-map-control collapsed">
-        <h3>Reference</h3>
-        <label><span>Controlled Airspace (B/C/D)</span><input type="checkbox" data-layer="controlled" checked></label>
-        <label><span>Class E Airspace</span><input type="checkbox" data-layer="class_e"></label>
-        <label><span>Special Use Airspace</span><input type="checkbox" data-layer="sua"></label>
+      <section class="layer-group collapsed">
+        <h3>Safety &amp; Reference</h3>
+        <label class="advanced-map-control"><span>Controlled Airspace (B/C/D)</span><input type="checkbox" data-layer="controlled" checked></label>
+        <label class="advanced-map-control"><span>Class E Airspace</span><input type="checkbox" data-layer="class_e"></label>
+        <label><span>Special Use Airspace</span><input type="checkbox" data-layer="sua" checked></label>
         <label><span>TFR Airspace</span><input type="checkbox" data-layer="tfr" checked></label>
-        <label><span>National Address DB</span><input type="checkbox" data-layer="addresses"></label>
-        <label><span>Public School Locations</span><input type="checkbox" data-layer="schools"></label>
-        <label><span>McDonald's Locations</span><input type="checkbox" data-layer="mcdonalds"></label>
-        <label><span>Dunkin' Donuts Locations</span><input type="checkbox" data-layer="dunkin"></label>
-        <label><span>Launch Locations</span><input type="checkbox" data-layer="launch_locations"></label>
-        <label><span>POI</span><input type="checkbox" data-layer="poi"></label>
+        <label class="advanced-map-control"><span>National Address DB</span><input type="checkbox" data-layer="addresses"></label>
+        <label class="advanced-map-control"><span>Public School Locations</span><input type="checkbox" data-layer="schools"></label>
+        <label class="advanced-map-control"><span>McDonald's Locations</span><input type="checkbox" data-layer="mcdonalds"></label>
+        <label class="advanced-map-control"><span>Dunkin' Donuts Locations</span><input type="checkbox" data-layer="dunkin"></label>
+        <label class="advanced-map-control"><span>Launch Locations</span><input type="checkbox" data-layer="launch_locations"></label>
+        <label class="advanced-map-control"><span>POI</span><input type="checkbox" data-layer="poi"></label>
       </section>
       <section class="layer-group predicts-group">
         <h3>Predicts</h3>
@@ -168,7 +173,7 @@
     </section>
 
     <section class="live-status hidden" id="liveStatus">
-      <div class="live-title"><strong id="liveCallsign">KC3SKW-8</strong><span>LIVE</span></div>
+      <div class="live-title"><strong id="liveCallsign">KC3SKW-8</strong><span id="liveConnection">CONNECTING</span></div>
       <div class="live-grid">
         <div><small>Age</small><b id="liveAge">—</b></div>
         <div><small>Altitude</small><b id="liveAltitude">—</b></div>
@@ -305,8 +310,8 @@
         <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
         <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click any launch marker for weather, address details, coordinates, and a direct Ventusky link.</p></article>
         <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
-        <article class="info-card"><h2>Live APRS</h2><p>Track one or more APRS callsigns and run live predictions from the latest reported latitude, longitude, altitude, and packet time.</p></article>
-        <article class="info-card"><h2>Airspace & 3D</h2><p>Toggle FAA controlled, Class E, special-use, and TFR layers. Switch to 3D to inspect airspace and custom geofence volumes.</p></article>
+        <article class="info-card"><h2>Live Tracking</h2><p>Use the separate Live Tracking tab to follow one or more callsigns through the read-only APRS-IS stream and predict from each packet's latitude, longitude, altitude, and time. No API key is required.</p></article>
+        <article class="info-card"><h2>Airspace & 3D</h2><p>Special-use and TFR layers remain visible in Basic mode. Advanced mode adds controlled, Class E, reference, drawing, and 3D volume controls.</p></article>
         <article class="info-card"><h2>Drawing Tools</h2><p>Add custom launch points or draw oriented rectangles. Rectangles can be assigned an upper altitude and visualized as 3D volumes.</p></article>
         <article class="info-card"><h2>Launch Readiness</h2><p>Compare selected sites using visible weather, forecast freshness, airspace, landing-risk, ascent-rate, and flight-time evidence.</p></article>
         <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, Aurora, Country Desert, Summer Beach, or Pride. Themes never alter operational status or trajectory colors.</p></article>
@@ -330,6 +335,6 @@
   </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.5.0"></script>
+  <script type="module" src="static/app.js?v=3.6.0"></script>
 </body>
 </html>

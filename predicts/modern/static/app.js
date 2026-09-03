@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.5.0';
+const BUILD_VERSION = '3.6.0';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const DEFAULT_CALLSIGNS = ['KC3SKW-8', 'KC3SKW-9', 'KC3SKW-10'];
 const state = {
@@ -414,15 +414,16 @@ function layerChecked(key) { return !!checkboxForLayer(key)?.checked; }
 
 function syncAirspaceVisibility() {
   const is3d = state.dimension === '3d';
-  const technicalVisible = state.mapMode === 'operations-advanced';
+  const advanced = state.mapMode === 'operations-advanced';
+  const safetyBasic = state.mapMode === 'operations-basic';
   for (const key of ['controlled','class_e','sua']) {
-    const visible = technicalVisible && layerChecked(key);
+    const visible = layerChecked(key) && (advanced || (safetyBasic && key === 'sua'));
     for (const suffix of ['fill','line']) {
       const id=`airspace-${key}-${suffix}`; if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',visible&&!is3d?'visible':'none');
     }
     const id3=`airspace-${key}-3d`; if(map.getLayer(id3)) map.setLayoutProperty(id3,'visibility',visible&&is3d?'visible':'none');
   }
-  for (const suffix of ['fill','line']) { const id=`airspace-tfr-${suffix}`; if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',technicalVisible&&layerChecked('tfr')?'visible':'none'); }
+  for (const suffix of ['fill','line']) { const id=`airspace-tfr-${suffix}`; if(map.getLayer(id)) map.setLayoutProperty(id,'visibility',(advanced||safetyBasic)&&layerChecked('tfr')?'visible':'none'); }
 }
 
 async function loadAirspace(key) {
@@ -514,7 +515,6 @@ function setMapMode(mode){
   document.documentElement.dataset.operationMode=advanced?'advanced':'basic';
   if(state.mapMode!=='weather')state.weatherAbortController?.abort();
   setWeatherLayerVisibility(state.mapMode==='weather');
-  if(!advanced)setWorkspaceMode('predict');
   if(state.mapMode==='operations-basic')setPredictionType('burst');
   if(!advanced){
     setDimension('2d');
@@ -522,8 +522,8 @@ function setMapMode(mode){
   }
   if(!advanced){$('drawingMenu')?.classList.add('hidden');$('sweepPanel')?.classList.add('hidden');}
   syncAirspaceVisibility();syncReferenceVisibility();
-  if(advanced){
-    const requested=['controlled','class_e','sua','tfr'].filter(key=>layerChecked(key));
+  if(advanced||state.mapMode==='operations-basic'){
+    const requested=['controlled','class_e','sua','tfr'].filter(key=>layerChecked(key)&&(advanced||['sua','tfr'].includes(key)));
     Promise.all(requested.map(key=>loadAirspace(key))).then(syncAirspaceVisibility).catch(error=>console.warn('Airspace layers',error));
   }
   if(state.mapMode==='weather')refreshWeatherMap();
@@ -782,14 +782,16 @@ function updateAltitudeLabels(){
 }
 
 function setAppView(view){
-  const allowed=new Set(['predicts','readiness','inflation','info']);
+  const allowed=new Set(['predicts','live','readiness','inflation','info']);
   state.appView=allowed.has(view)?view:'predicts';
-  $('predictsView').classList.toggle('hidden',state.appView!=='predicts');
+  const mapView=state.appView==='predicts'||state.appView==='live';
+  $('predictsView').classList.toggle('hidden',!mapView);
   $('readinessView')?.classList.toggle('hidden',state.appView!=='readiness');
   $('inflationView').classList.toggle('hidden',state.appView!=='inflation');
   $('infoView')?.classList.toggle('hidden',state.appView!=='info');
   qsa('[data-app-view]').forEach(b=>{const active=b.dataset.appView===state.appView;b.classList.toggle('active',active);b.setAttribute('aria-selected',active?'true':'false');});
-  if(state.appView==='predicts')setTimeout(()=>map?.resize?.(),40);
+  setWorkspaceMode(state.appView==='live'?'live':'predict');
+  if(mapView)setTimeout(()=>map?.resize?.(),40);
   if(state.appView==='readiness'){
     if(state.readinessRows.length&&state.readinessSignature!==readinessInputSignature())state.readinessStale=true;
     renderReadiness();
@@ -837,12 +839,11 @@ async function ensureAutomaticBurst(){
 }
 
 function setWorkspaceMode(mode) {
-  state.workspaceMode=mode;
-  qsa('.predict-only').forEach(el=>el.classList.toggle('hidden',mode!=='predict'));
-  qsa('.live-only').forEach(el=>el.classList.toggle('hidden',mode!=='live'));
-  $('liveStatus').classList.toggle('hidden',mode!=='live');
-  $('runPredicts').querySelector('.run-label').textContent=mode==='live'?'Run Live Predict':'Run Predicts';
-  if(mode==='live')refreshLive(true);
+  state.workspaceMode=mode==='live'?'live':'predict';
+  $('predictControlStrip')?.classList.toggle('hidden',state.workspaceMode!=='predict');
+  $('liveControlStrip')?.classList.toggle('hidden',state.workspaceMode!=='live');
+  $('liveStatus')?.classList.toggle('hidden',state.workspaceMode!=='live');
+  if(state.workspaceMode==='live')refreshLive(true);
   scheduleLive();
 }
 
@@ -897,8 +898,14 @@ function setRunButton(status, detail='') {
   if(status==='success')setTimeout(()=>{btn.classList.remove('success');$('runState').textContent='';},1100);
 }
 
+function setLiveRunButton(status, detail='') {
+  const btn=$('runLivePredict');if(!btn)return;btn.classList.remove('running','success');
+  if(status==='running')btn.classList.add('running');if(status==='success')btn.classList.add('success');
+  btn.disabled=status==='running';$('liveRunState').textContent=detail;
+  if(status==='success')setTimeout(()=>{btn.classList.remove('success');$('liveRunState').textContent='';},1100);
+}
+
 async function runPredicts() {
-  if(state.workspaceMode==='live'){await runLivePrediction(false);return;}
   if(!(await ensureAutomaticBurst()))return;
   const targets=[...selectedPresetSites(),...customPointTargets()];
   if(!targets.length){toast('Select at least one preset launch site or draw a custom point.',true);return;}
@@ -1050,8 +1057,13 @@ async function queryAddresses(){
 // Live APRS ------------------------------------------------------------------
 function scheduleLive(){clearInterval(state.liveTimer);clearInterval(state.livePredictTimer);if(state.workspaceMode!=='live')return;if($('autoRefresh').checked)state.liveTimer=setInterval(()=>refreshLive(false),30000);if($('autoRepredict').checked)state.livePredictTimer=setInterval(()=>runLivePrediction(true),120000);}
 
+function setLivePredictionType(type){
+  const selected=type==='float'?'float':'burst';$('livePredictType').value=selected;
+  qsa('.live-float-control').forEach(el=>el.classList.toggle('hidden',selected!=='float'));
+}
+function updateLiveBurstFeet(){$('liveBurstFeet').textContent=`${fmt(feet($('liveBurstAltitude').value))} ft`;}
+
 async function refreshLive(center=false){
-  if(!state.config?.aprs_configured){$('liveAge').textContent='API key needed';return;}
   let callsigns;
   try{callsigns=selectedLiveCallsigns();}catch(e){toast(e.message,true,5200);$('liveAge').textContent='Check callsigns';return;}
   $('liveCallsign').textContent=callsigns.length===1?callsigns[0]:`${callsigns.length} callsigns`;
@@ -1075,6 +1087,9 @@ function renderLiveMarkers(r,selected){
 
 function renderLiveStations(r,callsigns,center){
   const list=$('liveStationList');list.innerHTML='';
+  const connection=$('liveConnection'),connected=Boolean(r.connection?.connected);
+  connection.textContent=connected?'CONNECTED':'CONNECTING';connection.classList.toggle('disconnected',!connected);
+  connection.title=connected?`APRS-IS ${r.connection.server}:${r.connection.port}`:(r.connection?.last_error||'Waiting for APRS-IS connection');
   const trackFeatures=[];
   let primary=null;
   for(const cs of callsigns){
@@ -1091,7 +1106,7 @@ function renderLiveStations(r,callsigns,center){
   }
   map.getSource('live-track').setData({type:'FeatureCollection',features:trackFeatures});
   if(primary)renderLiveStation(primary.p,primary.phase,primary.history,center,false);
-  else{$('liveAge').textContent='No recent packet';$('liveAltitude').textContent='—';$('liveSpeed').textContent='—';$('livePhaseValue').textContent='—';$('liveCoords').textContent='—';}
+  else{$('liveAge').textContent=connected?'Waiting for packet':'Connecting';$('liveAltitude').textContent='—';$('liveSpeed').textContent='—';$('livePhaseValue').textContent='—';$('liveCoords').textContent=connected?'APRS-IS connected; listening for the selected callsigns.':'Connecting to the read-only APRS-IS stream…';}
 }
 
 function renderLiveStation(p,phase,history,center,updateTrack=true){
@@ -1106,11 +1121,9 @@ function renderLiveStation(p,phase,history,center,updateTrack=true){
 }
 
 async function runLivePrediction(silent=false){
-  if(!(await ensureAutomaticBurst()))return;
-  if(!state.config?.aprs_configured){if(!silent)toast('Add APRSFI_API_KEY to predicts/modern/.env to use live tracking.',true,5500);return;}
   let callsigns;try{callsigns=selectedLiveCallsigns();}catch(e){if(!silent)toast(e.message,true,5200);return;}
-  if(!silent)setRunButton('running',`0/${callsigns.length}`);
-  const body={callsigns,mode:state.predictType,phase:$('livePhase').value,ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value)};
+  if(!silent)setLiveRunButton('running',`0/${callsigns.length}`);
+  const body={callsigns,mode:$('livePredictType').value,phase:$('livePhase').value,ascent_rate_ms:Number($('liveAscentRate').value),descent_rate_ms:Number($('liveDescentRate').value),burst_altitude_m:Number($('liveBurstAltitude').value),float_altitude_m:Number($('liveFloatAltitude').value),float_ascent_rate_ms:Number($('liveFloatRate').value),float_duration_min:Number($('liveFloatDuration').value)};
   try{
     const batch=await api('/api/live/predict-batch',{method:'POST',body:JSON.stringify(body)});
     state.predictions.clear();state.activePredictionId=null;
@@ -1119,12 +1132,12 @@ async function runLivePrediction(silent=false){
     const completed=state.predictions.size;const failures=Object.keys(batch.errors||{});
     if(completed)fitPredictions();
     if(!silent){
-      setRunButton(completed?'success':'idle',failures.length?`${completed} ok, ${failures.length} failed`:`${completed} updated`);
+      setLiveRunButton(completed?'success':'idle',failures.length?`${completed} ok, ${failures.length} failed`:`${completed} updated`);
       if(completed)toast(`${completed} live prediction${completed===1?'':'s'} started from APRS latitude, longitude, and altitude.`);
       if(failures.length)toast(failures.map(cs=>`${cs}: ${batch.errors[cs]}`).join(' | '),true,7000);
     }
     if(!completed&&silent)console.warn('No live predictions succeeded',batch.errors);
-  }catch(e){if(!silent){setRunButton('idle','');toast(e.message,true,5500);}else console.warn(e);}
+  }catch(e){if(!silent){setLiveRunButton('idle','');toast(e.message,true,5500);}else console.warn(e);}
 }
 
 // Parameter sweep ------------------------------------------------------------
@@ -1184,13 +1197,12 @@ function toggleTheme(){applyTheme(state.theme==='dark'?'light':'dark');}
 function wireControls(){
   $('themeToggle')?.addEventListener('click',toggleTheme);
   $('launchThemeSelect')?.addEventListener('change',e=>{applyLaunchTheme(e.target.value);toast(`${e.target.options[e.target.selectedIndex].text} launch theme applied.`);});
-  $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('readinessTab')?.addEventListener('click',()=>setAppView('readiness'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));$('infoTab')?.addEventListener('click',()=>setAppView('info'));
+  $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('readinessTab')?.addEventListener('click',()=>setAppView('readiness'));$('liveTrackingTab')?.addEventListener('click',()=>setAppView('live'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));$('infoTab')?.addEventListener('click',()=>setAppView('info'));
   $('refreshReadiness')?.addEventListener('click',refreshReadiness);$('readinessSort')?.addEventListener('change',e=>{state.readinessSort=e.target.value;renderReadiness();});
   document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('launchTimePopover')?.classList.contains('hidden')){toggleLaunchTimePopover(false);return;}if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('launchTimeButton')?.addEventListener('click',e=>{e.stopPropagation();toggleLaunchTimePopover();});
   $('launchTimePopover')?.addEventListener('click',e=>e.stopPropagation());
   document.addEventListener('click',()=>toggleLaunchTimePopover(false));
-  $('workspaceMode').addEventListener('change',e=>{setWorkspaceMode(e.target.value);markReadinessStale();});
   $('predictType').addEventListener('change',e=>{setPredictionType(e.target.value);markReadinessStale();});
   $('burstAltitudeMode').addEventListener('change',e=>{setBurstAltitudeMode(e.target.value);markReadinessStale();});
   $('burstAltitude').addEventListener('input',()=>{if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();markReadinessStale();});$('floatAltitude').addEventListener('input',()=>{updateAltitudeLabels();markReadinessStale();});
@@ -1199,7 +1211,7 @@ function wireControls(){
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
   ['launchDate','launchTime','launchTimezone','descentRate','floatRate','floatDuration'].forEach(id=>$(id)?.addEventListener('change',()=>{if(id==='launchTime'||id==='launchTimezone')updateLaunchTimeControl();if(['launchDate','launchTime','launchTimezone'].includes(id)&&state.mapMode==='weather')refreshWeatherMap();markReadinessStale();}));
   $('inflationForm').addEventListener('submit',e=>{e.preventDefault();calculateInflation(false).catch(()=>{});});$('useInflationBurst').addEventListener('click',()=>{setBurstAltitudeMode('auto');setAppView('predicts');toast('Automatic burst altitude enabled from Inflation Calculator.');});
-  $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',()=>{updateOptimalSweepLabel();markReadinessStale();});$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
+  $('runPredicts').addEventListener('click',runPredicts);$('optimalAscentSweep').addEventListener('change',()=>{updateOptimalSweepLabel();markReadinessStale();});$('findOptimalCurrent').addEventListener('click',()=>findOptimalSite('current'));$('findOptimalAll').addEventListener('click',()=>findOptimalSite('all'));$('runLivePredict')?.addEventListener('click',()=>runLivePrediction(false));$('refreshLive').addEventListener('click',()=>refreshLive(true));$('livePredictType')?.addEventListener('change',e=>setLivePredictionType(e.target.value));$('liveBurstAltitude')?.addEventListener('input',updateLiveBurstFeet);$('addCallsignButton').addEventListener('click',addCallsignFromPicker);$('callsignPicker').addEventListener('change',()=>{if($('callsignPicker').value==='__custom__')$('customCallsignRow').classList.remove('hidden');});$('saveCustomCallsign').addEventListener('click',addCustomCallsign);$('customCallsign').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addCustomCallsign();}});$('autoRefresh').addEventListener('change',scheduleLive);$('autoRepredict').addEventListener('change',scheduleLive);
   qsa('input[name="mapmode"]').forEach(x=>x.addEventListener('change',()=>setMapMode(x.value)));
   qsa('input[name="basemap"]').forEach(x=>x.addEventListener('change',()=>{if(x.value!=='dark')state.lightBasemap=x.value;setBasemap(x.value);}));qsa('input[name="dimension"]').forEach(x=>x.addEventListener('change',()=>setDimension(x.value)));
   qsa('input[data-layer]').forEach(x=>x.addEventListener('change',async()=>{const key=x.dataset.layer;if(['controlled','class_e','sua','tfr'].includes(key)){if(x.checked)await loadAirspace(key);syncAirspaceVisibility();markReadinessStale();}else setReferenceVisibility(key,x.checked);}));
@@ -1225,12 +1237,12 @@ async function init() {
   restoreLaunchTheme();
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
-  setDefaultDate();wireControls();updateLaunchTimeControl();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setWorkspaceMode('predict');setBurstAltitudeMode('auto');
+  setDefaultDate();wireControls();updateLaunchTimeControl();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setLivePredictionType('burst');updateLiveBurstFeet();setBurstAltitudeMode('auto');
   await calculateInflation(true).catch(()=>{});
-  try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();if(!state.config.aprs_configured)$('liveAge').textContent='API key needed';}catch(e){console.warn(e);renderCallsignControls();}
+  try{state.config=await api('/api/config');if(Array.isArray(state.config.default_callsigns)&&state.config.default_callsigns.length){state.knownCallsigns=[...state.config.default_callsigns];state.liveCallsigns=[...state.config.default_callsigns];}renderCallsignControls();}catch(e){console.warn(e);renderCallsignControls();}
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
-  map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}syncAirspaceVisibility();await loadLaunchLocations();});
+  map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('sua'),loadAirspace('tfr'),loadLaunchLocations()]);syncAirspaceVisibility();});
   map.on('click',e=>handleMapDrawClick(e));map.on('mousemove',handleDrawMouseMove);
 }
 

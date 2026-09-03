@@ -594,3 +594,17 @@ html[data-theme="dark"] .table-ventusky{color:#8dd5ff;border-color:#246c9c;backg
 
 @media(max-width:900px){.readiness-heading{align-items:stretch;flex-direction:column}.readiness-actions{justify-content:flex-start}.readiness-summary-main{grid-template-columns:auto 1fr}.readiness-updated{grid-column:1/-1}.readiness-factor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.readiness-factor:last-child{grid-column:1/-1}}
 @media(max-width:560px){.readiness-page{padding:16px 10px 32px}.readiness-actions{display:grid;grid-template-columns:1fr 1fr}.readiness-actions select,#refreshReadiness{width:100%}.readiness-summary-main{grid-template-columns:1fr}.readiness-factor-grid{grid-template-columns:1fr}.readiness-factor:last-child{grid-column:auto}.readiness-summary-card{padding:13px}}
+
+/* v3.6 separate live tracking + Basic safety layers */
+.live-control-strip{border-bottom-color:color-mix(in srgb,var(--launch-primary) 55%,var(--ui-border));background:var(--surface)}
+.live-control-strip .control-field{background:var(--surface);min-width:132px}
+.live-control-strip .live-callsign-field{min-width:320px}
+.live-control-strip .utility-button{background:var(--surface-2);color:var(--text);border-color:var(--ui-border);min-width:104px}
+.live-control-strip .run-button{min-width:155px}
+#liveConnection{color:#147b41!important;border-color:#89c9a4!important;background:#e8f7ee!important}
+#liveConnection.disconnected{color:#8d5d00!important;border-color:#e1c067!important;background:#fff5d9!important}
+html[data-theme="dark"] #liveConnection{color:#83e0aa!important;border-color:#2f7550!important;background:#123523!important}
+html[data-theme="dark"] #liveConnection.disconnected{color:#ffd76e!important;border-color:#806525!important;background:#3b2c0d!important}
+html[data-operation-mode="basic"] .burst-altitude-control{min-width:245px}
+html[data-operation-mode="basic"] .burst-altitude-control select{min-width:150px}
+@media(max-width:700px){.live-control-strip .live-callsign-field{min-width:285px}.live-control-strip .run-button{min-width:145px}}

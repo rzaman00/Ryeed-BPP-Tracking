@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -262,6 +262,36 @@ def test_live_batch_supports_arbitrary_callsigns_and_partial_errors(monkeypatch)
     assert "TEST2-2" in result["errors"]
 
 
+def test_fetch_aprs_uses_keyless_aprs_is_client(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    class FakeClient:
+        running = True
+
+        def __init__(self):
+            self.tracked = None
+
+        async def track(self, callsigns):
+            self.tracked = list(callsigns)
+
+        def snapshot(self, callsigns):
+            return {
+                "source": "APRS-IS",
+                "requested_callsigns": list(callsigns),
+                "stations": {},
+                "history": {},
+                "connection": {"connected": True},
+            }
+
+    client = FakeClient()
+    monkeypatch.setattr(appmod, "APRS_CLIENT", client)
+    result = asyncio.run(appmod.fetch_aprs(["kc3skw-8", "KC3SKW-9"]))
+    assert client.tracked == ["KC3SKW-8", "KC3SKW-9"]
+    assert result["source"] == "APRS-IS"
+    assert result["connection"]["connected"] is True
+
+
 def test_bundled_launch_sites_include_operational_fallbacks():
     import app as appmod
     data, warning = appmod.load_geojson(appmod.BUNDLED_LAUNCH_FILE)
@@ -353,9 +383,12 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.5.0"
+    assert h["version"] == "3.6.0"
     assert h["airspace"] == "FAA live services with disk cache"
+    assert h["aprs_configured"] is True
+    assert "aprs_server" in h
     assert c["default_callsigns"] == appmod.DEFAULT_CALLSIGNS
+    assert c["aprs_credit"]["name"].startswith("APRS-IS")
     assert set(c["airspace_layers"]) == {"controlled", "class_e", "sua", "tfr"}
 
 
@@ -956,6 +989,59 @@ def test_weather_batch_reuses_one_http_client(monkeypatch):
     assert seen_clients == [clients[0], clients[0], clients[0]]
 
 
+def test_seventh_day_weather_requests_extended_forecast_and_gusts(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    appmod._weather_cache.clear()
+    launch = datetime.now(timezone.utc) + timedelta(days=7) - timedelta(minutes=2)
+    selected = launch.replace(minute=0, second=0, microsecond=0)
+    seen = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "latitude": 39.0,
+                "longitude": -77.0,
+                "hourly": {
+                    "time": [selected.strftime("%Y-%m-%dT%H:%M")],
+                    "temperature_2m": [72],
+                    "precipitation": [0],
+                    "rain": [0],
+                    "weather_code": [1],
+                    "wind_speed_10m": [7.5],
+                    "wind_direction_10m": [240],
+                    "wind_gusts_10m": [13.2],
+                    "surface_pressure": [1008],
+                },
+            }
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, params=None):
+            seen.append((url, dict(params or {})))
+            return Resp()
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
+    result = asyncio.run(appmod.fetch_launch_weather(39, -77, launch))
+    assert result["wind_gust_mph"] == 13.2
+    assert result["source"] == "Open-Meteo Best Match"
+    assert seen[0][1]["forecast_days"] == 16
+    assert seen[0][1]["past_days"] == 5
+    assert "start_date" not in seen[0][1]
+
+
 def test_frontend_main_module_passes_a_real_module_syntax_check():
     import shutil
     import subprocess
@@ -999,11 +1085,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.5.0'
+    assert h['version']=='3.6.0'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.5.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.6.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1061,3 +1147,21 @@ def test_v35_readiness_and_basic_advanced_operations_contract():
     assert "Promise.allSettled" in js and "flight_duration_s" in js
     assert 'html[data-operation-mode="basic"] .advanced-control' in css
     assert '.readiness-factor-grid' in css and '.readiness-table' in css
+
+
+def test_v36_live_tracking_and_basic_safety_contract():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    app_source=(base/'app.py').read_text(encoding='utf-8')
+    requirements=(base/'requirements.txt').read_text(encoding='utf-8')
+    for item in ['liveTrackingTab','liveControlStrip','runLivePredict','livePredictType','liveBurstAltitude','liveConnection']:
+        assert f'id="{item}"' in html
+    assert 'id="workspaceMode"' not in html
+    assert 'burst-altitude-control advanced-control' not in html
+    assert 'data-layer="sua" checked' in html and 'data-layer="tfr" checked' in html
+    assert "['sua','tfr'].includes(key)" in js
+    assert "setAppView('live')" in js and "setLivePredictionType" in js
+    assert 'APRSFI_API_KEY' not in app_source
+    assert 'APRSISClient' in app_source and 'rotate.aprs2.net' in app_source
+    assert 'aprslib==0.7.2' in requirements

@@ -8,7 +8,8 @@ import math
 import os
 import re
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import LineString, Point, shape
 from shapely.strtree import STRtree
 
+from aprs_is import APRSISClient
+
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DATA_DIR = ROOT / "data"
@@ -35,11 +38,14 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-APRSFI_API_KEY = os.getenv("APRSFI_API_KEY", "").strip()
 DEFAULT_CALLSIGNS = ("KC3SKW-8", "KC3SKW-9", "KC3SKW-10")
 MAX_LIVE_CALLSIGNS = 8
 
-BUILD_VERSION = "3.5.0"
+APRSIS_SERVER = os.getenv("APRSIS_SERVER", "rotate.aprs2.net").strip() or "rotate.aprs2.net"
+APRSIS_PORT = int(os.getenv("APRSIS_PORT", "14580"))
+APRSIS_LOGIN_CALLSIGN = os.getenv("APRSIS_LOGIN_CALLSIGN", "KC3SKW").strip() or "KC3SKW"
+
+BUILD_VERSION = "3.6.0"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -61,7 +67,19 @@ WEATHER_CACHE_TTL_S = 15 * 60.0
 _weather_cache: dict[tuple[float, float, str], tuple[float, dict[str, Any]]] = {}
 
 
-app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION)
+APRS_CLIENT = APRSISClient(APRSIS_SERVER, APRSIS_PORT, APRSIS_LOGIN_CALLSIGN)
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    await APRS_CLIENT.start(DEFAULT_CALLSIGNS)
+    try:
+        yield
+    finally:
+        await APRS_CLIENT.stop()
+
+
+app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION, lifespan=app_lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
 
 
@@ -765,28 +783,43 @@ async def fetch_launch_weather(
         return dict(cached[1])
 
     now = datetime.now(timezone.utc)
-    endpoints: list[tuple[str, str]]
-    if now - timedelta(days=5) <= dt <= now + timedelta(days=7):
-        endpoints = [(OPEN_METEO_FORECAST_URL, "Open-Meteo Forecast")]
+    endpoints: list[tuple[str, str, str | None]]
+    forecast_request = now - timedelta(days=5) <= dt <= now + timedelta(days=7)
+    if forecast_request:
+        # Open-Meteo defaults to seven calendar days beginning today, which can
+        # omit the requested hour on the seventh launch day. Ask explicitly for
+        # the full 16-day range and retry with GFS if the best-match blend has a
+        # gap at the selected site or hour.
+        endpoints = [
+            (OPEN_METEO_FORECAST_URL, "Open-Meteo Best Match", None),
+            (OPEN_METEO_FORECAST_URL, "Open-Meteo GFS", "gfs_seamless"),
+        ]
     elif dt >= datetime(2021, 1, 1, tzinfo=timezone.utc):
         endpoints = [
-            (OPEN_METEO_HISTORICAL_FORECAST_URL, "Open-Meteo Historical Forecast"),
-            (OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather"),
+            (OPEN_METEO_HISTORICAL_FORECAST_URL, "Open-Meteo Historical Forecast", None),
+            (OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather", None),
         ]
     else:
-        endpoints = [(OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather")]
+        endpoints = [(OPEN_METEO_ARCHIVE_URL, "Open-Meteo Historical Weather", None)]
 
     params = {
         "latitude": latitude, "longitude": longitude,
         "hourly": "temperature_2m,precipitation,rain,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure",
-        "start_date": dt.date().isoformat(), "end_date": dt.date().isoformat(),
         "timezone": "UTC", "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "precipitation_unit": "inch",
     }
+    if forecast_request:
+        params.update({"past_days": 5, "forecast_days": 16})
+    else:
+        params.update({"start_date": dt.date().isoformat(), "end_date": dt.date().isoformat()})
+
     async def load(active_client: httpx.AsyncClient) -> dict[str, Any]:
         last_error: Exception | None = None
-        for endpoint, source_name in endpoints:
+        for endpoint, source_name, model in endpoints:
             try:
-                response = await active_client.get(endpoint, params=params)
+                request_params = dict(params)
+                if model:
+                    request_params["models"] = model
+                response = await active_client.get(endpoint, params=request_params)
                 response.raise_for_status()
                 payload = response.json()
                 hourly = payload.get("hourly") or {}
@@ -955,73 +988,17 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
 
 
 # APRS live tracking ---------------------------------------------------------
-_live_history: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
-_aprs_cache: dict[tuple[str, ...], dict[str, Any]] = {}
-
-
 async def fetch_aprs(callsigns: str | list[str] | tuple[str, ...], force: bool = False) -> dict[str, Any]:
-    if not APRSFI_API_KEY:
-        raise ExternalServiceError("APRS.fi API key is not configured. Add APRSFI_API_KEY to predicts/modern/.env")
-
     requested = normalize_callsigns(callsigns)
-    cache_key = tuple(sorted(requested))
-    now = time.monotonic()
-    cached = _aprs_cache.get(cache_key)
-    if not force and cached is not None and now - cached["time"] < 20:
-        return cached["data"]
-
-    params = {
-        "name": ",".join(requested),
-        "what": "loc",
-        "apikey": APRSFI_API_KEY,
-        "format": "json",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=7.0)) as client:
-            response = await client.get("https://api.aprs.fi/api/get", params=params)
-            response.raise_for_status()
-            payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise ExternalServiceError(f"APRS.fi request failed: {exc}") from exc
-    if payload.get("result") != "ok":
-        raise ExternalServiceError(payload.get("description", "APRS.fi returned an error"))
-
-    requested_set = set(requested)
-    normalized: dict[str, dict[str, Any]] = {}
-    for entry in payload.get("entries", []):
-        name = str(entry.get("name") or "").upper()
-        if name not in requested_set or "lat" not in entry or "lng" not in entry:
-            continue
-        point = {
-            "callsign": name,
-            "latitude": float(entry["lat"]),
-            "longitude": float(entry["lng"]),
-            "altitude_m": float(entry["altitude"]) if entry.get("altitude") not in (None, "") else None,
-            "speed_kmh": float(entry["speed"]) if entry.get("speed") not in (None, "") else None,
-            "course_deg": float(entry["course"]) if entry.get("course") not in (None, "") else None,
-            "time": int(entry["time"]) if entry.get("time") else None,
-            "lasttime": int(entry["lasttime"]) if entry.get("lasttime") else None,
-            "comment": entry.get("comment"),
-            "path": entry.get("path"),
-        }
-        normalized[name] = point
-        history = _live_history[name]
-        if not history or history[-1].get("time") != point.get("time"):
-            history.append(point)
-
-    data = {
-        "source": "aprs.fi",
-        "source_url": "https://aprs.fi/",
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "requested_callsigns": requested,
-        "stations": normalized,
-    }
-    _aprs_cache[cache_key] = {"time": now, "data": data}
-    return data
+    if not APRS_CLIENT.running:
+        await APRS_CLIENT.start(requested)
+    else:
+        await APRS_CLIENT.track(requested)
+    return APRS_CLIENT.snapshot(requested)
 
 
 def infer_phase(callsign: str) -> str:
-    points = [p for p in _live_history[callsign] if p.get("altitude_m") is not None]
+    points = [p for p in APRS_CLIENT.history(callsign) if p.get("altitude_m") is not None]
     if len(points) < 2:
         return "unknown"
     a, b = points[-2], points[-1]
@@ -1914,7 +1891,8 @@ async def index():
 async def health():
     return {
         "status": "ok", "version": BUILD_VERSION, "tawhiri_url": TAWHIRI_API_URL,
-        "aprs_configured": bool(APRSFI_API_KEY), "legacy_data_directory": str(LEGACY_DATA),
+        "aprs_configured": True, "aprs_connected": APRS_CLIENT.connected,
+        "aprs_server": f"{APRSIS_SERVER}:{APRSIS_PORT}", "legacy_data_directory": str(LEGACY_DATA),
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
         "optimal_site": "active/all-site viability ranking with crossing-altitude airspace checks and preferred-site gold logic",
@@ -1928,7 +1906,9 @@ async def config():
     return {
         "callsigns": DEFAULT_CALLSIGNS, "default_callsigns": DEFAULT_CALLSIGNS,
         "max_live_callsigns": MAX_LIVE_CALLSIGNS, "prediction_modes": ["burst", "float"],
-        "aprs_configured": bool(APRSFI_API_KEY), "aprs_credit": {"name": "aprs.fi", "url": "https://aprs.fi/"},
+        "aprs_configured": True,
+        "aprs_connection": APRS_CLIENT.snapshot(DEFAULT_CALLSIGNS)["connection"],
+        "aprs_credit": {"name": "APRS-IS via UMD CHASE pattern", "url": "https://github.com/huonghuy/chasemapper-aprs"},
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
         "prediction_window_days": 7,
         "weather": True,
@@ -2245,13 +2225,14 @@ async def live(
             "fetched_at": data["fetched_at"],
             "station": station,
             "phase": infer_phase(name),
-            "history": list(_live_history[name]),
+            "history": data.get("history", {}).get(name, []),
         }
 
     return {
         **data,
         "phase": {name: infer_phase(name) for name in requested},
-        "history": {name: list(_live_history[name]) for name in requested},
+        "history": data.get("history", {name: APRS_CLIENT.history(name) for name in requested}),
+        "connection": data.get("connection", {}),
     }
 
 
@@ -2262,7 +2243,7 @@ async def live_predict(req: LivePredictRequest):
         data = await fetch_aprs([callsign], force=True)
         station = data["stations"].get(callsign)
         if not station:
-            raise ExternalServiceError(f"No APRS.fi position was found for {callsign}")
+            raise ExternalServiceError(f"No live APRS-IS packet has been received for {callsign} yet")
         return await build_live_prediction(req, callsign, station)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2285,7 +2266,7 @@ async def live_predict_batch(req: LivePredictBatchRequest):
     for callsign in callsigns:
         station = data["stations"].get(callsign)
         if not station:
-            errors[callsign] = f"No APRS.fi position was found for {callsign}"
+            errors[callsign] = f"No live APRS-IS packet has been received for {callsign} yet"
             continue
         jobs.append((callsign, build_live_prediction(req, callsign, station)))
 

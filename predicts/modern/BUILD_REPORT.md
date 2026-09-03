@@ -1,11 +1,15 @@
-# Build report — BPP Predicts v3.5.0
+# Build report — BPP Predicts v3.6.0
 
 This build is a responsive UI release on top of the v3.2.1 stability and performance fixes. The backend/frontend architecture and operational predictor are unchanged.
 
-## v3.5.0 fixes
+## v3.6.0 fixes
+- Moved live tracking into its own application tab and replaced the APRS.fi polling/key requirement with a persistent, read-only APRS-IS connection patterned after UMD CHASE/ChaseMapper.
+- Added APRS-IS callsign filtering, bounded packet trails, connection status, automatic reconnect, multi-callsign live prediction, and no-key defaults.
+- Fixed missing seventh-day readiness conditions by explicitly requesting a 16-day Open-Meteo response and retrying the same hour with GFS when necessary.
+- Kept calculated burst altitude visible in Basic mode and made SUA/TFR layers load, display, and remain toggleable there.
 - Added a Readiness tab that evaluates gusts, precipitation, forecast freshness, 3-D airspace intrusion, and landing risk without hiding the decision factors.
 - Added a site-comparison table sortable by safest site, lowest gusts, or shortest flight, with direct Ventusky links.
-- Added Operations Basic and Operations Advanced map modes. Basic keeps only launch selection, date/time, ascent/descent rates, and Run Predicts visible; Advanced restores every established control and layer.
+- Added Operations Basic and Operations Advanced map modes. Basic keeps launch selection, date/time, ascent/descent rates, calculated burst altitude, Run Predicts, SUA, and TFRs visible; Advanced restores every established control and layer.
 - Restored the original 11 launch locations and their addresses as packaged local data.
 - Restored the two original POIs and removed false missing-file warnings for both datasets.
 - Prefer packaged launch data over remote/cache/fallback variants, without a startup network fetch.
@@ -42,6 +46,6 @@ This build is a responsive UI release on top of the v3.2.1 stability and perform
 ## Regression checks
 - No native `<dialog>` tags remain in the page.
 - Launch Theme and Parameter Sweep are hidden until explicitly opened.
-- Info, Readiness, Predicts, and Inflation Calculator are mutually exclusive application views.
+- Info, Readiness, Predicts, Live Tracking, and Inflation Calculator are mutually exclusive application views.
 - Launch Weather changes map mode without opening a modal.
 - Past launch times are rejected while current/future predicts, 3D geofences, themes, optimal-site logic, live APRS, and inflation behavior remain present.
