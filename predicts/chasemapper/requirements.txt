@@ -1,0 +1,19 @@
+eccodes>=2.47.0
+eccodeslib
+cusfpredict>=0.3.0 ; python_version < "3.12"
+cusfpredict @ git+https://github.com/darksidelemm/cusf_predictor_wrapper.git ; python_version >= "3.12"
+flask
+flask-socketio
+lxml
+numpy
+python-dateutil
+pytz
+requests
+pyserial
+simple-websocket
+aprslib
+xarray
+cfgrib>=0.9.15.1
+fastkml
+defusedxml
+shapely>=2.1.2 ; python_version >= "3.12"

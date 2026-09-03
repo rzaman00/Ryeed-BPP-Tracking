@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-Write-Host "[BPP Predicts v3.6.0] Checking local Python environment..." -ForegroundColor Cyan
+Write-Host "[BPP Predicts v3.7.0] Checking local Python environment..." -ForegroundColor Cyan
 
 $venvPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 $launcher = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } elseif (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { throw 'Python 3.11+ was not found in PATH.' }
