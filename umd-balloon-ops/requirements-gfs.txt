@@ -1,0 +1,4 @@
+# Optional true offline weather-model prediction stack, matching ChaseMapper's CUSF wrapper approach.
+# A compiled CUSF predictor binary is also required; see README.md.
+eccodes
+cusfpredict>=0.3.0

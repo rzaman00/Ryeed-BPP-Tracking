@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UMD Balloon Ops</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div><strong>UMD BALLOON OPS</strong><span class="sub">Prediction + live chase console</span></div>
+  <div class="header-status"><span id="apiDot" class="dot"></span><span id="apiStatus">API</span><span id="clock"></span></div>
+</header>
+<main>
+  <aside class="sidebar">
+    <nav class="tabs">
+      <button class="tab active" data-tab="predict">Predict</button>
+      <button class="tab" data-tab="live">Live</button>
+      <button class="tab" data-tab="layers">Layers</button>
+    </nav>
+
+    <section id="tab-predict" class="tabpane active">
+      <div class="section-title">Flight profile</div>
+      <div class="segmented" id="profileButtons">
+        <button data-value="standard" class="active">Standard</button>
+        <button data-value="float">Float</button>
+        <button data-value="experimental_float">Exp Float</button>
+      </div>
+      <label>Provider<select id="provider"><option value="auto">Auto: Tawhiri → fallback</option><option value="tawhiri">Tawhiri only</option><option value="local_gfs">Local GFS / CUSF</option><option value="offline">Emergency vector</option></select></label>
+      <div class="grid2">
+        <label>Latitude<input id="lat" type="number" step="0.00001" value="39.00460"></label>
+        <label>Longitude<input id="lon" type="number" step="0.00001" value="-76.87550"></label>
+      </div>
+      <div class="grid2">
+        <label>Launch alt (m)<input id="launchAlt" type="number" value="60"></label>
+        <label>Ascent (m/s)<input id="ascent" type="number" step="0.1" value="5.5"></label>
+      </div>
+      <div id="standardFields" class="grid2">
+        <label>Burst alt (m)<input id="burst" type="number" value="28000"></label>
+        <label>Descent SL (m/s)<input id="descent" type="number" step="0.1" value="5.5"></label>
+      </div>
+      <div id="floatFields" class="hidden">
+        <div class="grid2">
+          <label>Float alt (m)<input id="floatAlt" type="number" value="22000"></label>
+          <label>Float minutes<input id="floatDuration" type="number" value="60"></label>
+        </div>
+        <label id="floatRiseWrap" class="hidden">Float ascent (m/s)<input id="floatRise" type="number" step="0.1" value="0.5"></label>
+      </div>
+      <details>
+        <summary>Offline fallback wind</summary>
+        <div class="grid2">
+          <label>Speed (m/s)<input id="windSpeed" type="number" value="12"></label>
+          <label>Bearing °<input id="windBearing" type="number" value="70"></label>
+        </div>
+      </details>
+      <div class="row controls-row">
+        <button id="predictBtn" class="primary">Run predict</button>
+        <button id="batchBtn">3-site batch</button>
+        <button id="ensembleBtn">7-member ensemble</button>
+        <button id="kmlBtn">KML</button>
+      </div>
+      <label class="check"><input id="autoPreview" type="checkbox"> Auto-preview after edits</label>
+      <p class="hint">Right-click the map to move the launch point and predict from there.</p>
+      <div id="predictMessage" class="message"></div>
+    </section>
+
+    <section id="tab-live" class="tabpane">
+      <div class="section-title">Live telemetry</div>
+      <label>Payload callsign<input id="callsign" value="UMD-DEMO"></label>
+      <div class="row controls-row">
+        <button id="demoBtn" class="primary">Start demo flight</button>
+        <button id="stopDemoBtn">Stop</button>
+      </div>
+      <div class="row controls-row">
+        <button id="watchBtn">Watch SondeHub</button>
+        <button id="replayBtn">Replay stored</button>
+        <button id="benchmarkBtn">Benchmark stored</button>
+      </div>
+      <label>Replay speed<input id="replaySpeed" type="number" min="0.1" max="500" value="50"></label>
+      <p class="hint">The demo advances flight-time 60× faster than real time, while the backend continuously recomputes state and landing predicts.</p>
+      <details>
+        <summary>SPOT shared feed</summary>
+        <label>Feed ID<input id="spotFeed" placeholder="SPOT public feed ID"></label>
+        <label>Feed password (optional)<input id="spotPassword" type="password"></label>
+        <button id="spotBtn">Start SPOT watch</button>
+      </details>
+      <details>
+        <summary>APRS-IS</summary>
+        <div class="grid2"><label>Login callsign<input id="aprsLogin" placeholder="W3EAX"></label><label>Passcode<input id="aprsPass" type="password"></label></div>
+        <button id="aprsBtn">Start APRS-IS watch</button>
+        <p class="hint">Uses rotate.aprs2.net and filters the payload callsign entered above.</p>
+      </details>
+      <details>
+        <summary>Iridium / BITS webhook</summary>
+        <p class="hint">POST normalized satellite fixes to <code>/api/webhook/iridium</code>. The README includes the JSON schema and an example.</p>
+      </details>
+      <div id="liveMessage" class="message"></div>
+    </section>
+
+    <section id="tab-layers" class="tabpane">
+      <div class="section-title">Map & operational layers</div>
+      <label class="check"><input id="classAirspace" type="checkbox" checked> FAA Class Airspace</label>
+      <label class="check"><input id="suaAirspace" type="checkbox"> FAA Special Use Airspace</label>
+      <label class="check"><input id="geofences" type="checkbox" checked> Mission geofences</label>
+      <a class="small-link" href="https://tfr.faa.gov/" target="_blank" rel="noopener">Check current FAA TFRs ↗</a>
+      <label class="check"><input id="trackLayer" type="checkbox" checked> Actual track</label>
+      <label class="check"><input id="predictLayer" type="checkbox" checked> Prediction</label>
+      <p class="hint">FAA layers are fetched by viewport and cached by the backend for five minutes. They degrade cleanly when offline.</p>
+      <div class="section-title space">Offline readiness</div>
+      <div class="readiness">
+        <div><span>Predictor fallback</span><b class="ok">READY</b></div>
+        <div><span>Flight recorder</span><b class="ok">READY</b></div>
+        <div><span>Replay engine</span><b class="ok">READY</b></div>
+        <div><span>Live Tawhiri</span><b id="tawhiriReady">CHECKING</b></div>
+        <div><span>Local GFS</span><b id="gfsReady">NOT CONFIGURED</b></div>
+        <div><span>Map/FAA network</span><b id="networkReady">CHECKING</b></div>
+      </div>
+    </section>
+  </aside>
+
+  <section class="workspace">
+    <div id="map"><div id="fallbackMap"><svg id="plot" viewBox="0 0 1000 650" preserveAspectRatio="none"></svg><div class="fallback-label">Offline schematic map • connect internet for geographic basemap</div></div></div>
+    <div class="legend"><span><i class="actual"></i>actual</span><span><i class="ascent"></i>ascent</span><span><i class="float"></i>float</span><span><i class="descent"></i>descent</span></div>
+
+    <div class="metrics">
+      <article><span>STATE</span><strong id="mState">PLANNING</strong><small id="mSource">no telemetry</small></article>
+      <article><span>ALTITUDE</span><strong id="mAlt">—</strong><small id="mRate">—</small></article>
+      <article><span>PREDICTED LANDING</span><strong id="mLanding">—</strong><small id="mEta">run a prediction</small></article>
+      <article><span>CONFIDENCE</span><strong id="mConfidence">—</strong><small id="mUncertainty">—</small></article>
+      <article><span>PREDICTOR</span><strong id="mProvider">—</strong><small id="mDataset">—</small></article>
+      <article><span>RECOVERY</span><strong id="mRecovery">—</strong><small id="mRecoveryDetail">landing analysis</small></article>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
