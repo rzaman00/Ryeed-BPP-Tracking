@@ -1,4 +1,16 @@
-# Build report — BPP Prediction Suite v3.8.0
+# Build report — BPP Prediction Suite v3.8.1
+
+- Fixed the optimized-status/map mismatch: optimal-site results now include and
+  display the exact best-ascent trajectory that produced each site color.
+- Replaced blanket 2-D airspace rejection with a configurable three-part rule:
+  no 3-D intrusion, at least 2,000 ft above the published ceiling, and at most
+  10 minutes over the footprint.
+- Expanded landing checks to every controlled B/C/D, SUA, and TFR polygon and
+  added a conservative 5 mi landing buffer, catching inside/near-airspace cases.
+- Added a 5 mi landing buffer around mapped large water while keeping rivers and
+  streams outside the large-water hazard dataset.
+- Added exact airspace overflight duration, vertical-clearance, nearest-airspace,
+  and nearest-large-water evidence to readiness and launch-site details.
 
 - Added four-source forecast-model comparison: Open-Meteo Best Match, NOAA GFS,
   ECMWF IFS, and DWD ICON.

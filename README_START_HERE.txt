@@ -1,4 +1,4 @@
-BPP Prediction Suite v3.8.0
+BPP Prediction Suite v3.8.1
 
 Requirements:
 - Python 3.11 or newer.
@@ -21,6 +21,12 @@ Prediction and safety features:
 - Winds Aloft plots model wind speed and direction by altitude.
 - FAA data refreshes automatically every 15 minutes and can be refreshed from
   the Layers panel.
+- Short airspace overflights are allowed only when the full crossing remains at
+  least 2,000 ft above the published ceiling and lasts no more than 10 minutes.
+- Predicted landings must remain at least 5 mi from B/C/D, SUA, TFR, and mapped
+  large-water hazards. Rivers and streams are not treated as large water.
+- Optimal-site colors now display the exact best-ascent trajectory that was
+  scored, so a green/gold result cannot be paired with a different visible path.
 
 This build intentionally contains prediction and launch-planning functionality
 only. Live tracking is being developed separately and has no runtime dependency

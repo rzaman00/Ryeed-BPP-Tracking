@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.8.0';
+const BUILD_VERSION = '3.8.1';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const state = {
   workspaceMode: 'predict',
@@ -475,7 +475,7 @@ function launchDetailsHtml({target,siteName,coordinates,weather,optimal,loading=
   const [lon,lat]=coordinates.map(Number);const props=target?.properties||{};const title=siteName||target?._label||props.name||'Launch site';
   const rain=weather&&(String(weather.rain)==='true'||weather.rain===true);const direction=Number(weather?.wind_direction_deg);const gust=gustCategory(weather?.wind_gust_mph);
   const weatherHtml=loading?'<p class="launch-popup-loading">Loading launch conditions…</p>':weather?`<div class="popup-weather-row"><b>${rain?'Rain':'Dry'}</b><span>Wind ${fmt(weather.wind_speed_mph,1)} mph</span><span class="gust-${gust.className}">${gust.label} gust · ${fmt(weather.wind_gust_mph,1)} mph</span></div><div class="launch-popup-grid"><span><small>Direction</small><b>${Number.isFinite(direction)?`${Math.round(direction)}° ${windDirectionLabel(direction)}`:'—'}</b></span><span><small>Temperature</small><b>${weather.temperature_f==null?'—':`${fmt(weather.temperature_f,0)}°F`}</b></span><span><small>Precipitation</small><b>${fmt(weather.precipitation_in,2)} in</b></span><span><small>Forecast time</small><b>${esc(localTime(weather.datetime))}</b></span></div><small class="weather-source">${esc(weather.source||'Weather forecast')}</small>`:'<p class="launch-popup-loading">Conditions are unavailable for this site.</p>';
-  const optimalHtml=optimal?`<div class="launch-optimal-detail"><b>${esc(optimal.site_status==='best'?'Preferred + viable':optimal.site_status==='viable'?'Viable':'No-go')}</b><span>Best ascent ${fmt(optimal.best_ascent_rate_ms,1)} m/s · Airspace ${fmt(miles(optimal.airspace_horizontal_intrusion_m??optimal.airspace_intrusion_m),2)} mi · Water ${fmt(miles(optimal.water_crossing_m),2)} mi</span></div>`:'';
+  const optimalHtml=optimal?`<div class="launch-optimal-detail"><b>${esc(optimal.site_status==='best'?'Preferred + viable':optimal.site_status==='viable'?'Viable':'No-go')}</b><span>Exact optimized path · ${fmt(optimal.best_ascent_rate_ms,1)} m/s</span><span>Airspace overflight ${optimal.airspace_overflight_s==null?'unavailable':`${fmt(optimal.airspace_overflight_s/60,1)} min`} · 3-D intrusion ${fmt(miles(optimal.airspace_3d_intrusion_m),2)} mi</span><span>Landing clearance: ${optimal.landing_airspace_distance_m==null?'airspace unavailable':`${fmt(miles(optimal.landing_airspace_distance_m),1)} mi from airspace`} · ${optimal.landing_large_water_distance_m==null?'water unavailable':`${fmt(miles(optimal.landing_large_water_distance_m),1)} mi from large water`}</span></div>`:'';
   return `<div class="launch-site-popup"><h3>${esc(title)}</h3><section><strong>Weather</strong>${weatherHtml}<a class="ventusky-link" href="${esc(ventuskyUrl(lat,lon))}" target="_blank" rel="noopener noreferrer">Open this launch site in Ventusky ↗</a></section><section><strong>Launch details</strong><div class="launch-detail-row"><small>Address</small><b>${esc(launchAddress(props))}</b></div><div class="launch-detail-row"><small>Coordinates</small><b>${lat.toFixed(5)}, ${lon.toFixed(5)}</b></div>${props.data_source?`<div class="launch-detail-row"><small>Location source</small><b>${esc(props.data_source)}</b></div>`:''}${optimalHtml}</section></div>`;
 }
 async function showLaunchSiteDetails({siteId,siteName,coordinates,weather=null,optimal=null}){
@@ -604,7 +604,7 @@ function refreshOptimalSiteHighlights(){
     const id=row.dataset.predictSiteRow||row.dataset.customPredictSiteRow;const result=byId.get(id);
     if(result){row.classList.add(siteStatusClass(result.site_status));const adjust=Math.abs(Number(result.best_ascent_rate_ms)-Number(result.requested_ascent_rate_ms));const reasons=(result.decision_reasons||[]).join('; ');row.title=`${result.site_name} · ${result.site_status} · best ascent ${fmt(result.best_ascent_rate_ms,1)} m/s${adjust?` (${adjust.toFixed(1)} m/s adjustment)`:''} · ${reasons}`;}
   });
-  const features=ranking.map(result=>({type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties:{...result}}));
+  const features=ranking.map(result=>{const {best_prediction,...properties}=result;return {type:'Feature',geometry:{type:'Point',coordinates:[Number(result.longitude),Number(result.latitude)]},properties};});
   map?.getSource?.('optimal-sites')?.setData({type:'FeatureCollection',features});
   const result=$('optimalResult');
   if(!result)return;
@@ -614,6 +614,19 @@ function refreshOptimalSiteHighlights(){
   else if(Number(analysis.viable_count||0)>0){result.textContent=`No preferred gold site · ${analysis.viable_count}/${ranking.length} viable sites are green${analysis.cache_hit?' · cached':''}`;}
   else{result.textContent=`No viable sites found · all evaluated sites are red/no-go${analysis.cache_hit?' · cached':''}`;}
   result.classList.remove('hidden');showSiteStatusLegend();
+}
+function applyOptimizedPredictions(analysis){
+  const ranking=analysis?.ranking||[];const optimized=ranking.filter(item=>item.best_prediction);
+  if(!optimized.length)return;
+  state.predictions.clear();
+  for(const item of optimized){
+    const entry=decoratePrediction(item.site_id,item.site_name,item.best_prediction);
+    entry.optimized_ascent_rate_ms=Number(item.best_ascent_rate_ms);entry.optimized_status=item.site_status;
+    state.predictions.set(item.site_id,entry);
+  }
+  const visible=optimized.find(item=>isSiteVisible(item.site_id));
+  state.activePredictionId=visible?.site_id||analysis.gold_site_id||analysis.optimal_site_id||optimized[0].site_id;
+  refreshPredictionSources();refreshMarkers();renderSummary();
 }
 function setOptimalButton(which,running,detail=''){
   const id=which==='all'?'findOptimalAll':'findOptimalCurrent';const stateId=which==='all'?'optimalAllState':'optimalCurrentState';
@@ -646,6 +659,14 @@ function optimalRequestBody(sites){
     mode:template.mode,launch_datetime:template.launch_datetime,ascent_rate_ms:template.ascent_rate_ms,descent_rate_ms:template.descent_rate_ms,
     burst_altitude_m:template.burst_altitude_m,float_altitude_m:template.float_altitude_m,float_ascent_rate_ms:template.float_ascent_rate_ms,float_duration_min:template.float_duration_min,
     airspace_layers:optimalAirspaceLayers(),ascent_rate_sweep_ms:optimalSweepRates(),
+    safety_rules:{
+      min_airspace_vertical_clearance_m:state.safetyRules.minAirspaceVerticalClearanceFt/3.28084,
+      max_airspace_overflight_s:state.safetyRules.maxAirspaceOverflightMin*60,
+      max_airspace_3d_intrusion_m:state.safetyRules.maxAirspaceCrossingM,
+      min_landing_airspace_distance_m:state.safetyRules.minLandingAirspaceDistanceMi*1609.344,
+      max_large_water_crossing_m:state.safetyRules.maxWaterCrossingM,
+      min_landing_large_water_distance_m:state.safetyRules.minLandingWaterDistanceMi*1609.344,
+    },
     automatic_burst:state.predictType==='burst'&&state.burstAltitudeMode==='auto',inflation:inflationRequestBody(),
   };
 }
@@ -658,7 +679,7 @@ async function findOptimalSite(scope='current'){
   const body=optimalRequestBody(sites);
   const rates=optimalSweepRates();setOptimalButton(scope,true,`${sites.length}×${rates.length}`);
   try{
-    const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;refreshOptimalSiteHighlights();
+    const result=await api('/api/optimal-site',{method:'POST',body:JSON.stringify(body)});result.scope=scope;state.optimalSiteAnalysis=result;applyOptimizedPredictions(result);refreshOptimalSiteHighlights();
     markReadinessStale();
     const gold=result.ranking?.find(x=>x.site_status==='best');const viable=result.viable_count||0;if(gold){toast(`Preferred viable site: ${gold.site_name} (gold). ${viable}/${result.ranking.length} viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}else{toast(`No preferred gold site. ${viable}/${result.ranking.length} sites viable · ${rates.length===1?'current rate only':'ascent sweep'}.${result.cache_hit?' Cached result.':''}`,false,7200);}
     if(result.warnings?.length)console.warn('Optimal-site airspace warnings',result.warnings);
@@ -673,7 +694,9 @@ function populateSafetyRulesForm(){
   $('ruleGustLowMax').value=r.gustLowMaxMph;$('ruleGustNoGoAbove').value=r.gustNoGoAboveMph;
   $('ruleRainCaution').value=r.precipitationCautionAboveIn;$('ruleRainNoGo').value=r.precipitationNoGoAboveIn;
   $('ruleForecastCaution').value=r.forecastCautionAfterMin;$('ruleForecastNoGo').value=r.forecastNoGoAfterMin;
-  $('ruleAirspaceMax').value=r.maxAirspaceCrossingM;$('ruleWaterMax').value=r.maxWaterCrossingM;
+  $('ruleAirspaceClearance').value=r.minAirspaceVerticalClearanceFt;$('ruleAirspaceOverflight').value=r.maxAirspaceOverflightMin;
+  $('ruleLandingAirspaceDistance').value=r.minLandingAirspaceDistanceMi;
+  $('ruleWaterMax').value=r.maxWaterCrossingM;$('ruleLandingWaterDistance').value=r.minLandingWaterDistanceMi;
   $('ruleHighRiskLanding').checked=r.highRiskLandingNoGo;
   renderSafetyRulesSummary();
 }
@@ -682,17 +705,19 @@ function safetyRulesFromForm(){
     gustLowMaxMph:$('ruleGustLowMax').value,gustNoGoAboveMph:$('ruleGustNoGoAbove').value,
     precipitationCautionAboveIn:$('ruleRainCaution').value,precipitationNoGoAboveIn:$('ruleRainNoGo').value,
     forecastCautionAfterMin:$('ruleForecastCaution').value,forecastNoGoAfterMin:$('ruleForecastNoGo').value,
-    maxAirspaceCrossingM:$('ruleAirspaceMax').value,maxWaterCrossingM:$('ruleWaterMax').value,
+    minAirspaceVerticalClearanceFt:$('ruleAirspaceClearance').value,maxAirspaceOverflightMin:$('ruleAirspaceOverflight').value,
+    maxAirspaceCrossingM:0,minLandingAirspaceDistanceMi:$('ruleLandingAirspaceDistance').value,
+    maxWaterCrossingM:$('ruleWaterMax').value,minLandingWaterDistanceMi:$('ruleLandingWaterDistance').value,
     highRiskLandingNoGo:$('ruleHighRiskLanding').checked,
   });
 }
 function renderSafetyRulesSummary(){
   const r=state.safetyRules;
-  if($('safetyRulesSummary'))$('safetyRulesSummary').textContent=`Low gusts ≤ ${fmt(r.gustLowMaxMph,1)} mph · NO-GO gusts > ${fmt(r.gustNoGoAboveMph,1)} mph · forecast caution after ${fmt(r.forecastCautionAfterMin)} min · NO-GO after ${fmt(r.forecastNoGoAfterMin)} min`;
-  if($('readinessPolicyText'))$('readinessPolicyText').textContent=`GO requires every enabled factor to clear. Gusts above ${fmt(r.gustLowMaxMph,1)} through ${fmt(r.gustNoGoAboveMph,1)} mph, precipitation above ${Number(r.precipitationCautionAboveIn).toFixed(2)} in, or a forecast over ${fmt(r.forecastCautionAfterMin)} minutes old produces CAUTION. Gusts over ${fmt(r.gustNoGoAboveMph,1)} mph, precipitation over ${Number(r.precipitationNoGoAboveIn).toFixed(2)} in, airspace over ${fmt(r.maxAirspaceCrossingM)} m, water over ${fmt(r.maxWaterCrossingM)} m, unavailable safety data, or a forecast over ${fmt(r.forecastNoGoAfterMin)} minutes old produces NO-GO.`;
-  if($('criteriaGoText'))$('criteriaGoText').textContent=`Gusts at or below ${fmt(r.gustLowMaxMph,1)} mph, precipitation within the GO limit, fresh forecast, operational airspace crossing at or below ${fmt(r.maxAirspaceCrossingM)} m, water crossing at or below ${fmt(r.maxWaterCrossingM)} m, and a permitted landing.`;
+  if($('safetyRulesSummary'))$('safetyRulesSummary').textContent=`Low gusts ≤ ${fmt(r.gustLowMaxMph,1)} mph · airspace ≥${fmt(r.minAirspaceVerticalClearanceFt)} ft above for ≤${fmt(r.maxAirspaceOverflightMin)} min · landing ≥${fmt(r.minLandingAirspaceDistanceMi,1)} mi from airspace and ≥${fmt(r.minLandingWaterDistanceMi,1)} mi from large water`;
+  if($('readinessPolicyText'))$('readinessPolicyText').textContent=`GO requires every factor to clear. A B/C/D, SUA, or TFR footprint may be crossed only at least ${fmt(r.minAirspaceVerticalClearanceFt)} ft above its ceiling for no more than ${fmt(r.maxAirspaceOverflightMin)} minutes. Landing must remain at least ${fmt(r.minLandingAirspaceDistanceMi,1)} mi from operational airspace and ${fmt(r.minLandingWaterDistanceMi,1)} mi from mapped large water. Rivers and streams are allowed.`;
+  if($('criteriaGoText'))$('criteriaGoText').textContent=`Gusts at or below ${fmt(r.gustLowMaxMph,1)} mph, dry/fresh forecast, no 3-D airspace intrusion, only brief high overflight, no large-water crossing, and landing clearances met.`;
   if($('criteriaCautionText'))$('criteriaCautionText').textContent=`Gusts above ${fmt(r.gustLowMaxMph,1)} through ${fmt(r.gustNoGoAboveMph,1)} mph, precipitation above ${Number(r.precipitationCautionAboveIn).toFixed(2)} in, or forecast data ${fmt(r.forecastCautionAfterMin)}–${fmt(r.forecastNoGoAfterMin)} minutes old.`;
-  if($('criteriaNoGoText'))$('criteriaNoGoText').textContent=`Gusts over ${fmt(r.gustNoGoAboveMph,1)} mph, precipitation over ${Number(r.precipitationNoGoAboveIn).toFixed(2)} in, missing data, an airspace/water crossing above its limit,${r.highRiskLandingNoGo?' a high-risk landing,':''} or forecast older than ${fmt(r.forecastNoGoAfterMin)} minutes.`;
+  if($('criteriaNoGoText'))$('criteriaNoGoText').textContent=`Gusts over ${fmt(r.gustNoGoAboveMph,1)} mph, precipitation over ${Number(r.precipitationNoGoAboveIn).toFixed(2)} in, missing data, low/long airspace overflight, large-water crossing, landing inside or within the configured airspace/water buffer, or forecast older than ${fmt(r.forecastNoGoAfterMin)} minutes.`;
 }
 function restoreSafetyRules(){
   try{state.safetyRules=normalizeSafetyRules(JSON.parse(localStorage.getItem(SAFETY_RULES_STORAGE_KEY)||'{}'));}
@@ -824,12 +849,12 @@ function renderReadiness(){
   body.innerHTML='';
   for(const row of sortReadinessRows(evaluated,state.readinessSort)){
     const w=row.weather,o=row.optimal,r=row.readiness;const landing=row.landing||o?.landing;const lat=Number(row.latitude),lon=Number(row.longitude);
-    const wind=finiteNumber(w?.wind_speed_mph),gust=finiteNumber(w?.wind_gust_mph),temp=finiteNumber(w?.temperature_f),intrusion=finiteNumber(o?.airspace_horizontal_intrusion_m??o?.airspace_intrusion_m),water=finiteNumber(o?.water_crossing_m),ascent=finiteNumber(o?.best_ascent_rate_ms);
+    const wind=finiteNumber(w?.wind_speed_mph),gust=finiteNumber(w?.wind_gust_mph),temp=finiteNumber(w?.temperature_f),intrusion=finiteNumber(o?.airspace_3d_intrusion_m??o?.airspace_intrusion_m),water=finiteNumber(o?.water_crossing_m),ascent=finiteNumber(o?.best_ascent_rate_ms);
     const direction=finiteNumber(w?.wind_direction_deg);const windText=Number.isFinite(wind)?`${wind.toFixed(1)} mph${Number.isFinite(direction)?` · ${Math.round(direction)}° ${windDirectionLabel(direction)}`:''}`:'Unavailable';
     const rainText=w?(w.rain||finiteNumber(w.precipitation_in)>0?`${Number(w.precipitation_in||0).toFixed(2)} in`:'Dry'):'Unavailable';
     const landingLat=finiteNumber(landing?.latitude),landingLon=finiteNumber(landing?.longitude);const landingText=Number.isFinite(landingLat)&&Number.isFinite(landingLon)?`${landingLat.toFixed(4)}, ${landingLon.toFixed(4)}`:'Unavailable';
-    const hazardParts=[];if(Number.isFinite(intrusion)&&intrusion>0)hazardParts.push(`${miles(intrusion).toFixed(2)} mi airspace`);if(Number.isFinite(water)&&water>0)hazardParts.push(`${miles(water).toFixed(2)} mi water`);if(!hazardParts.length)hazardParts.push(Number.isFinite(intrusion)&&Number.isFinite(water)?'Clear':'Unavailable');
-    const landingRisk=o?(o.landing_in_water?'Landing in mapped water':o.water_crossing_m>0?'Trajectory crosses Chesapeake Bay':o.landing_in_high_risk_airspace?'High-risk landing zone':'Safe landing area'):'Risk unavailable';
+    const hazardParts=[];if(Number.isFinite(intrusion)&&intrusion>0)hazardParts.push(`${miles(intrusion).toFixed(2)} mi 3-D intrusion`);if(Number(o?.airspace_clearance_violation_m)>0)hazardParts.push('insufficient vertical clearance');if(Number(o?.airspace_overflight_s)>state.safetyRules.maxAirspaceOverflightMin*60)hazardParts.push(`${(Number(o.airspace_overflight_s)/60).toFixed(1)} min overflight`);if(Number.isFinite(water)&&water>0)hazardParts.push(`${miles(water).toFixed(2)} mi large water`);if(!hazardParts.length)hazardParts.push(Number.isFinite(intrusion)&&Number.isFinite(water)?'Clear':'Unavailable');
+    const landingRisk=o?(o.landing_airspace_distance_m==null||o.landing_large_water_distance_m==null?'Landing clearance unavailable':o.landing_in_water?'Landing in mapped large water':o.landing_in_operational_airspace?'Landing inside operational airspace':Number(o.landing_airspace_distance_m)<state.safetyRules.minLandingAirspaceDistanceMi*1609.344?`Only ${miles(o.landing_airspace_distance_m).toFixed(1)} mi from airspace`:Number(o.landing_large_water_distance_m)<state.safetyRules.minLandingWaterDistanceMi*1609.344?`Only ${miles(o.landing_large_water_distance_m).toFixed(1)} mi from large water`:'Landing buffers clear'):'Risk unavailable';
     const tr=document.createElement('tr');tr.innerHTML=`<td><div class="readiness-site-name"><strong>${esc(row.site_name)}</strong><small>${esc(row.address)}</small></div></td><td><span class="site-readiness ${r.status}">${readinessLabel(r.status)}</span></td><td class="readiness-reason-cell">${esc(readinessReason(r))}</td><td>${esc(windText)}</td><td class="factor-cell ${r.factors.gusts.status}">${Number.isFinite(gust)?`${gust.toFixed(1)} mph`:'Unavailable'}</td><td class="factor-cell ${r.factors.precipitation.status}">${esc(rainText)}</td><td>${Number.isFinite(temp)?`${temp.toFixed(0)}°F`:'—'}</td><td class="factor-cell ${r.factors.freshness.status}">${r.forecast_age_min<1?'&lt;1 min':Number.isFinite(r.forecast_age_min)?`${Math.round(r.forecast_age_min)} min`:'Unavailable'}</td><td>${Number.isFinite(ascent)?`${ascent.toFixed(1)} m/s`:'—'}</td><td>${Number.isFinite(Number(row.flight_duration_s))?duration(row.flight_duration_s):'—'}</td><td class="landing-cell factor-cell ${r.factors.landing.status}">${esc(landingText)}<small>${esc(landingRisk)}</small></td><td class="factor-cell ${r.factors.airspace.status}">${esc(hazardParts.join(' · '))}</td><td><a class="table-ventusky" href="${esc(ventuskyUrl(lat,lon))}" target="_blank" rel="noopener noreferrer">Ventusky ↗</a></td>`;body.appendChild(tr);
   }
 }
@@ -851,7 +876,7 @@ async function refreshReadiness(){
     for(const item of weatherOutcome.value.results||[]){if(item.weather){weatherById.set(item.site_id,item.weather);state.weatherBySite.set(item.site_id,item.weather);}else if(item.error)errors.push(`${item.name||item.site_id} weather: ${item.error}`);}
   }else errors.push(`Weather: ${weatherOutcome.reason?.message||weatherOutcome.reason}`);
   if(optimalOutcome.status==='fulfilled'){
-    const result=optimalOutcome.value;result.scope='current';state.optimalSiteAnalysis=result;for(const item of result.ranking||[])optimalById.set(item.site_id,item);refreshOptimalSiteHighlights();
+    const result=optimalOutcome.value;result.scope='current';state.optimalSiteAnalysis=result;for(const item of result.ranking||[])optimalById.set(item.site_id,item);applyOptimizedPredictions(result);refreshOptimalSiteHighlights();
     for(const [siteId,message] of Object.entries(result.errors||{}))errors.push(`${siteId}: ${message}`);
   }else errors.push(`Airspace and landing analysis: ${optimalOutcome.reason?.message||optimalOutcome.reason}`);
   state.readinessRows=targets.map(target=>{
@@ -1068,7 +1093,7 @@ function renderSummary() {
   if(!state.activePredictionId||!entries.some(x=>x.site_id===state.activePredictionId))state.activePredictionId=entries[0].site_id;
   $('summaryTitle').textContent=entries.length===1?entries[0].site_name:`${entries.length} launch sites`;
   list.innerHTML='';
-  entries.forEach(pred=>{const s=pred.summary;const btn=document.createElement('button');btn.className=`summary-row ${pred.site_id===state.activePredictionId?'active':''}`;btn.type='button';btn.innerHTML=`<div><strong>${esc(pred.site_name)}</strong><small>${esc(localTime(s?.landing_time))} · ${fmt(miles(s?.ground_distance_m),1)} mi track</small></div><div class="landing-mini">⌖ ${s?.landing?.latitude?.toFixed(3)??'—'}, ${s?.landing?.longitude?.toFixed(3)??'—'}</div>`;btn.onclick=()=>{state.activePredictionId=pred.site_id;renderSummary();refreshPredictionSources();focusPrediction(pred.site_id);};list.appendChild(btn);});
+  entries.forEach(pred=>{const s=pred.summary;const optimized=Number.isFinite(pred.optimized_ascent_rate_ms)?` · best ${fmt(pred.optimized_ascent_rate_ms,1)} m/s`:'';const btn=document.createElement('button');btn.className=`summary-row ${pred.site_id===state.activePredictionId?'active':''}`;btn.type='button';btn.innerHTML=`<div><strong>${esc(pred.site_name)}</strong><small>${esc(localTime(s?.landing_time))} · ${fmt(miles(s?.ground_distance_m),1)} mi track${optimized}</small></div><div class="landing-mini">⌖ ${s?.landing?.latitude?.toFixed(3)??'—'}, ${s?.landing?.longitude?.toFixed(3)??'—'}</div>`;btn.onclick=()=>{state.activePredictionId=pred.site_id;renderSummary();refreshPredictionSources();focusPrediction(pred.site_id);};list.appendChild(btn);});
   const pred=state.predictions.get(state.activePredictionId);const s=pred?.summary;const active=$('activeSummary');
   if(!s){active.classList.add('hidden');return;}active.classList.remove('hidden');
   $('landingCoords').textContent=`${s.landing.latitude.toFixed(5)}°, ${s.landing.longitude.toFixed(5)}°`;$('landingTime').textContent=`Landing ${localTime(s.landing_time)}`;$('flightDuration').textContent=duration(s.flight_duration_s);$('maxAltitude').textContent=`${fmt(feet(s.max_altitude_m))} ft`;$('groundDistance').textContent=`${fmt(miles(s.ground_distance_m),1)} mi`;$('modelDataset').textContent=s.historical?'Historical':(s.dataset?String(s.dataset).slice(0,16):'Latest');$('modelDataset').title=s.historical_source||s.dataset||'Latest model';

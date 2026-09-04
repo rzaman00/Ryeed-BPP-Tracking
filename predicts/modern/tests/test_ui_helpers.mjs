@@ -17,14 +17,19 @@ assert.equal(formatSweepParameter('altitude',28000),'Burst/Float altitude: 28,00
 const clearWeather={wind_gust_mph:4,wind_speed_mph:2,precipitation_in:0,rain:false};
 const mediumWeather={wind_gust_mph:12,wind_speed_mph:6,precipitation_in:.01,rain:true};
 const highWeather={wind_gust_mph:18,wind_speed_mph:10,precipitation_in:0,rain:false};
-const safeOptimal={airspace_intrusion_m:0,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:false};
-const conflictOptimal={airspace_intrusion_m:800,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:true};
+const safeOptimal={airspace_intrusion_m:0,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:false,landing_airspace_distance_m:20000,landing_large_water_distance_m:30000};
+const conflictOptimal={airspace_intrusion_m:800,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:true,landing_airspace_distance_m:0,landing_large_water_distance_m:30000};
+const briefHighOverflight={airspace_3d_intrusion_m:0,airspace_horizontal_intrusion_m:5000,airspace_clearance_violation_m:0,airspace_overflight_s:240,airspace_min_vertical_clearance_m:1000,water_crossing_m:0,landing_in_water:false,landing_in_operational_airspace:false,landing_airspace_distance_m:20000,landing_large_water_distance_m:30000};
+const nearAirspaceLanding={...briefHighOverflight,landing_airspace_distance_m:2000};
 assert.equal(evaluateReadiness(clearWeather,safeOptimal,10).status,'go');
 assert.equal(evaluateReadiness(mediumWeather,safeOptimal,90).status,'caution');
 assert.equal(evaluateReadiness(highWeather,conflictOptimal,10).status,'no-go');
 assert.equal(evaluateReadiness(null,safeOptimal,10).factors.gusts.status,'no-go');
 assert.equal(evaluateReadiness({wind_gust_mph:null,rain:false},safeOptimal,10).factors.gusts.status,'no-go');
-assert.equal(evaluateReadiness(clearWeather,{airspace_intrusion_m:null,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:false},10).factors.airspace.status,'no-go');
+assert.equal(evaluateReadiness(clearWeather,{airspace_intrusion_m:null,water_crossing_m:0,landing_in_water:false,landing_in_high_risk_airspace:false,landing_airspace_distance_m:20000,landing_large_water_distance_m:30000},10).factors.airspace.status,'no-go');
+assert.equal(evaluateReadiness(clearWeather,briefHighOverflight,10).status,'go');
+assert.equal(evaluateReadiness(clearWeather,{...briefHighOverflight,airspace_overflight_s:900},10).factors.airspace.status,'no-go');
+assert.equal(evaluateReadiness(clearWeather,nearAirspaceLanding,10).factors.landing.status,'no-go');
 
 const customRules=normalizeSafetyRules({gustLowMaxMph:8,gustNoGoAboveMph:20,forecastCautionAfterMin:120});
 assert.equal(customRules.gustLowMaxMph,8);

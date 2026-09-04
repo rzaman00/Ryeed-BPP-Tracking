@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.8.0" rel="stylesheet" />
+  <link href="static/styles.css?v=3.8.1" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -24,7 +24,7 @@
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.8.0</span>
+      <span class="build-badge" id="buildBadge">v3.8.1</span>
       <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
@@ -70,8 +70,8 @@
     <section id="siteStatusLegend" class="site-status-legend advanced-map-control hidden" aria-label="Launch site status legend">
       <strong>Launch Site Status</strong>
       <span><i class="status-gold"></i>Gold — preferred + viable (Clear Spring / Hancock)</span>
-      <span><i class="status-green"></i>Green — clear of operational airspace and water</span>
-      <span><i class="status-red"></i>Red — airspace/water crossing or landing no-go</span>
+      <span><i class="status-green"></i>Green — altitude, duration, water, and landing buffers clear</span>
+      <span><i class="status-red"></i>Red — airspace/water exposure or unsafe landing</span>
     </section>
     <div id="map" aria-label="Balloon prediction map"></div>
 
@@ -238,15 +238,18 @@
         </article>
         <article class="safety-rule-card">
           <div><span class="rule-number">04</span><h2>Airspace</h2></div>
-          <p>Applies to B/C/D, special-use airspace, and active TFR footprints along the prediction.</p>
-          <label><span>Maximum allowed crossing (m)</span><input id="ruleAirspaceMax" type="number" min="0" step="100" value="0"></label>
-          <small>The BPP default is zero: any operational-airspace crossing is NO-GO.</small>
+          <p>A brief footprint crossing is allowed only when the balloon stays high above the published ceiling.</p>
+          <label><span>Minimum clearance above ceiling (ft)</span><input id="ruleAirspaceClearance" type="number" min="0" step="100" value="2000"></label>
+          <label><span>Maximum overflight time (minutes)</span><input id="ruleAirspaceOverflight" type="number" min="0" step="1" value="10"></label>
+          <label><span>Minimum landing distance (mi)</span><input id="ruleLandingAirspaceDistance" type="number" min="0" step="0.5" value="5"></label>
+          <small>Any 3-D intrusion or landing inside B/C/D, SUA, or a TFR is always NO-GO.</small>
         </article>
         <article class="safety-rule-card">
           <div><span class="rule-number">05</span><h2>Water and landing</h2></div>
-          <p>Controls Chesapeake/water-path exposure and restricted landing-zone handling.</p>
-          <label><span>Maximum allowed water crossing (m)</span><input id="ruleWaterMax" type="number" min="0" step="100" value="0"></label>
-          <label class="rule-check"><input id="ruleHighRiskLanding" type="checkbox" checked><span>High-risk landing zones are NO-GO</span></label>
+          <p>Applies to mapped large-water hazards such as the Chesapeake Bay. Rivers and streams are not treated as large-water hazards.</p>
+          <label><span>Maximum large-water crossing (m)</span><input id="ruleWaterMax" type="number" min="0" step="100" value="0"></label>
+          <label><span>Minimum landing distance from large water (mi)</span><input id="ruleLandingWaterDistance" type="number" min="0" step="0.5" value="5"></label>
+          <label class="rule-check"><input id="ruleHighRiskLanding" type="checkbox" checked disabled><span>Landing in operational airspace or large water is always NO-GO</span></label>
         </article>
         <article class="safety-rule-card policy-locks">
           <div><span class="rule-number">06</span><h2>Always enforced</h2></div>
@@ -287,15 +290,15 @@
           <article id="readinessFactorFreshness" class="readiness-factor pending"><span>Forecast age</span><strong>—</strong></article>
           <article id="readinessFactorLanding" class="readiness-factor pending"><span>Landing risk</span><strong>—</strong></article>
         </div>
-        <p class="readiness-policy" id="readinessPolicyText">GO requires all five factors to clear. Medium gusts (over 5–15 mph), precipitation, or a forecast over 60 minutes old produces CAUTION. Gusts over 15 mph, airspace intrusion, a high-risk landing, unavailable safety data, or a forecast over three hours old produces NO-GO.</p>
+        <p class="readiness-policy" id="readinessPolicyText">GO requires all factors to clear. Brief airspace overflight is allowed only with at least 2,000 ft of vertical clearance; landings must remain at least 5 mi from operational airspace and mapped large water.</p>
       </section>
 
       <section class="readiness-criteria-card" aria-labelledby="criteriaHeading">
         <div class="criteria-heading"><div><span class="summary-kicker">Transparent decision rules</span><h2 id="criteriaHeading">Why a site is chosen</h2></div><p>The safest site is the highest-status site with the fewest hazards. Ties use lower airspace/water exposure, lower gusts, and the smallest ascent-rate adjustment.</p></div>
         <div class="criteria-grid">
-          <article class="go"><strong>GO</strong><p id="criteriaGoText">Gusts 0–5 mph, dry, fresh forecast, no B/C/D, SUA, or TFR path crossing, no Chesapeake Bay crossing, and a safe landing.</p></article>
+          <article class="go"><strong>GO</strong><p id="criteriaGoText">Gusts 0–5 mph, dry, fresh forecast, no 3-D intrusion, only brief high overflight, no large-water crossing, and all landing buffers clear.</p></article>
           <article class="caution"><strong>CAUTION</strong><p id="criteriaCautionText">Gusts over 5 through 15 mph, precipitation, or forecast data 60–180 minutes old. Every caution is named in the table.</p></article>
-          <article class="no-go"><strong>NO-GO</strong><p id="criteriaNoGoText">Gusts over 15 mph, missing safety data, controlled/SUA/TFR crossing, Chesapeake Bay crossing, high-risk landing, or forecast older than 180 minutes.</p></article>
+          <article class="no-go"><strong>NO-GO</strong><p id="criteriaNoGoText">Gusts over 15 mph, missing data, low or long airspace overflight, large-water crossing, landing inside/near airspace or large water, or stale weather.</p></article>
         </div>
       </section>
 
@@ -387,6 +390,6 @@
   </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.8.0"></script>
+  <script type="module" src="static/app.js?v=3.8.1"></script>
 </body>
 </html>

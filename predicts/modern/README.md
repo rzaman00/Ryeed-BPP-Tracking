@@ -1,4 +1,4 @@
-# BPP Predicts v3.8.0
+# BPP Predicts v3.8.1
 
 Standalone UMD Balloon Payload Program launch planning, prediction, weather,
 airspace, inflation, and readiness application.
@@ -31,10 +31,16 @@ freshness in the Layers panel. Operators can also request an immediate refresh.
 - Basic mode keeps launch site, date/time, ascent/descent rates, automatic burst
   altitude, Run Predicts, B/C/D, SUA, and TFR controls visible.
 - Optimal search evaluates the complete ±0.5/±1.0 m/s sweep by default.
-- Operational-airspace and Chesapeake/water crossings are conservative NO-GO
-  conditions under the default policy.
+- Operational-airspace footprints may be crossed only when the complete crossing
+  stays at least 2,000 ft above the published ceiling and lasts at most 10 minutes.
+- Any 3-D B/C/D/SUA/TFR intrusion is NO-GO. Predicted landings must stay at least
+  5 mi from those operational airspaces.
+- The large-water layer covers the Chesapeake Bay rather than rivers/streams.
+  Large-water crossings and landings within 5 mi are NO-GO by default.
+- Optimal search returns and displays the exact best-ascent trajectory used to
+  assign each green, gold, or red site status.
 - `BPP Safety Rules` stores configurable gust, precipitation, forecast-age,
   airspace, water, and landing thresholds in the local browser.
 - Missing required safety evidence always produces NO-GO.
 
-Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.8.0`.
+Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.8.1`.

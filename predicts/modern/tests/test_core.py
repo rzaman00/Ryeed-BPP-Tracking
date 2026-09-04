@@ -346,7 +346,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.8.0"
+    assert h["version"] == "3.8.1"
     assert h["airspace"] == "FAA live services with disk cache"
     assert h["launch_weather"] == "Open-Meteo multi-model forecast and winds aloft"
     assert h["faa_refresh"] == "automatic every 15 minutes with disk cache"
@@ -595,7 +595,7 @@ def test_ui_has_two_optimal_buttons_three_status_colors_and_no_blue():
     for status in ["site-best","site-viable","site-nogo"]: assert status in css
     assert "site-preferred" not in css
     assert "status-blue" not in css and "Blue —" not in html
-    for color in ["Gold — preferred + viable (Clear Spring / Hancock)","Green — clear of operational airspace and water","Red — airspace/water crossing or landing no-go"]: assert color in html
+    for color in ["Gold — preferred + viable (Clear Spring / Hancock)","Green — altitude, duration, water, and landing buffers clear","Red — airspace/water exposure or unsafe landing"]: assert color in html
 
 
 def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch):
@@ -619,25 +619,45 @@ def test_optimal_site_can_become_viable_with_ascent_rate_adjustment(monkeypatch)
     assert site["best_ascent_rate_ms"] == 5.0
     assert site["site_status"] == "viable"
     assert site["flight_duration_s"] == 3600
+    assert site["best_prediction"]["features"][0]["geometry"]["coordinates"][0][1] == 39.2
     assert result["gold_site_id"] is None
     assert site["tested_ascent_rates_ms"] == [5.0,5.5] or set(site["tested_ascent_rates_ms"]) == {5.0,5.5}
 
 
 
-def test_v37_operational_rule_flags_footprint_but_keeps_3d_detail():
+def test_v381_brief_high_airspace_overflight_is_allowed():
     import app as appmod
     airspace={"controlled":{"type":"FeatureCollection","features":[{
         "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":3000,"LOWER_UOM":"FT","UPPER_UOM":"FT"},
         "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-76.9,38.9],[-76.9,39.1],[-77.2,39.1],[-77.2,38.9]]]}
     }]}}
     idx=appmod.build_airspace_spatial_indexes(airspace)
-    high={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,5000],[-76.8,39.0,5000]]}}]}
+    high={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,5000],[-76.8,39.0,5000]]},"properties":{"timestamps":["2026-09-04T12:00:00Z","2026-09-04T12:05:00Z"]}}]}
     low={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,300],[-76.8,39.0,300]]}}]}
     high_score=appmod.score_prediction_against_airspace(high,idx)
-    assert high_score["clear_of_airspace"] is False
+    assert high_score["clear_of_airspace"] is True
     assert high_score["airspace_horizontal_intrusion_m"] > 10000
     assert high_score["airspace_3d_intrusion_m"] == 0
-    assert appmod.score_prediction_against_airspace(low,idx)["airspace_intrusion_m"] > 10000
+    assert high_score["airspace_overflight_s"] < 600
+    assert appmod.score_prediction_against_airspace(low,idx)["clear_of_airspace"] is False
+
+
+def test_v381_long_or_low_airspace_overflight_is_no_go():
+    import app as appmod
+    airspace={"controlled":{"type":"FeatureCollection","features":[{
+        "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":3000,"LOWER_UOM":"FT","UPPER_UOM":"FT"},
+        "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-76.9,38.9],[-76.9,39.1],[-77.2,39.1],[-77.2,38.9]]]}
+    }]}}
+    idx=appmod.build_airspace_spatial_indexes(airspace)
+    long_high={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,5000],[-76.8,39.0,5000]]},"properties":{"timestamps":["2026-09-04T12:00:00Z","2026-09-04T12:30:00Z"]}}]}
+    too_close={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,1300],[-76.8,39.0,1300]]},"properties":{"timestamps":["2026-09-04T12:00:00Z","2026-09-04T12:05:00Z"]}}]}
+    long_score=appmod.score_prediction_against_airspace(long_high,idx)
+    close_score=appmod.score_prediction_against_airspace(too_close,idx)
+    assert long_score["airspace_3d_intrusion_m"] == 0
+    assert long_score["airspace_overflight_s"] > 600
+    assert long_score["clear_of_airspace"] is False
+    assert close_score["airspace_clearance_violation_m"] > 0
+    assert close_score["clear_of_airspace"] is False
 
 
 def test_v29_distance_cannot_make_winchester_gold():
@@ -726,24 +746,70 @@ def test_v29_identical_optimal_request_uses_short_cache(monkeypatch):
     assert len(calls)==1
 
 
-def test_v37_crossing_altitude_is_reported_without_weakening_no_go_rule():
+def test_v381_crossing_altitude_controls_operational_result():
     import app as appmod
     airspace={"controlled":{"type":"FeatureCollection","features":[{
         "type":"Feature","properties":{"LOWER_VAL":0,"UPPER_VAL":10000,"LOWER_UOM":"FT","UPPER_UOM":"FT","LOCAL_TYPE":"CLASS_D"},
         "geometry":{"type":"Polygon","coordinates":[[[-77.2,38.9],[-77.0,38.9],[-77.0,39.1],[-77.2,39.1],[-77.2,38.9]]]}
     }]}}
     idx=appmod.build_airspace_spatial_indexes(airspace)
-    # The line crosses the polygon horizontally at ~20,000 ft MSL: operational
-    # no-go, while the separate 3-D metric correctly reports no altitude intrusion.
-    above={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,6100],[-76.9,39.0,6100]]}}]}
+    # The line crosses at ~20,000 ft MSL, more than 2,000 ft above the ceiling,
+    # and spends under ten minutes inside the footprint.
+    above={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,6100],[-76.9,39.0,6100]]},"properties":{"timestamps":["2026-09-04T12:00:00Z","2026-09-04T12:08:00Z"]}}]}
     # Same 2-D crossing at ~5,000 ft MSL: conflict.
     inside={"features":[{"geometry":{"type":"LineString","coordinates":[[-77.3,39.0,1524],[-76.9,39.0,1524]]}}]}
     above_score=appmod.score_prediction_against_airspace(above,idx)
     inside_score=appmod.score_prediction_against_airspace(inside,idx)
-    assert above_score["clear_of_airspace"] is False
+    assert above_score["clear_of_airspace"] is True
     assert above_score["airspace_3d_intrusion_m"] == 0
     assert inside_score["clear_of_airspace"] is False
     assert inside_score["airspace_3d_intrusion_m"] > 0
+
+
+def test_v381_landing_inside_or_within_five_miles_of_any_controlled_airspace_is_unsafe():
+    import app as appmod
+    collections={"controlled":{"type":"FeatureCollection","features":[{
+        "type":"Feature","properties":{"LOCAL_TYPE":"CLASS_D","NAME":"Example Class D"},
+        "geometry":{"type":"Polygon","coordinates":[[[-77.2,39.0],[-77.0,39.0],[-77.0,39.2],[-77.2,39.2],[-77.2,39.0]]]}
+    }]},"class_e":{"type":"FeatureCollection","features":[]}}
+    index=appmod._landing_airspace_index(collections)
+    inside=appmod.landing_airspace_clearance({"summary":{"landing":{"longitude":-77.1,"latitude":39.1}}},index)
+    nearby=appmod.landing_airspace_clearance({"summary":{"landing":{"longitude":-77.0,"latitude":39.24}}},index)
+    far=appmod.landing_airspace_clearance({"summary":{"landing":{"longitude":-77.0,"latitude":39.4}}},index)
+    assert inside["landing_in_operational_airspace"] is True
+    assert inside["landing_airspace_distance_m"] == 0
+    assert 0 < nearby["landing_airspace_distance_m"] < 8046.72
+    assert far["landing_airspace_distance_m"] > 8046.72
+
+
+def test_v381_optimal_endpoint_rejects_landing_near_airspace(monkeypatch):
+    import asyncio
+
+    import app as appmod
+    appmod._OPTIMAL_RESULT_CACHE.clear()
+    controlled={"type":"FeatureCollection","features":[{
+        "type":"Feature","properties":{"LOCAL_TYPE":"CLASS_D","NAME":"Example Class D","LOWER_VAL":0,"UPPER_VAL":3000},
+        "geometry":{"type":"Polygon","coordinates":[[[-77.2,39.0],[-77.0,39.0],[-77.0,39.2],[-77.2,39.2],[-77.2,39.0]]]}
+    }]}
+    async def fake_airspace(layer,force=False):
+        return controlled,None,"test"
+    async def fake_run(req,meta=None):
+        return {
+            "features":[{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-77.5,39.25,5000],[-77.22,39.2,0]]},"properties":{"stage":"descent","timestamps":["2026-09-04T12:00:00Z","2026-09-04T12:30:00Z"]}}],
+            "summary":{"landing":{"longitude":-77.22,"latitude":39.2},"ground_distance_m":25000,"flight_duration_s":1800},
+        }
+    monkeypatch.setattr(appmod,"operational_airspace",fake_airspace)
+    monkeypatch.setattr(appmod,"run_burst",fake_run)
+    req=appmod.OptimalSiteRequest(
+        launch_sites=[appmod.OptimalSiteCandidate(site_id="near",name="Near",latitude=39.25,longitude=-77.5)],
+        launch_datetime=datetime.now(timezone.utc),airspace_layers=["controlled"],ascent_rate_sweep_ms=[5.5],
+    )
+    result=asyncio.run(appmod.optimal_site(req));site=result["ranking"][0]
+    assert site["landing_in_operational_airspace"] is False
+    assert site["landing_airspace_distance_m"] < 8046.72
+    assert site["landing_airspace_safe"] is False
+    assert site["site_status"] == "no-go"
+    assert any("landing is only" in reason for reason in site["decision_reasons"])
 
 
 def test_v37_chesapeake_crossing_is_no_go_even_with_land_landing():
@@ -758,6 +824,20 @@ def test_v37_chesapeake_crossing_is_no_go_even_with_land_landing():
     assert score["landing_in_water"] is False
     assert score["clear_of_water"] is False
     assert "Chesapeake Bay main stem" in score["water_hazards"]
+
+
+def test_v381_water_policy_uses_large_hazards_and_reports_landing_distance():
+    import app as appmod
+    index=appmod._load_water_hazard_index()
+    western_route={
+        "features":[{"geometry":{"type":"LineString","coordinates":[[-78.2,39.6,1000],[-77.8,39.7,1000]]}}],
+        "summary":{"landing":{"longitude":-77.8,"latitude":39.7}},
+    }
+    score=appmod.score_prediction_against_water(western_route,index)
+    assert score["water_crossing_m"] == 0
+    assert score["landing_in_water"] is False
+    assert score["landing_large_water_distance_m"] > 8046.72
+    assert score["nearest_water_hazard"] == "Chesapeake Bay main stem"
 
 
 def test_v29_nonviable_preferred_site_is_red_and_no_blue(monkeypatch):
@@ -1070,11 +1150,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.8.0'
+    assert h['version']=='3.8.1'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.8.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.8.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1160,6 +1240,22 @@ def test_v38_forecast_faa_safety_and_prediction_only_contract():
     assert not (repo/'predicts'/'chasemapper').exists()
     for name in ['START_LIVE_CHASE.bat','START_LIVE_CHASE.ps1','START_LIVE_CHASE.sh']:
         assert not (repo/name).exists()
+
+
+def test_v381_safety_clearances_and_optimized_path_contract():
+    base=Path(__file__).resolve().parents[1]
+    html=(base/'static'/'index.html').read_text(encoding='utf-8')
+    js=(base/'static'/'app.js').read_text(encoding='utf-8')
+    helper=(base/'static'/'ui_helpers.mjs').read_text(encoding='utf-8')
+    for item in ['ruleAirspaceClearance','ruleAirspaceOverflight','ruleLandingAirspaceDistance','ruleLandingWaterDistance']:
+        assert f'id="{item}"' in html
+    assert 'Rivers and streams are not treated as large-water hazards' in html
+    assert 'min_airspace_vertical_clearance_m' in js
+    assert 'min_landing_airspace_distance_m' in js
+    assert 'applyOptimizedPredictions(result)' in js
+    assert 'item.best_prediction' in js
+    assert 'minAirspaceVerticalClearanceFt: 2000' in helper
+    assert 'minLandingAirspaceDistanceMi: 5' in helper
 
 
 def test_v371_startup_checks_only_modern_predicts_dependencies():

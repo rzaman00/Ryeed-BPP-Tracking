@@ -20,10 +20,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import LineString, Point, shape
+from shapely.ops import nearest_points
 from shapely.strtree import STRtree
+from starlette.middleware.gzip import GZipMiddleware
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -37,7 +38,7 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-BUILD_VERSION = "3.8.0"
+BUILD_VERSION = "3.8.1"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -280,6 +281,21 @@ class OptimalSiteCandidate(BaseModel):
     preferred: bool = False
 
 
+class OperationalSafetyRules(BaseModel):
+    """Geometry rules used by the optimal-site engine.
+
+    These are BPP operating defaults, not a substitute for an operator's FAA
+    authorization or launch-day review.  Distances are meters and time is seconds.
+    """
+
+    min_airspace_vertical_clearance_m: float = Field(default=609.6, ge=0, le=20_000)
+    max_airspace_overflight_s: float = Field(default=600.0, ge=0, le=24 * 3600)
+    max_airspace_3d_intrusion_m: float = Field(default=0.0, ge=0, le=0)
+    min_landing_airspace_distance_m: float = Field(default=8046.72, ge=0, le=500_000)
+    max_large_water_crossing_m: float = Field(default=0.0, ge=0, le=1_000_000)
+    min_landing_large_water_distance_m: float = Field(default=8046.72, ge=0, le=500_000)
+
+
 class OptimalSiteRequest(BaseModel):
     launch_sites: list[OptimalSiteCandidate] = Field(min_length=1, max_length=50)
     mode: Literal["burst", "float"] = "burst"
@@ -298,6 +314,7 @@ class OptimalSiteRequest(BaseModel):
     ascent_rate_sweep_ms: list[float] = Field(default_factory=list, max_length=9)
     automatic_burst: bool = False
     inflation: InflationRequest | None = None
+    safety_rules: OperationalSafetyRules = Field(default_factory=OperationalSafetyRules)
 
     @model_validator(mode="after")
     def validate_sweep_rates(self):
@@ -1833,6 +1850,34 @@ def _queried_records(index: dict[str, Any], geometry: Any) -> list[dict[str, Any
         return out
 
 
+def _nearest_index_record(index: dict[str, Any], point: Point) -> tuple[float, dict[str, Any]] | None:
+    """Return geodesic point-to-polygon distance and its indexed record."""
+    tree = index.get("tree")
+    records = index.get("records") or []
+    if tree is None or not records:
+        return None
+    try:
+        raw_index = tree.nearest(point)
+        record = records[int(raw_index)]
+    except Exception:
+        # Shapely 1.x can return the geometry rather than its integer index.
+        try:
+            nearest_geometry = tree.nearest(point)
+            geometries = index.get("geometries") or []
+            record = records[geometries.index(nearest_geometry)]
+        except Exception:
+            return None
+    try:
+        boundary_point = nearest_points(point, record["geometry"])[1]
+        distance_m = haversine_m(
+            (float(point.y), float(point.x)),
+            (float(boundary_point.y), float(boundary_point.x)),
+        )
+    except Exception:
+        return None
+    return max(0.0, distance_m), record
+
+
 def _geometry_haversine_length_m(geometry: Any) -> float:
     if geometry is None or geometry.is_empty:
         return 0.0
@@ -1854,7 +1899,8 @@ def _prediction_segments(prediction: dict[str, Any]) -> list[dict[str, Any]]:
         if geometry.get("type") != "LineString":
             continue
         coords = geometry.get("coordinates") or []
-        for a, b in zip(coords, coords[1:]):
+        timestamps = (feature.get("properties") or {}).get("timestamps") or []
+        for index, (a, b) in enumerate(zip(coords, coords[1:])):
             try:
                 lon1, lat1 = float(a[0]), float(a[1]); alt1 = float(a[2]) if len(a) > 2 else 0.0
                 lon2, lat2 = float(b[0]), float(b[1]); alt2 = float(b[2]) if len(b) > 2 else alt1
@@ -1862,7 +1908,13 @@ def _prediction_segments(prediction: dict[str, Any]) -> list[dict[str, Any]]:
             except (TypeError, ValueError, IndexError):
                 continue
             if not line.is_empty and line.length > 0:
-                segments.append({"line": line, "alt1_m": alt1, "alt2_m": alt2})
+                duration_s: float | None = None
+                if index + 1 < len(timestamps):
+                    try:
+                        duration_s = max(0.0, (parse_iso(timestamps[index + 1]) - parse_iso(timestamps[index])).total_seconds())
+                    except (TypeError, ValueError):
+                        duration_s = None
+                segments.append({"line": line, "alt1_m": alt1, "alt2_m": alt2, "duration_s": duration_s})
     return segments
 
 
@@ -1917,15 +1969,24 @@ def score_prediction_against_water(prediction: dict[str, Any], index: dict[str, 
     total = 0.0 if total < 25.0 else total
     landing = (prediction.get("summary") or {}).get("landing") or {}
     landing_in_water = False
+    landing_water_distance_m: float | None = None
+    nearest_water_hazard: str | None = None
     try:
         landing_point = Point(float(landing["longitude"]), float(landing["latitude"]))
         landing_in_water = bool(_queried_geometries(index, landing_point))
+        nearest = _nearest_index_record(index, landing_point)
+        if nearest is not None:
+            landing_water_distance_m = nearest[0]
+            properties = nearest[1].get("feature", {}).get("properties") or {}
+            nearest_water_hazard = str(properties.get("name") or "mapped large water")
     except (KeyError, TypeError, ValueError):
         pass
     return {
         "water_crossing_m": total,
         "water_hazards": sorted(hazard_names),
         "landing_in_water": landing_in_water,
+        "landing_large_water_distance_m": landing_water_distance_m,
+        "nearest_water_hazard": nearest_water_hazard,
         "clear_of_water": total == 0.0 and not landing_in_water,
     }
 
@@ -1991,6 +2052,43 @@ def _segment_record_intrusion_m(segment: dict[str, Any], record: dict[str, Any])
     return total
 
 
+def _segment_record_clearance_violation_m(
+    segment: dict[str, Any], record: dict[str, Any], required_clearance_m: float
+) -> tuple[float, float | None]:
+    """Length that is not safely above an airspace ceiling and minimum margin.
+
+    A footprint crossing is accepted only when the complete crossing is above a
+    finite ceiling by the configured margin.  This intentionally does not treat a
+    low pass beneath a shelf as equivalent to the high-altitude HAB overflight the
+    BPP rule is designed to permit.
+    """
+    line = segment["line"]
+    try:
+        intersection = line.intersection(record["geometry"])
+    except Exception:
+        return 0.0, None
+    total = 0.0
+    minimum_margin: float | None = None
+    for part in _line_parts(intersection):
+        coords = list(part.coords)
+        if len(coords) < 2:
+            continue
+        p0, p1 = Point(coords[0]), Point(coords[-1])
+        try:
+            t0 = float(line.project(p0, normalized=True)); t1 = float(line.project(p1, normalized=True))
+        except Exception:
+            t0, t1 = 0.0, 1.0
+        a0 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t0
+        a1 = segment["alt1_m"] + (segment["alt2_m"] - segment["alt1_m"]) * t1
+        if math.isfinite(record["upper_m"]):
+            margin = min(a0, a1) - record["upper_m"]
+            minimum_margin = margin if minimum_margin is None else min(minimum_margin, margin)
+            if margin >= required_clearance_m:
+                continue
+        total += _geometry_haversine_length_m(part)
+    return total, minimum_margin
+
+
 def _segment_intrusion_m(segment: dict[str, Any], index: dict[str, Any]) -> float:
     records = _queried_records(index, segment["line"])
     if not records:
@@ -2002,89 +2100,131 @@ def _segment_intrusion_m(segment: dict[str, Any], index: dict[str, Any]) -> floa
     return min(total, _geometry_haversine_length_m(segment["line"]))
 
 
-def score_prediction_against_airspace(prediction: dict[str, Any], indexes: dict[str, Any]) -> dict[str, Any]:
-    """Score both operational horizontal crossings and true 3-D intrusion.
-
-    BPP launch-site selection is intentionally conservative: a trajectory that
-    crosses the footprint of B/C/D, SUA, or TFR airspace is a no-go even when the
-    predicted balloon altitude is above that feature.  The altitude-aware result is
-    retained separately for technical review instead of silently making a crossing
-    appear clear.
-    """
+def score_prediction_against_airspace(
+    prediction: dict[str, Any], indexes: dict[str, Any], safety_rules: OperationalSafetyRules | None = None
+) -> dict[str, Any]:
+    """Score 3-D conflicts, vertical clearance, and footprint exposure time."""
+    rules = safety_rules or OperationalSafetyRules()
     segments = _prediction_segments(prediction)
     if not segments:
         raise ValueError("Prediction contained no trajectory to score against airspace")
     horizontal_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
     vertical_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
+    clearance_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
     horizontal_total = 0.0
     vertical_total = 0.0
+    clearance_total = 0.0
+    overflight_s = 0.0
+    overflight_timing_available = True
+    minimum_vertical_clearance_m: float | None = None
     for segment in segments:
         line = segment["line"]
         segment_length = _geometry_haversine_length_m(line)
-        horizontal_total += min(
-            sum(_horizontal_overlap_m(line, record["geometry"]) for record in _queried_records(indexes.get("all", {}), line)),
-            segment_length,
-        )
+        all_records = _queried_records(indexes.get("all", {}), line)
+        segment_horizontal = min(sum(_horizontal_overlap_m(line, record["geometry"]) for record in all_records), segment_length)
+        horizontal_total += segment_horizontal
+        if segment_horizontal > 0:
+            if segment.get("duration_s") is None:
+                overflight_timing_available = False
+            elif segment_length > 0:
+                overflight_s += min(float(segment["duration_s"]), float(segment["duration_s"]) * segment_horizontal / segment_length)
         vertical_total += _segment_intrusion_m(segment, indexes.get("all", {}))
+        segment_clearance = 0.0
+        for record in all_records:
+            violation, margin = _segment_record_clearance_violation_m(
+                segment, record, rules.min_airspace_vertical_clearance_m
+            )
+            segment_clearance += violation
+            if margin is not None:
+                minimum_vertical_clearance_m = margin if minimum_vertical_clearance_m is None else min(minimum_vertical_clearance_m, margin)
+        clearance_total += min(segment_clearance, segment_length)
         for layer, index in indexes.get("layers", {}).items():
-            horizontal_by_layer[layer] += min(
-                sum(_horizontal_overlap_m(line, record["geometry"]) for record in _queried_records(index, line)),
+            records = _queried_records(index, line)
+            horizontal_by_layer[layer] += min(sum(_horizontal_overlap_m(line, record["geometry"]) for record in records), segment_length)
+            vertical_by_layer[layer] += _segment_intrusion_m(segment, index)
+            clearance_by_layer[layer] += min(
+                sum(_segment_record_clearance_violation_m(segment, record, rules.min_airspace_vertical_clearance_m)[0] for record in records),
                 segment_length,
             )
-            vertical_by_layer[layer] += _segment_intrusion_m(segment, index)
     # Ignore tiny GIS boundary slivers/rounding artifacts.
     horizontal_total = 0.0 if horizontal_total < 25.0 else horizontal_total
     vertical_total = 0.0 if vertical_total < 25.0 else vertical_total
+    clearance_total = 0.0 if clearance_total < 25.0 else clearance_total
     horizontal_by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in horizontal_by_layer.items()}
     vertical_by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in vertical_by_layer.items()}
-    conflicts = [layer for layer, value in horizontal_by_layer.items() if value > 0]
+    clearance_by_layer = {layer: (0.0 if value < 25.0 else value) for layer, value in clearance_by_layer.items()}
+    overflight_layers = [layer for layer, value in horizontal_by_layer.items() if value > 0]
+    conflicts = [layer for layer, value in clearance_by_layer.items() if value > 0]
+    timing_clear = horizontal_total == 0 or (overflight_timing_available and overflight_s <= rules.max_airspace_overflight_s)
+    clear = (
+        vertical_total <= rules.max_airspace_3d_intrusion_m
+        and clearance_total == 0.0
+        and timing_clear
+    )
     return {
-        # Keep the historical fields mapped to the operational horizontal rule so
-        # older frontends cannot accidentally classify a crossing as viable.
-        "airspace_intrusion_m": horizontal_total,
-        "airspace_intrusion_by_layer_m": horizontal_by_layer,
+        "airspace_intrusion_m": vertical_total,
+        "airspace_intrusion_by_layer_m": vertical_by_layer,
         "airspace_horizontal_intrusion_m": horizontal_total,
         "airspace_horizontal_intrusion_by_layer_m": horizontal_by_layer,
         "airspace_3d_intrusion_m": vertical_total,
         "airspace_3d_intrusion_by_layer_m": vertical_by_layer,
+        "airspace_clearance_violation_m": clearance_total,
+        "airspace_clearance_violation_by_layer_m": clearance_by_layer,
+        "airspace_overflight_s": overflight_s if overflight_timing_available or horizontal_total == 0 else None,
+        "airspace_overflight_timing_available": overflight_timing_available or horizontal_total == 0,
+        "airspace_min_vertical_clearance_m": minimum_vertical_clearance_m,
+        "required_airspace_vertical_clearance_m": rules.min_airspace_vertical_clearance_m,
+        "maximum_airspace_overflight_s": rules.max_airspace_overflight_s,
+        "overflight_layers": overflight_layers,
         "conflict_layers": conflicts,
-        "clear_of_airspace": horizontal_total == 0.0,
+        "clear_of_airspace": clear,
     }
 
 
-def _high_risk_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Build the landing no-go index used by the site classifier.
-
-    Restricted (R) controlled airspace is rendered red in the map. Special-use
-    airspace and active TFRs are also treated conservatively as landing no-go zones.
-    """
-    geometries: list[Any] = []
+def _landing_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Index every B/C/D, SUA, and TFR polygon used for landing clearance."""
+    records: list[dict[str, Any]] = []
     for layer, collection in collections.items():
+        if layer not in {"controlled", "sua", "tfr"}:
+            continue
         for feature in collection.get("features", []) if isinstance(collection, dict) else []:
-            props = feature.get("properties") or {}
-            high_risk = layer in {"sua", "tfr"}
-            if layer == "controlled":
-                local_type = str(props.get("LOCAL_TYPE") or props.get("local_type") or "").upper()
-                high_risk = local_type in {"R", "RESTRICTED"}
-            if not high_risk:
-                continue
             geometry = feature.get("geometry") or {}
             try:
                 geom = shape(geometry)
             except Exception:
                 continue
             if not geom.is_empty and geom.geom_type in ("Polygon", "MultiPolygon"):
-                geometries.append(geom)
-    return {"geometries": geometries, "tree": STRtree(geometries) if geometries else None}
+                records.append({"geometry": geom, "feature": feature, "layer": layer})
+    geometries = [record["geometry"] for record in records]
+    return {"records": records, "geometries": geometries, "tree": STRtree(geometries) if geometries else None}
 
 
-def landing_in_high_risk_airspace(prediction: dict[str, Any], index: dict[str, Any]) -> bool:
+def _high_risk_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Backward-compatible name for the full operational landing index."""
+    return _landing_airspace_index(collections)
+
+
+def landing_airspace_clearance(prediction: dict[str, Any], index: dict[str, Any]) -> dict[str, Any]:
     landing = (prediction.get("summary") or {}).get("landing") or {}
     try:
         point = Point(float(landing["longitude"]), float(landing["latitude"]))
     except (KeyError, TypeError, ValueError):
-        return False
-    return bool(_queried_geometries(index, point))
+        return {"landing_airspace_distance_m": None, "landing_in_operational_airspace": False, "nearest_landing_airspace": None}
+    nearest = _nearest_index_record(index, point)
+    if nearest is None:
+        return {"landing_airspace_distance_m": None, "landing_in_operational_airspace": False, "nearest_landing_airspace": None}
+    distance_m, record = nearest
+    props = record.get("feature", {}).get("properties") or {}
+    name = next((str(props.get(key)) for key in ("NAME", "NAME_TXT", "LOCAL_TYPE", "TYPE_CODE", "IDENT") if props.get(key)), record.get("layer", "airspace"))
+    return {
+        "landing_airspace_distance_m": distance_m,
+        "landing_in_operational_airspace": distance_m <= 1.0,
+        "nearest_landing_airspace": {"layer": record.get("layer"), "name": name},
+    }
+
+
+def landing_in_high_risk_airspace(prediction: dict[str, Any], index: dict[str, Any]) -> bool:
+    return bool(landing_airspace_clearance(prediction, index)["landing_in_operational_airspace"])
 
 
 def default_ascent_rate_sweep(current: float) -> list[float]:
@@ -2124,8 +2264,8 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
         return (1, 0, adjustment, 0.0, 0.0)
     return (
         2,
-        1 if candidate.get("landing_in_high_risk_airspace") or candidate.get("landing_in_water") else 0,
-        float(candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
+        1 if candidate.get("landing_airspace_safe") is False or candidate.get("landing_large_water_safe") is False or candidate.get("landing_in_water") else 0,
+        float(candidate.get("airspace_clearance_violation_m") or candidate.get("best_airspace_intrusion_m") or candidate.get("airspace_intrusion_m") or 0.0),
         float(candidate.get("water_crossing_m") or 0.0),
         adjustment,
     )
@@ -2305,14 +2445,7 @@ async def predict(req: PredictRequest):
 
 @app.post("/api/optimal-site")
 async def optimal_site(req: OptimalSiteRequest):
-    """Evaluate supplied sites using conservative operational safety rules.
-
-    A site is viable when a tested ascent-rate scenario has no horizontal crossing
-    of requested airspace, no Chesapeake/water crossing, and a safe landing area.
-    Gold is reserved exclusively for a viable preferred operational site: Clear
-    Spring first, otherwise Hancock. Other viable sites are green; conflicts are red.
-    Geographic distance to UMD (or anywhere else) is never part of the ranking.
-    """
+    """Evaluate sites with altitude-aware overflight and landing-clearance rules."""
     validate_launch_window(req.launch_datetime)
     cache_key = req.model_dump_json()
     cached_result = _OPTIMAL_RESULT_CACHE.get(cache_key)
@@ -2339,7 +2472,7 @@ async def optimal_site(req: OptimalSiteRequest):
         raise HTTPException(status_code=503, detail="No FAA airspace data is available, so an optimal site cannot be ranked safely.")
 
     indexes = build_airspace_spatial_indexes(collections)
-    high_risk_index = _high_risk_airspace_index(collections)
+    landing_airspace_index = _landing_airspace_index(collections)
     try:
         water_index = _load_water_hazard_index()
     except RuntimeError as exc:
@@ -2371,20 +2504,40 @@ async def optimal_site(req: OptimalSiteRequest):
         )
         async with semaphore:
             prediction = await (run_float(pred_req) if req.mode == "float" else run_burst(pred_req))
-        score = score_prediction_against_airspace(prediction, indexes)
+        score = score_prediction_against_airspace(prediction, indexes, req.safety_rules)
         water_score = score_prediction_against_water(prediction, water_index)
-        high_risk_landing = landing_in_high_risk_airspace(prediction, high_risk_index)
+        landing_airspace = landing_airspace_clearance(prediction, landing_airspace_index)
+        landing_airspace_distance = landing_airspace["landing_airspace_distance_m"]
+        landing_water_distance = water_score["landing_large_water_distance_m"]
+        landing_airspace_safe = (
+            landing_airspace_distance is not None
+            and landing_airspace_distance >= req.safety_rules.min_landing_airspace_distance_m
+        )
+        landing_water_safe = (
+            landing_water_distance is not None
+            and landing_water_distance >= req.safety_rules.min_landing_large_water_distance_m
+        )
+        water_safe = (
+            water_score["water_crossing_m"] <= req.safety_rules.max_large_water_crossing_m
+            and not water_score["landing_in_water"]
+            and landing_water_safe
+        )
         summary = prediction.get("summary") or {}
         return {
+            "prediction": prediction,
             "ascent_rate_ms": rate,
             "burst_altitude_m": burst_altitude,
             **score,
             **water_score,
-            "landing_in_high_risk_airspace": high_risk_landing,
+            **landing_airspace,
+            "landing_in_high_risk_airspace": landing_airspace["landing_in_operational_airspace"],
+            "landing_airspace_safe": landing_airspace_safe,
+            "landing_large_water_safe": landing_water_safe,
+            "clear_of_water": water_safe,
             "landing": summary.get("landing"),
             "flight_duration_s": summary.get("flight_duration_s"),
             "ground_distance_m": summary.get("ground_distance_m"),
-            "clear_and_safe": bool(score["clear_of_airspace"] and water_score["clear_of_water"] and not high_risk_landing),
+            "clear_and_safe": bool(score["clear_of_airspace"] and landing_airspace_safe and water_safe),
         }
 
     async def evaluate(site: OptimalSiteCandidate) -> dict[str, Any]:
@@ -2406,8 +2559,10 @@ async def optimal_site(req: OptimalSiteRequest):
             raise ExternalServiceError(f"No ascent-rate scenario succeeded: {scenario_errors}")
         scenarios.sort(key=lambda x: (
             0 if x["clear_and_safe"] else 1,
-            0 if not x["landing_in_high_risk_airspace"] and not x["landing_in_water"] else 1,
-            float(x["airspace_horizontal_intrusion_m"]),
+            0 if x["landing_airspace_safe"] and x["landing_large_water_safe"] and not x["landing_in_water"] else 1,
+            float(x["airspace_clearance_violation_m"]),
+            float(x["airspace_3d_intrusion_m"]),
+            float(x["airspace_overflight_s"] if x["airspace_overflight_s"] is not None else math.inf),
             float(x["water_crossing_m"]),
             abs(float(x["ascent_rate_ms"]) - req.ascent_rate_ms),
         ))
@@ -2431,16 +2586,32 @@ async def optimal_site(req: OptimalSiteRequest):
             "airspace_horizontal_intrusion_by_layer_m": best["airspace_horizontal_intrusion_by_layer_m"],
             "airspace_3d_intrusion_m": best["airspace_3d_intrusion_m"],
             "airspace_3d_intrusion_by_layer_m": best["airspace_3d_intrusion_by_layer_m"],
+            "airspace_clearance_violation_m": best["airspace_clearance_violation_m"],
+            "airspace_clearance_violation_by_layer_m": best["airspace_clearance_violation_by_layer_m"],
+            "airspace_overflight_s": best["airspace_overflight_s"],
+            "airspace_overflight_timing_available": best["airspace_overflight_timing_available"],
+            "airspace_min_vertical_clearance_m": best["airspace_min_vertical_clearance_m"],
+            "required_airspace_vertical_clearance_m": best["required_airspace_vertical_clearance_m"],
+            "maximum_airspace_overflight_s": best["maximum_airspace_overflight_s"],
+            "overflight_layers": best["overflight_layers"],
             "conflict_layers": best["conflict_layers"],
             "clear_of_airspace": best["clear_of_airspace"],
             "landing_in_high_risk_airspace": best["landing_in_high_risk_airspace"],
+            "landing_in_operational_airspace": best["landing_in_operational_airspace"],
+            "landing_airspace_distance_m": best["landing_airspace_distance_m"],
+            "nearest_landing_airspace": best["nearest_landing_airspace"],
+            "landing_airspace_safe": best["landing_airspace_safe"],
             "water_crossing_m": best["water_crossing_m"],
             "water_hazards": best["water_hazards"],
             "landing_in_water": best["landing_in_water"],
+            "landing_large_water_distance_m": best["landing_large_water_distance_m"],
+            "nearest_water_hazard": best["nearest_water_hazard"],
+            "landing_large_water_safe": best["landing_large_water_safe"],
             "clear_of_water": best["clear_of_water"],
             "landing": best["landing"],
             "flight_duration_s": best["flight_duration_s"],
             "ground_distance_m": best["ground_distance_m"],
+            "best_prediction": best["prediction"],
             "tested_ascent_rates_ms": [x["ascent_rate_ms"] for x in scenarios],
             "scenario_errors": scenario_errors,
             "decision_reasons": [],
@@ -2470,16 +2641,32 @@ async def optimal_site(req: OptimalSiteRequest):
         else:
             candidate["site_status"] = "no-go"
         reasons: list[str] = []
-        if candidate["conflict_layers"]:
+        if candidate["airspace_3d_intrusion_m"] > req.safety_rules.max_airspace_3d_intrusion_m:
             labels = ", ".join(str(layer).upper() for layer in candidate["conflict_layers"])
-            reasons.append(f"NO-GO: trajectory crosses {labels} airspace")
-        if candidate["water_crossing_m"] > 0:
+            reasons.append(f"NO-GO: trajectory enters {labels or 'operational'} airspace vertically")
+        elif candidate["airspace_clearance_violation_m"] > 0:
+            labels = ", ".join(str(layer).upper() for layer in candidate["conflict_layers"])
+            reasons.append(f"NO-GO: {labels or 'operational'} overflight is below the required {req.safety_rules.min_airspace_vertical_clearance_m * 3.28084:.0f} ft clearance")
+        elif candidate["airspace_horizontal_intrusion_m"] > 0:
+            if candidate["airspace_overflight_s"] is None:
+                reasons.append("NO-GO: airspace overflight duration is unavailable")
+            elif candidate["airspace_overflight_s"] > req.safety_rules.max_airspace_overflight_s:
+                reasons.append(f"NO-GO: airspace overflight lasts {candidate['airspace_overflight_s'] / 60:.1f} min (limit {req.safety_rules.max_airspace_overflight_s / 60:g} min)")
+            else:
+                reasons.append(f"GO: brief high-altitude airspace overflight ({candidate['airspace_overflight_s'] / 60:.1f} min)")
+        if candidate["water_crossing_m"] > req.safety_rules.max_large_water_crossing_m:
             hazards = ", ".join(candidate["water_hazards"]) or "mapped water"
             reasons.append(f"NO-GO: trajectory crosses {hazards} ({candidate['water_crossing_m'] / 1609.344:.1f} mi)")
         if candidate["landing_in_water"]:
             reasons.append("NO-GO: predicted landing is in mapped water")
-        if candidate["landing_in_high_risk_airspace"]:
-            reasons.append("NO-GO: predicted landing is inside restricted/SUA/TFR airspace")
+        if candidate["landing_in_operational_airspace"]:
+            reasons.append("NO-GO: predicted landing is inside B/C/D, SUA, or TFR airspace")
+        elif not candidate["landing_airspace_safe"]:
+            distance = candidate["landing_airspace_distance_m"]
+            reasons.append("NO-GO: landing-to-airspace distance is unavailable" if distance is None else f"NO-GO: landing is only {distance / 1609.344:.1f} mi from operational airspace")
+        if not candidate["landing_large_water_safe"]:
+            distance = candidate["landing_large_water_distance_m"]
+            reasons.append("NO-GO: landing-to-large-water distance is unavailable" if distance is None else f"NO-GO: landing is only {distance / 1609.344:.1f} mi from large water")
         if candidate["viable"]:
             reasons.append("GO: airspace, water, and landing-risk checks are clear")
         reasons.append(f"Best tested ascent rate: {candidate['best_ascent_rate_ms']:g} m/s")
@@ -2509,11 +2696,12 @@ async def optimal_site(req: OptimalSiteRequest):
         "airspace_sources": sources,
         "warnings": warnings,
         "selection_criteria": {
-            "go": "No B/C/D, SUA, or TFR footprint crossing; no mapped-water crossing; landing outside water and high-risk airspace.",
+            "go": f"Any B/C/D, SUA, or TFR overflight is at least {req.safety_rules.min_airspace_vertical_clearance_m * 3.28084:.0f} ft above its ceiling and at most {req.safety_rules.max_airspace_overflight_s / 60:g} min; no large-water crossing; landing at least {req.safety_rules.min_landing_airspace_distance_m / 1609.344:g} mi from operational airspace and {req.safety_rules.min_landing_large_water_distance_m / 1609.344:g} mi from large water.",
             "caution": "Readiness weather rules may downgrade a geometrically viable site for medium gusts, precipitation, or forecast age.",
-            "no_go": "Any operational-airspace crossing, mapped-water crossing, water landing, or high-risk landing.",
+            "no_go": "Vertical airspace intrusion, low/long overflight, large-water crossing, or a landing inside/too close to operational airspace or large water.",
             "ranking": "Viability first, then preferred BPP sites, then the smallest ascent-rate adjustment. Distance is not used.",
         },
+        "safety_rules": req.safety_rules.model_dump(),
         "cache_hit": False,
     }
     _OPTIMAL_RESULT_CACHE[cache_key] = (time.monotonic(), response_payload)
