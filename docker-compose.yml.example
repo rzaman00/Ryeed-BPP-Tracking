@@ -4,7 +4,9 @@
 
 services:
   bpp-predicts:
-    image: ghcr.io/rzaman00/ryeed-bpp-tracking:latest
+    # `:finished` tracks the finished branch. `:latest` only exists once a
+    # v* release tag has been pushed.
+    image: ghcr.io/rzaman00/ryeed-bpp-tracking:finished
     # To build locally instead of pulling, comment out `image:` above and
     # uncomment these two lines:
     #build:
