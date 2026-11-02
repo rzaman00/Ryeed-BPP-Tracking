@@ -58,4 +58,5 @@ jobs:
       - name: Inspect container image
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
