@@ -1,8 +1,8 @@
-# Integration — v3.8.1
+# Integration — v3.8.2
 
 1. Install Python 3.11 or newer.
 2. Run `START_BPP_PREDICTS.bat` from the repository root.
-3. Confirm `3.8.1` at `http://127.0.0.1:8000/api/health`.
+3. Confirm `3.8.2` at `http://127.0.0.1:8000/api/health`.
 4. Run a prediction, open Forecast Models & Winds Aloft, and confirm at least
    two available forecast models for the selected site and launch hour.
 5. Open BPP Safety Rules, save a test threshold, and confirm Readiness reports
@@ -15,3 +15,7 @@
    can remain viable.
 
 No Docker, APRS, ChaseMapper, live-tracking API key, or second server is required.
+
+
+9. Select Manual burst altitude and enter 100000 in Feet (ft); confirm 30480 m.
+10. Choose Launch Theme → Emo, refresh, and confirm the theme remains selected.

@@ -11,7 +11,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-BUILD_VERSION = "3.8.1"
+BUILD_VERSION = "3.8.2"
 HOST = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")
 PREFERRED_PORT = int(os.getenv("BPP_PREDICTS_PORT", "8000"))
 ROOT = Path(__file__).resolve().parent
@@ -190,3 +190,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

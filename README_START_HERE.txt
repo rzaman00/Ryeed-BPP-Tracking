@@ -1,4 +1,4 @@
-BPP Prediction Suite v3.8.1
+BPP Prediction Suite v3.8.2
 
 Requirements:
 - Python 3.11 or newer.
@@ -9,6 +9,11 @@ Start on Windows:
 1. Double-click START_BPP_PREDICTS.bat.
 2. The application opens at http://127.0.0.1:8000/.
 3. Keep the launcher window open while using Predicts.
+
+New in 3.8.2 (based on finished):
+- Manual burst altitude can be entered in feet or meters; both fields stay synced.
+- Launch Theme now includes Emo.
+- See UPDATE_3_8_2.md for details.
 
 Prediction and safety features:
 - Burst and Float predictions with automatic inflation-based burst altitude.
@@ -31,3 +36,4 @@ Prediction and safety features:
 This build intentionally contains prediction and launch-planning functionality
 only. Live tracking is being developed separately and has no runtime dependency
 in this package.
+

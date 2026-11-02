@@ -346,7 +346,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.8.1"
+    assert h["version"] == "3.8.2"
     assert h["airspace"] == "FAA live services with disk cache"
     assert h["launch_weather"] == "Open-Meteo multi-model forecast and winds aloft"
     assert h["faa_refresh"] == "automatic every 15 minutes with disk cache"
@@ -1120,6 +1120,7 @@ def test_frontend_main_module_passes_a_real_module_syntax_check():
         [node, "--input-type=module", "--check"],
         input=source,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -1150,11 +1151,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.8.1'
+    assert h['version']=='3.8.2'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.8.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.8.2' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1276,3 +1277,4 @@ def test_v38_launcher_starts_only_prediction_server():
     assert 'subprocess.Popen([sys.executable, str(ROOT / "app.py")]' in launcher
     for token in ['start_live_chase', 'docker', 'ChaseMapper', 'threading.Thread']:
         assert token not in launcher
+

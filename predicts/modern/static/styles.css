@@ -1,3 +1,4 @@
+/* v3.8.2 additions are scoped below the existing styles. */
 :root {
   --black:#050505;
   --header:#080808;
@@ -609,3 +610,38 @@ html[data-theme="dark"] .forecast-agreement.high{color:#83e0aa;background:#12352
 
 @media(max-width:980px){.safety-rule-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.forecast-panel{top:8px;max-height:calc(100% - 58px)}}
 @media(max-width:650px){.safety-rules-page{padding:18px 10px 34px}.safety-rules-heading{align-items:stretch;flex-direction:column;gap:12px}.safety-rules-actions button{flex:1}.safety-rule-grid{grid-template-columns:1fr}.safety-rule-card p{min-height:0}.safety-rules-summary{align-items:flex-start;flex-direction:column;gap:4px}.forecast-panel{width:calc(100% - 12px);padding:10px}.forecast-panel-controls{align-items:stretch;flex-direction:column}.forecast-panel-controls button{width:100%}.forecast-agreement-row{align-items:flex-start;flex-direction:column}.winds-aloft-section>div:first-child{align-items:flex-start;flex-direction:column;gap:3px}}
+
+
+/* v3.8.2 — synchronized burst units and Emo launch theme. */
+.burst-unit-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%;margin-top:5px}
+.burst-unit-inputs label{display:flex;flex-direction:column;gap:3px;min-width:0}
+.burst-unit-inputs label>span{font-size:9px;line-height:1.25;font-weight:750;color:var(--text-muted)}
+.burst-unit-inputs input{width:100%;min-width:0;font-variant-numeric:tabular-nums}
+.burst-altitude-note{display:block;margin-top:4px;white-space:normal;font:9px/1.35 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text-muted)}
+html[data-launch-theme="emo"] .site-header,
+html[data-launch-theme="emo"] .control-strip,
+html[data-launch-theme="emo"] .bottom-tools{
+  background-color:#100e12;
+  background-image:repeating-linear-gradient(125deg,transparent 0 18px,rgba(198,177,195,.035) 18px 19px,transparent 19px 38px),linear-gradient(110deg,#100e12 0%,#27131d 58%,#141015 100%);
+  border-color:#8d354c;
+}
+html[data-launch-theme="emo"] .site-header{box-shadow:inset 0 2px 0 #b53e58,0 5px 20px rgba(0,0,0,.35)}
+html[data-launch-theme="emo"] .site-brand{color:#f0e7ee;letter-spacing:.025em}
+html[data-launch-theme="emo"] .program-mark{background:#21151d;border-color:#9b4058;color:#eee1eb;box-shadow:0 0 0 1px #9b4058,0 3px 12px #0007}
+html[data-launch-theme="emo"] .launch-theme-select{border-color:#70505f;background:#21161dcc}
+html[data-launch-theme="emo"] .launch-theme-select select{background:#171218;border-color:#70505f;color:#f1e6ee}
+html[data-launch-theme="emo"] .app-tab.active{background:#e8dfe6;color:#24171f;border-color:#e8dfe6;box-shadow:inset 0 -3px 0 #b53e58}
+html[data-launch-theme="emo"] .control-field input:focus,
+html[data-launch-theme="emo"] .control-field select:focus{border-color:#cb748c;box-shadow:0 0 0 3px #b53e5828}
+html[data-launch-theme="emo"][data-theme="dark"]{
+  --ui-bg:#100e12;--surface:#1c181f;--surface-2:#241e28;--surface-glass:rgba(25,21,29,.96);
+  --text:#f0e7ef;--text-muted:#b7a9b9;--ui-border:#3e3142;--ui-border-strong:#665168;
+  --hover:#332534;--active:#3b2738;--control-shadow:0 12px 34px #0008;--soft-shadow:0 6px 20px #0006;
+}
+html[data-launch-theme="emo"][data-theme="dark"] .inflation-page{
+  --page-bg:#100e12;--panel:#1c181f;--soft-panel:#241e28;--border:#3e3142;
+  --text:#f0e7ef;--muted:#b7a9b9;--input-bg:#171218;
+}
+html[data-launch-theme="emo"][data-theme="dark"] .inflation-detail button{background:#241e28}
+html[data-launch-theme="emo"] .bottom-tools button{background:#21161dd9;border-color:#71505f;color:#f2e7ef}
+html[data-launch-theme="emo"] .bottom-tools button:hover{background:#402331;border-color:#bf7289}

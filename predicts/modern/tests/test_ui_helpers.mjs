@@ -1,12 +1,25 @@
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SAFETY_RULES,
+  burstAltitudeValues,
   deriveCityLabel,
   evaluateReadiness,
   formatSweepParameter,
   normalizeSafetyRules,
   sortReadinessRows,
 } from '../static/ui_helpers.mjs';
+
+assert.deepEqual(burstAltitudeValues(100000, 'ft'), {meters: 30480, feet: 100000});
+assert.equal(burstAltitudeValues(28000, 'm').meters, 28000);
+assert.ok(Math.abs(burstAltitudeValues(28000, 'm').feet - 91863.51706036745) < 1e-8);
+assert.equal(burstAltitudeValues(''), null);
+assert.equal(burstAltitudeValues('  '), null);
+assert.equal(burstAltitudeValues(null), null);
+assert.equal(burstAltitudeValues('bad'), null);
+assert.equal(burstAltitudeValues(Infinity), null);
+const fractionalFeet = burstAltitudeValues('100000.25', 'ft');
+assert.ok(Math.abs(fractionalFeet.meters - 30480.0762) < 1e-8);
+assert.ok(Math.abs(burstAltitudeValues(fractionalFeet.meters, 'm').feet - 100000.25) < 1e-8);
 
 assert.equal(deriveCityLabel({properties:{name:'School Name',city:'Clear Spring',address:'1 Road, Clear Spring, MD 21722'}},0),'Clear Spring');
 assert.equal(deriveCityLabel({properties:{name:'School Name',address:'1 Road, Cumberland, MD 21502'}},0),'Cumberland');
@@ -47,3 +60,4 @@ assert.deepEqual(sortReadinessRows(rows,'safest').map(x=>x.site_name),['Fast','S
 assert.deepEqual(sortReadinessRows(rows,'gusts').map(x=>x.site_name),['Fast','Slow','Blocked']);
 assert.deepEqual(sortReadinessRows(rows,'flight').map(x=>x.site_name),['Blocked','Fast','Slow']);
 console.log('ui helper tests passed');
+

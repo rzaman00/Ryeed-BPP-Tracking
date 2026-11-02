@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.8.1" rel="stylesheet" />
+  <link href="static/styles.css?v=3.8.2" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -24,8 +24,8 @@
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.8.1</span>
-      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option></select></label>
+      <span class="build-badge" id="buildBadge">v3.8.2</span>
+      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option><option value="emo">Emo</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -52,7 +52,10 @@
     <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
     <div class="control-field burst-control burst-altitude-control"><span>Burst Altitude</span>
       <select id="burstAltitudeMode" aria-label="Burst altitude source"><option value="auto" selected>Automatic (Inflation Calculator)</option><option value="manual">Manual</option></select>
-      <div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="100" min="1000" disabled><small id="burstFeet">Calculating…</small></div>
+      <div class="burst-unit-inputs">
+        <label><span>Meters (m)</span><input id="burstAltitude" aria-label="Burst altitude in meters" type="number" value="28000" step="any" min="1000" required disabled></label>
+        <label><span>Feet (ft)</span><input id="burstAltitudeFeet" aria-label="Burst altitude in feet" type="number" step="any" min="3280.839895013123" required disabled></label>
+      </div><small class="burst-altitude-note" id="burstFeet">Calculating…</small>
     </div>
     <label class="control-field float-control advanced-control hidden"><span>Float Altitude (m)</span><div class="input-with-note"><input id="floatAltitude" type="number" value="22000" step="1000" min="1000"><small id="floatFeet">72178 ft</small></div></label>
     <label class="control-field float-control advanced-control hidden"><span>Float Rate (m/s)</span><input id="floatRate" type="number" value="1" step="0.5" min="0.1"></label>
@@ -362,14 +365,14 @@
         <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be now through the model's seven-day forecast window.</p></article>
         <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
         <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click any launch marker for weather, address details, coordinates, and a direct Ventusky link.</p></article>
-        <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
+        <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option with synchronized meters and feet inputs.</p></article>
         <article class="info-card"><h2>Forecast Models</h2><p>Compare Open-Meteo Best Match, NOAA GFS, ECMWF IFS, and DWD ICON surface conditions, landing estimates, forecast agreement, and winds aloft from a prediction summary.</p></article>
         <article class="info-card"><h2>Airspace & 3D</h2><p>Controlled B/C/D, special-use, and TFR layers remain visible in Basic mode. Advanced mode adds Class E, reference, drawing, and 3D volume controls.</p></article>
         <article class="info-card"><h2>Drawing Tools</h2><p>Add custom launch points or draw oriented rectangles. Rectangles can be assigned an upper altitude and visualized as 3D volumes.</p></article>
         <article class="info-card"><h2>Launch Readiness</h2><p>Compare selected sites using visible weather, forecast freshness, airspace, landing-risk, ascent-rate, and flight-time evidence.</p></article>
         <article class="info-card"><h2>BPP Safety Rules</h2><p>Set local gust, precipitation, forecast-age, airspace, water, and landing thresholds. Saved rules immediately control readiness decisions.</p></article>
         <article class="info-card"><h2>Automatic FAA Refresh</h2><p>B/C/D, Class E, special-use airspace, and active TFR caches refresh automatically. The Layers panel shows freshness and supports a manual refresh.</p></article>
-        <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, Aurora, Country Desert, Summer Beach, or Pride. Themes never alter operational status or trajectory colors.</p></article>
+        <article class="info-card"><h2>Launch Themes</h2><p>Use the Launch Theme dropdown to apply Standard, Maryland, Night Launch, Aurora, Country Desert, Summer Beach, Pride, or Emo. Themes never alter operational status or trajectory colors.</p></article>
         <article class="info-card"><h2>Exports & Sweep</h2><p>Use the bottom toolbar for KML export, geofence GeoJSON, parameter sweeps, address queries, and map utilities. Click a dotted sweep path to see the exact parameter value.</p></article>
       </div>
     </div>
@@ -390,6 +393,7 @@
   </section>
 
   <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.8.1"></script>
+  <script type="module" src="static/app.js?v=3.8.2"></script>
 </body>
 </html>
+

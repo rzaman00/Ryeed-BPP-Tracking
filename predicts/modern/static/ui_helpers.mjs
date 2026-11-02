@@ -1,3 +1,11 @@
+export function burstAltitudeValues(value, unit = 'm') {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const entered = Number(value);
+  if (!Number.isFinite(entered)) return null;
+  const meters = unit === 'ft' ? entered * 0.3048 : entered;
+  return {meters, feet: unit === 'ft' ? entered : meters / 0.3048};
+}
+
 export function deriveCityLabel(feature, idx = 0) {
   const p = feature?.properties || {};
   let city = String(p.city || p.municipality || p.CITY || '').trim();
@@ -173,3 +181,4 @@ export function sortReadinessRows(rows, mode = 'safest') {
   });
   return copy;
 }
+

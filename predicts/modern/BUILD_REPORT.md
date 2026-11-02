@@ -1,4 +1,17 @@
-# Build report — BPP Prediction Suite v3.8.1
+# Build report — BPP Prediction Suite v3.8.2
+
+## Changes in this update
+
+- Added synchronized manual burst-altitude fields in meters and feet.
+- Preserved automatic calculator updates and previous manual values.
+- Added the saved Emo launch theme with charcoal/crimson/silver styling.
+- Updated launcher/build identifiers to 3.8.2.
+- Made the Node syntax check explicitly use UTF-8 on Windows.
+- Validation: 65 Python tests passed; UI-helper, geometry, and burst-unit Node
+  checks passed. Browser verified 100,000 ft → 30,480 m, automatic/manual
+  switching, and saved theme after reload.
+
+## Features retained from finished
 
 - Fixed the optimized-status/map mismatch: optimal-site results now include and
   display the exact best-ascent trajectory that produced each site color.
@@ -27,3 +40,4 @@
 - Removed the Live CHASE tab, waiting route, Docker launcher logic, separate
   launch scripts, documentation, tests, and the complete vendored ChaseMapper
   directory. The package now has one server and one startup path.
+

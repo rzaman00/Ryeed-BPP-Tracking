@@ -1,10 +1,10 @@
 import { orientedRectangle, haversineMeters } from './geometry.mjs';
-import { DEFAULT_SAFETY_RULES, deriveCityLabel, evaluateReadiness, formatSweepParameter, normalizeSafetyRules, sortReadinessRows } from './ui_helpers.mjs';
+import { DEFAULT_SAFETY_RULES, burstAltitudeValues, deriveCityLabel, evaluateReadiness, formatSweepParameter, normalizeSafetyRules, sortReadinessRows } from './ui_helpers.mjs';
 const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.8.1';
+const BUILD_VERSION = '3.8.2';
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const state = {
   workspaceMode: 'predict',
@@ -897,8 +897,21 @@ function setPredictionType(type) {
 }
 function updateAltitudeLabels(){
   const auto=state.burstAltitudeMode==='auto';
-  $('burstFeet').textContent=auto&&state.inflationResult?`${fmt(feet($('burstAltitude').value))} ft · auto`:`${fmt(feet($('burstAltitude').value))} ft${auto?' · calculating…':''}`;
+  $('burstFeet').textContent=auto?(state.inflationResult?'From Inflation Calculator':'Calculating…'):'Manual override · m and ft stay in sync';
   $('floatFeet').textContent=`${fmt(feet($('floatAltitude').value))} ft`;
+}
+function syncBurstAltitude(source='m'){
+  const entered=$(source==='ft'?'burstAltitudeFeet':'burstAltitude').value;
+  const values=burstAltitudeValues(entered,source);
+  if(source==='ft')$('burstAltitude').value=values?String(values.meters):'';
+  else $('burstAltitudeFeet').value=values?String(Number(values.feet.toFixed(2))):'';
+  if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=values?.meters??null;
+  updateAltitudeLabels();
+}
+function readBurstAltitudeMeters(){
+  const values=burstAltitudeValues($('burstAltitude').value);
+  if(!values||values.meters<1000)throw new Error('Enter a burst altitude of at least 1,000 m (3,280.84 ft).');
+  return values.meters;
 }
 
 function setAppView(view){
@@ -937,7 +950,7 @@ function renderInflationResult(r){
   $('inflationPsi').textContent=`${fmt(r.required_psi,3)} PSI`;
   $('inflationBurstM').textContent=`${fmt(r.burst_altitude_m)} m`;
   $('inflationBurstFt').textContent=`${fmt(r.burst_altitude_ft)} ft above launch site`;
-  if(state.burstAltitudeMode==='auto'){ $('burstAltitude').value=String(Math.round(r.burst_altitude_m)); $('burstAltitude').disabled=true; updateAltitudeLabels(); }
+  if(state.burstAltitudeMode==='auto'){ $('burstAltitude').value=String(Math.round(r.burst_altitude_m)); $('burstAltitude').disabled=true;$('burstAltitudeFeet').disabled=true;syncBurstAltitude(); }
 }
 async function calculateInflation(silent=false){
   $('inflationStatus').textContent='Calculating…';
@@ -952,11 +965,14 @@ async function calculateInflation(silent=false){
 function scheduleInflationCalculation(){clearTimeout(state.inflationTimer);state.inflationTimer=setTimeout(()=>calculateInflation(true).catch(()=>{}),220);}
 function setBurstAltitudeMode(mode){
   state.burstAltitudeMode=mode==='manual'?'manual':'auto';$('burstAltitudeMode').value=state.burstAltitudeMode;
-  if(state.burstAltitudeMode==='manual'){ $('burstAltitude').disabled=false;$('burstAltitude').value=String(state.manualBurstAltitude);updateAltitudeLabels(); }
-  else { $('burstAltitude').disabled=true;if(state.inflationResult){$('burstAltitude').value=String(Math.round(state.inflationResult.burst_altitude_m));updateAltitudeLabels();}else calculateInflation(true).catch(()=>{}); }
+  const auto=state.burstAltitudeMode==='auto';$('burstAltitude').disabled=auto;$('burstAltitudeFeet').disabled=auto;
+  if(!auto){$('burstAltitude').value=state.manualBurstAltitude==null?'':String(state.manualBurstAltitude);syncBurstAltitude();}
+  else if(state.inflationResult){$('burstAltitude').value=String(Math.round(state.inflationResult.burst_altitude_m));syncBurstAltitude();}
+  else {syncBurstAltitude();calculateInflation(true).catch(()=>{});}
 }
 async function ensureAutomaticBurst(){
-  if(state.predictType!=='burst'||state.burstAltitudeMode!=='auto')return true;
+  if(state.predictType!=='burst')return true;
+  if(state.burstAltitudeMode==='manual'){try{readBurstAltitudeMeters();return true;}catch(e){toast(e.message,true,6500);return false;}}
   try{await calculateInflation(true);return true;}catch(e){toast(`Cannot run automatic burst prediction: ${e.message}`,true,6500);return false;}
 }
 
@@ -990,7 +1006,7 @@ function predictionBody(target) {
     launch:{name:target._label||target.properties?.name||'Launch',latitude:Number(lat),longitude:Number(lon)},
     launch_datetime:buildLaunchDateTime().toISOString(),
     ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),
-    burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),
+    burst_altitude_m:state.predictType==='burst'?readBurstAltitudeMeters():(Number($('burstAltitude').value)||28000),float_altitude_m:Number($('floatAltitude').value),
     float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value),
   };
 }
@@ -1186,6 +1202,7 @@ const LAUNCH_THEME_PRESETS={
   country:{primary:'#b58b4c',secondary:'#ddc28f',accent:'#8e6b39'},
   summer:{primary:'#087fbd',secondary:'#edcf81',accent:'#ffd34f'},
   pride:{primary:'#e40303',secondary:'#ffed00',accent:'#750787'},
+  emo:{primary:'#b53e58',secondary:'#e5dde4',accent:'#8e6a9a'},
 };
 function applyLaunchTheme(name='standard',persist=true){
   const key=Object.prototype.hasOwnProperty.call(LAUNCH_THEME_PRESETS,name)?name:'standard';
@@ -1196,6 +1213,7 @@ function applyLaunchTheme(name='standard',persist=true){
   document.documentElement.dataset.launchTheme=key;
   if($('launchThemeSelect'))$('launchThemeSelect').value=key;
   if(persist)localStorage.setItem('bpp-launch-theme-preset',key);
+  if(key==='emo'&&persist)applyTheme('dark');
 }
 function restoreLaunchTheme(){applyLaunchTheme(localStorage.getItem('bpp-launch-theme-preset')||'standard',false);}
 
@@ -1232,7 +1250,9 @@ function wireControls(){
   document.addEventListener('click',()=>toggleLaunchTimePopover(false));
   $('predictType').addEventListener('change',e=>{setPredictionType(e.target.value);markReadinessStale();});
   $('burstAltitudeMode').addEventListener('change',e=>{setBurstAltitudeMode(e.target.value);markReadinessStale();});
-  $('burstAltitude').addEventListener('input',()=>{if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();markReadinessStale();});$('floatAltitude').addEventListener('input',()=>{updateAltitudeLabels();markReadinessStale();});
+  $('burstAltitude').addEventListener('input',()=>{syncBurstAltitude('m');markReadinessStale();});
+  $('burstAltitudeFeet').addEventListener('input',()=>{syncBurstAltitude('ft');markReadinessStale();});
+  $('floatAltitude').addEventListener('input',()=>{updateAltitudeLabels();markReadinessStale();});
   $('ascentRate').addEventListener('input',()=>{$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();markReadinessStale();});
   $('inflationAscentRate').addEventListener('input',()=>{$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));
@@ -1276,3 +1296,4 @@ async function init() {
 }
 
 init();
+

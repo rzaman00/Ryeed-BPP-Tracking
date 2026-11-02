@@ -1,7 +1,15 @@
-# BPP Predicts v3.8.1
+# BPP Predicts v3.8.2
 
 Standalone UMD Balloon Payload Program launch planning, prediction, weather,
 airspace, inflation, and readiness application.
+
+## Burst altitude in feet and Emo theme
+
+Select Manual under Burst Altitude to enter meters or feet; the fields stay in
+sync. For example, 100,000 ft is sent to the predictor as 30,480 m. Automatic
+inflation mode updates both fields and preserves the previous manual entry.
+Choose Launch Theme → Emo for the charcoal/crimson theme. See
+../../UPDATE_3_8_2.md for the complete update notes.
 
 ## Run
 
@@ -43,4 +51,5 @@ freshness in the Layers panel. Operators can also request an immediate refresh.
   airspace, water, and landing thresholds in the local browser.
 - Missing required safety evidence always produces NO-GO.
 
-Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.8.1`.
+Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.8.2`.
+

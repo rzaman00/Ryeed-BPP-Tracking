@@ -38,7 +38,7 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-BUILD_VERSION = "3.8.1"
+BUILD_VERSION = "3.8.2"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -2715,3 +2715,4 @@ if __name__ == "__main__":
     host = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")
     port = int(os.getenv("BPP_PREDICTS_PORT", "8000"))
     uvicorn.run("app:app", host=host, port=port, reload=False)
+
