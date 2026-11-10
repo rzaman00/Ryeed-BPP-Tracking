@@ -9,6 +9,8 @@
   <link rel="preconnect" href="https://server.arcgisonline.com" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <link href="static/styles.css?v=3.8.1" rel="stylesheet" />
+  <link rel="modulepreload" href="static/geometry.mjs" />
+  <link rel="modulepreload" href="static/ui_helpers.mjs" />
 </head>
 <body>
   <header class="site-header">
@@ -389,7 +391,7 @@
     <div id="sweepProgress" class="dialog-progress"></div>
   </section>
 
-  <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
+  <script defer src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
   <script type="module" src="static/app.js?v=3.8.1"></script>
 </body>
 </html>

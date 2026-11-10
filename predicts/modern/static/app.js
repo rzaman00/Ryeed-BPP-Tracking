@@ -365,6 +365,7 @@ function setDimension(mode) {
   map.easeTo({ pitch:is3d?55:0, bearing:is3d?-12:0, duration:500 });
   if (map.getLayer('prediction-3d-curtain')) map.setLayoutProperty('prediction-3d-curtain','visibility',is3d?'visible':'none');
   if (map.getLayer('drawing-3d')) map.setLayoutProperty('drawing-3d','visibility',is3d?'visible':'none');
+  refreshPredictionSources();
   syncAirspaceVisibility();
 }
 
@@ -846,7 +847,7 @@ function renderReadiness(){
   $('readinessUpdated').textContent=state.readinessStale?'Inputs changed · update required':`Updated ${new Date(state.readinessUpdatedAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`;
   $('readinessUpdated').className=`readiness-updated${state.readinessStale?' readiness-stale':''}`;
   renderReadinessFactor('readinessFactorGusts',factors.gusts);renderReadinessFactor('readinessFactorPrecipitation',factors.precipitation);renderReadinessFactor('readinessFactorAirspace',factors.airspace);renderReadinessFactor('readinessFactorFreshness',factors.freshness);renderReadinessFactor('readinessFactorLanding',factors.landing);
-  body.innerHTML='';
+  body.innerHTML='';const rowsFragment=document.createDocumentFragment();
   for(const row of sortReadinessRows(evaluated,state.readinessSort)){
     const w=row.weather,o=row.optimal,r=row.readiness;const landing=row.landing||o?.landing;const lat=Number(row.latitude),lon=Number(row.longitude);
     const wind=finiteNumber(w?.wind_speed_mph),gust=finiteNumber(w?.wind_gust_mph),temp=finiteNumber(w?.temperature_f),intrusion=finiteNumber(o?.airspace_3d_intrusion_m??o?.airspace_intrusion_m),water=finiteNumber(o?.water_crossing_m),ascent=finiteNumber(o?.best_ascent_rate_ms);
@@ -855,8 +856,9 @@ function renderReadiness(){
     const landingLat=finiteNumber(landing?.latitude),landingLon=finiteNumber(landing?.longitude);const landingText=Number.isFinite(landingLat)&&Number.isFinite(landingLon)?`${landingLat.toFixed(4)}, ${landingLon.toFixed(4)}`:'Unavailable';
     const hazardParts=[];if(Number.isFinite(intrusion)&&intrusion>0)hazardParts.push(`${miles(intrusion).toFixed(2)} mi 3-D intrusion`);if(Number(o?.airspace_clearance_violation_m)>0)hazardParts.push('insufficient vertical clearance');if(Number(o?.airspace_overflight_s)>state.safetyRules.maxAirspaceOverflightMin*60)hazardParts.push(`${(Number(o.airspace_overflight_s)/60).toFixed(1)} min overflight`);if(Number.isFinite(water)&&water>0)hazardParts.push(`${miles(water).toFixed(2)} mi large water`);if(!hazardParts.length)hazardParts.push(Number.isFinite(intrusion)&&Number.isFinite(water)?'Clear':'Unavailable');
     const landingRisk=o?(o.landing_airspace_distance_m==null||o.landing_large_water_distance_m==null?'Landing clearance unavailable':o.landing_in_water?'Landing in mapped large water':o.landing_in_operational_airspace?'Landing inside operational airspace':Number(o.landing_airspace_distance_m)<state.safetyRules.minLandingAirspaceDistanceMi*1609.344?`Only ${miles(o.landing_airspace_distance_m).toFixed(1)} mi from airspace`:Number(o.landing_large_water_distance_m)<state.safetyRules.minLandingWaterDistanceMi*1609.344?`Only ${miles(o.landing_large_water_distance_m).toFixed(1)} mi from large water`:'Landing buffers clear'):'Risk unavailable';
-    const tr=document.createElement('tr');tr.innerHTML=`<td><div class="readiness-site-name"><strong>${esc(row.site_name)}</strong><small>${esc(row.address)}</small></div></td><td><span class="site-readiness ${r.status}">${readinessLabel(r.status)}</span></td><td class="readiness-reason-cell">${esc(readinessReason(r))}</td><td>${esc(windText)}</td><td class="factor-cell ${r.factors.gusts.status}">${Number.isFinite(gust)?`${gust.toFixed(1)} mph`:'Unavailable'}</td><td class="factor-cell ${r.factors.precipitation.status}">${esc(rainText)}</td><td>${Number.isFinite(temp)?`${temp.toFixed(0)}°F`:'—'}</td><td class="factor-cell ${r.factors.freshness.status}">${r.forecast_age_min<1?'&lt;1 min':Number.isFinite(r.forecast_age_min)?`${Math.round(r.forecast_age_min)} min`:'Unavailable'}</td><td>${Number.isFinite(ascent)?`${ascent.toFixed(1)} m/s`:'—'}</td><td>${Number.isFinite(Number(row.flight_duration_s))?duration(row.flight_duration_s):'—'}</td><td class="landing-cell factor-cell ${r.factors.landing.status}">${esc(landingText)}<small>${esc(landingRisk)}</small></td><td class="factor-cell ${r.factors.airspace.status}">${esc(hazardParts.join(' · '))}</td><td><a class="table-ventusky" href="${esc(ventuskyUrl(lat,lon))}" target="_blank" rel="noopener noreferrer">Ventusky ↗</a></td>`;body.appendChild(tr);
+    const tr=document.createElement('tr');rowsFragment.appendChild(tr);tr.innerHTML=`<td><div class="readiness-site-name"><strong>${esc(row.site_name)}</strong><small>${esc(row.address)}</small></div></td><td><span class="site-readiness ${r.status}">${readinessLabel(r.status)}</span></td><td class="readiness-reason-cell">${esc(readinessReason(r))}</td><td>${esc(windText)}</td><td class="factor-cell ${r.factors.gusts.status}">${Number.isFinite(gust)?`${gust.toFixed(1)} mph`:'Unavailable'}</td><td class="factor-cell ${r.factors.precipitation.status}">${esc(rainText)}</td><td>${Number.isFinite(temp)?`${temp.toFixed(0)}°F`:'—'}</td><td class="factor-cell ${r.factors.freshness.status}">${r.forecast_age_min<1?'&lt;1 min':Number.isFinite(r.forecast_age_min)?`${Math.round(r.forecast_age_min)} min`:'Unavailable'}</td><td>${Number.isFinite(ascent)?`${ascent.toFixed(1)} m/s`:'—'}</td><td>${Number.isFinite(Number(row.flight_duration_s))?duration(row.flight_duration_s):'—'}</td><td class="landing-cell factor-cell ${r.factors.landing.status}">${esc(landingText)}<small>${esc(landingRisk)}</small></td><td class="factor-cell ${r.factors.airspace.status}">${esc(hazardParts.join(' · '))}</td><td><a class="table-ventusky" href="${esc(ventuskyUrl(lat,lon))}" target="_blank" rel="noopener noreferrer">Ventusky ↗</a></td>`;
   }
+  body.appendChild(rowsFragment);
 }
 async function refreshReadiness(){
   if(state.readinessRunning)return;
@@ -912,7 +914,7 @@ function setAppView(view){
   $('infoView')?.classList.toggle('hidden',state.appView!=='info');
   qsa('[data-app-view]').forEach(b=>{const active=b.dataset.appView===state.appView;b.classList.toggle('active',active);b.setAttribute('aria-selected',active?'true':'false');});
   setWorkspaceMode('predict');
-  if(mapView)setTimeout(()=>map?.resize?.(),40);
+  if(mapView)requestAnimationFrame(()=>map?.resize?.());
   else if($('forecastPanel')&&!$('forecastPanel').classList.contains('hidden'))closeForecastPanel();
   if(state.appView==='readiness'){
     if(state.readinessRows.length&&state.readinessSignature!==readinessInputSignature())state.readinessStale=true;
@@ -1076,7 +1078,7 @@ function refreshPredictionSources() {
   const features=visiblePredictionFeatures();
   const points=predictionPointCollections();
   map.getSource('prediction').setData({type:'FeatureCollection',features});
-  map.getSource('prediction-3d').setData(build3dCurtains(features));
+  map.getSource('prediction-3d').setData(state.dimension==='3d'?build3dCurtains(features):{type:'FeatureCollection',features:[]});
   map.getSource('prediction-launch-points').setData(points.launches);
   map.getSource('prediction-landing-points').setData(points.landings);
   map.getSource('sweep').setData({type:'FeatureCollection',features:state.sweepFeatures});
@@ -1138,7 +1140,9 @@ function handleMapDrawClick(e){
   }
   if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');$('deleteDrawing').disabled=true;}return true;}return false;
 }
-function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}refreshDrawings();}
+let drawPreviewFrame=0,drawPreviewEvent=null;
+function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;drawPreviewEvent=e;if(drawPreviewFrame)return;drawPreviewFrame=requestAnimationFrame(()=>{drawPreviewFrame=0;const ev=drawPreviewEvent;if(ev)updateRectanglePreview(ev);});}
+function updateRectanglePreview(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}map.getSource('drawings')?.setData(drawingFeatureCollection());}
 function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_id===state.selectedDrawingId);}
 function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²\n3D upper bound: ${fmt(d.properties?.upper_altitude_ft??10000,0)} ft (${fmt(d.properties?.upper_altitude_m??3048,0)} m)`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
 function showSelectedDrawing(){const d=selectedDrawing();const workspace=qs('.map-workspace');if(!d){$('drawingInfo').classList.add('hidden');workspace?.classList.remove('geofence-focus');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');workspace?.classList.add('geofence-focus');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
@@ -1267,8 +1271,8 @@ async function init() {
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
   setDefaultDate();restoreSafetyRules();wireControls();updateLaunchTimeControl();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setBurstAltitudeMode('auto');
-  await calculateInflation(true).catch(()=>{});
-  try{state.config=await api('/api/config');}catch(e){console.warn(e);}
+  calculateInflation(true).catch(()=>{});
+  api('/api/config').then(config=>{state.config=config;}).catch(e=>console.warn(e));
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
   map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('controlled'),loadAirspace('sua'),loadAirspace('tfr'),loadLaunchLocations()]);syncAirspaceVisibility();await refreshFaaData(false);state.faaStatusTimer=setInterval(()=>refreshFaaData(false),60000);});

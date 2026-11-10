@@ -609,3 +609,31 @@ html[data-theme="dark"] .forecast-agreement.high{color:#83e0aa;background:#12352
 
 @media(max-width:980px){.safety-rule-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.forecast-panel{top:8px;max-height:calc(100% - 58px)}}
 @media(max-width:650px){.safety-rules-page{padding:18px 10px 34px}.safety-rules-heading{align-items:stretch;flex-direction:column;gap:12px}.safety-rules-actions button{flex:1}.safety-rule-grid{grid-template-columns:1fr}.safety-rule-card p{min-height:0}.safety-rules-summary{align-items:flex-start;flex-direction:column;gap:4px}.forecast-panel{width:calc(100% - 12px);padding:10px}.forecast-panel-controls{align-items:stretch;flex-direction:column}.forecast-panel-controls button{width:100%}.forecast-agreement-row{align-items:flex-start;flex-direction:column}.winds-aloft-section>div:first-child{align-items:flex-start;flex-direction:column;gap:3px}}
+
+/* --------------------------------------------------------------------------
+   v3.8.2 smoothness pass: lighter GPU compositing over the map, gentle panel
+   entrances, tactile buttons, and contained scrolling. Visual-only.
+   -------------------------------------------------------------------------- */
+:root{--surface-glass:rgba(255,255,255,.97)}
+html[data-theme="dark"]{--surface-glass:rgba(18,24,33,.97)}
+body{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;-webkit-tap-highlight-color:transparent}
+/* Backdrop blur behind near-opaque panels re-blurs the WebGL map every frame. */
+.layer-panel,.drawing-info,.prediction-summary,.trajectory-legend,.drawing-toggle,.layers-reopen,.site-status-legend,
+.weather-panel,.weather-map-legend,.bottom-tools,.bottom-tools button,.control-strip>.control-field,
+.control-strip>.control-time-group .control-field,.control-strip>.optimal-sweep-toggle{backdrop-filter:none}
+.bottom-tools button{background:rgba(12,20,31,.86)}
+.layer-panel{will-change:transform,opacity}
+.layer-panel,.prediction-summary,.drawing-info,.tool-panel,.readiness-table-wrap,.forecast-table-wrap,.winds-aloft-chart,
+.app-modal-card,.maplibregl-popup-content pre,.drawing-info pre{overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--ui-border-strong) transparent}
+@keyframes bppPanelIn{from{opacity:0;translate:0 6px}to{opacity:1;translate:0 0}}
+@keyframes bppFadeIn{from{opacity:0}to{opacity:1}}
+.prediction-summary,.drawing-info,.tool-panel,.launch-time-popover,.drawing-menu,.optimal-result,.status-toast,
+.site-status-legend,.weather-map-legend,.layers-reopen,.maplibregl-popup-content{animation:bppPanelIn .18s cubic-bezier(.2,.7,.3,1)}
+.app-view:not(#predictsView){animation:bppFadeIn .16s ease-out}
+.run-button,.optimal-button,.app-tab,.bottom-tools button,.summary-buttons button,.dialog-actions button,.clear-sites-button,
+.faa-status button,.safety-rules-actions button,#refreshReadiness,.theme-toggle,.drawing-toggle,.drawing-menu button,.layers-reopen,
+.summary-row,.forecast-panel-controls button,.inflation-detail button{transition:background-color .15s ease,border-color .15s ease,color .15s ease,box-shadow .15s ease,filter .15s ease,transform .15s ease,scale .1s ease}
+:is(.run-button,.optimal-button,.app-tab,.bottom-tools button,.summary-buttons button,.dialog-actions button,.clear-sites-button,
+.faa-status button,.safety-rules-actions button,#refreshReadiness,.theme-toggle,.drawing-toggle,.layers-reopen,.forecast-panel-controls button,.inflation-detail button):active:not(:disabled){scale:.97}
+:is(button,select,input,a,[role="button"]):focus-visible{outline:2px solid #3688e8;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
