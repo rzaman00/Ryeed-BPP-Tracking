@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.9.0';
+const BUILD_VERSION = '3.9.1';
 // Every request is made relative to where this app is served from, so the page
 // works unchanged at a domain root, under a sub-path such as /predicts/, or with
 // the API on another server (set the bpp-api-base meta tag or
@@ -15,7 +15,9 @@ const APP_BASE = (() => {
   return base.endsWith('/') ? base : `${base}/`;
 })();
 function apiUrl(path) { return new URL(String(path).replace(/^\/+/, ''), APP_BASE).href; }
-const PAST_WINDOW_HOURS = 48;
+const PAST_WINDOW_HOURS = 168;
+const PAST_WINDOW_DAYS = PAST_WINDOW_HOURS / 24;
+const M_PER_FT = 0.3048;
 const FUTURE_WINDOW_DAYS = 7;
 const PREDICT_CONCURRENCY = 6;
 const BALLOON_COLORS = ['#1264d8', '#7b3fb2', '#0e9aa7', '#374151', '#b45309', '#be185d'];
@@ -128,6 +130,16 @@ async function mapWithConcurrency(items, limit, worker) {
 }
 
 function feet(m) { return Number(m || 0) * 3.28084; }
+// Burst and float altitude each have a meters box and a feet box that mirror
+// each other. The meters box is the value every request is built from.
+function metersFromFeet(ft){return Number((Number(ft)*M_PER_FT).toFixed(1));}
+function feetFromMeters(m){return Math.round(Number(m)/M_PER_FT);}
+function altFromMeters(meters){const n=Number(meters);return Number.isFinite(n)?Math.round(n):'';}
+function burstAltitudeM(){return Number($('burstAltitude')?.value);}
+function floatAltitudeM(){return Number($('floatAltitude')?.value);}
+// Copy a meters box into its feet box, unless the feet box is being typed in.
+function mirrorFeetBox(metersId,feetId){const m=$(metersId),f=$(feetId);if(!m||!f)return;f.disabled=m.disabled;if(document.activeElement===f)return;const v=Number(m.value);f.value=m.value!==''&&Number.isFinite(v)?String(feetFromMeters(v)):'';}
+function feetBoxEdited(metersId,feetId){const m=$(metersId),f=$(feetId);const v=Number(f.value);m.value=f.value!==''&&Number.isFinite(v)?String(metersFromFeet(v)):'';m.dispatchEvent(new Event('input',{bubbles:true}));}
 function miles(m) { return Number(m || 0) / 1609.344; }
 function fmt(value, digits = 0) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits }); }
 function finiteNumber(value) { return value===null||value===undefined||value===''?NaN:Number(value); }
@@ -776,7 +788,7 @@ function renderWindsAloft(models){
   const root=$('windsAloftChart');if(!root)return;const available=models.filter(model=>model.ok&&model.profile?.length);
   if(!available.length){root.innerHTML='<p class="forecast-empty">Winds-aloft profiles are unavailable.</p>';return;}
   const width=760,height=330,pad={left:58,right:18,top:22,bottom:40};
-  const maxAltitude=Math.max(...available.flatMap(model=>model.profile.map(row=>Number(row.altitude_ft)||0)),feet($('burstAltitude')?.value||0));
+  const maxAltitude=Math.max(...available.flatMap(model=>model.profile.map(row=>Number(row.altitude_ft)||0)),feet(burstAltitudeM()||0));
   const maxWind=Math.max(10,...available.flatMap(model=>model.profile.map(row=>Number(row.wind_speed_mph)||0)));
   const x=value=>pad.left+(Number(value)/maxWind)*(width-pad.left-pad.right);const y=value=>height-pad.bottom-(Number(value)/maxAltitude)*(height-pad.top-pad.bottom);
   const yTicks=[0,.25,.5,.75,1].map(fraction=>`<g><line x1="${pad.left}" x2="${width-pad.right}" y1="${y(maxAltitude*fraction)}" y2="${y(maxAltitude*fraction)}"/><text x="${pad.left-9}" y="${y(maxAltitude*fraction)+4}" text-anchor="end">${Math.round(maxAltitude*fraction/1000)}k</text></g>`).join('');
@@ -817,8 +829,8 @@ function readinessTargets(){
 function readinessInputSignature(targets=readinessTargets()){
   return JSON.stringify({
     sites:targets.map(x=>x._id).sort(),date:$('launchDate')?.value,time:$('launchTime')?.value,timezone:$('launchTimezone')?.value,
-    type:state.predictType,ascent:$('ascentRate')?.value,descent:$('descentRate')?.value,burst:$('burstAltitude')?.value,burstMode:state.burstAltitudeMode,
-    floatAltitude:$('floatAltitude')?.value,floatRate:$('floatRate')?.value,floatDuration:$('floatDuration')?.value,sweep:Boolean($('optimalAscentSweep')?.checked),airspace:optimalAirspaceLayers(),safetyRules:state.safetyRules,
+    type:state.predictType,ascent:$('ascentRate')?.value,descent:$('descentRate')?.value,burst:burstAltitudeM(),burstMode:state.burstAltitudeMode,
+    floatAltitude:floatAltitudeM(),floatRate:$('floatRate')?.value,floatDuration:$('floatDuration')?.value,sweep:Boolean($('optimalAscentSweep')?.checked),airspace:optimalAirspaceLayers(),safetyRules:state.safetyRules,
   });
 }
 function markReadinessStale(){
@@ -840,7 +852,7 @@ function renderReadinessConditions(){
   $('readinessConditionDate').textContent=launch?launch.toLocaleDateString([], {weekday:'short',month:'short',day:'numeric',year:'numeric'}):($('launchDate')?.value||'—');
   $('readinessConditionTime').textContent=launch?`${launch.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} · ${$('launchTimezone')?.value==='utc'?'UTC':'Local'}`:'—';
   $('readinessConditionAscent').textContent=`${fmt($('ascentRate')?.value,1)} m/s · ${$('optimalAscentSweep')?.checked?'best-rate sweep on':'current rate only'}`;
-  $('readinessConditionBurst').textContent=`${fmt($('burstAltitude')?.value)} m · ${fmt(feet($('burstAltitude')?.value))} ft${state.burstAltitudeMode==='auto'?' · automatic':''}`;
+  $('readinessConditionBurst').textContent=`${fmt(burstAltitudeM())} m · ${fmt(feet(burstAltitudeM()))} ft${state.burstAltitudeMode==='auto'?' · automatic':''}`;
 }
 function resetReadinessFactor(id){const el=$(id);if(!el)return;el.className='readiness-factor pending';const strong=qs('strong',el);if(strong)strong.textContent='—';}
 function renderReadinessFactor(id,factorResult){
@@ -922,8 +934,9 @@ function setPredictionType(type) {
 }
 function updateAltitudeLabels(){
   const auto=state.burstAltitudeMode==='auto';
-  $('burstFeet').textContent=auto&&state.inflationResult?`${fmt(feet($('burstAltitude').value))} ft · auto`:`${fmt(feet($('burstAltitude').value))} ft${auto?' · calculating…':''}`;
-  $('floatFeet').textContent=`${fmt(feet($('floatAltitude').value))} ft`;
+  mirrorFeetBox('burstAltitude','burstAltitudeFt');mirrorFeetBox('floatAltitude','floatAltitudeFt');
+  // The Automatic choice is already shown in the dropdown; only flag a pending calculation.
+  $('burstFeet').textContent=auto&&!state.inflationResult?'…':'';
 }
 
 // Phone layout: the map and ground track fill the screen. The Parameters tab
@@ -980,7 +993,7 @@ function renderInflationResult(r){
   $('inflationPsi').textContent=`${fmt(r.required_psi,3)} PSI`;
   $('inflationBurstM').textContent=`${fmt(r.burst_altitude_m)} m`;
   $('inflationBurstFt').textContent=`${fmt(r.burst_altitude_ft)} ft above launch site`;
-  if(state.burstAltitudeMode==='auto'){ $('burstAltitude').value=String(Math.round(r.burst_altitude_m)); $('burstAltitude').disabled=true; updateAltitudeLabels(); }
+  if(state.burstAltitudeMode==='auto'){ $('burstAltitude').value=String(altFromMeters(r.burst_altitude_m)); $('burstAltitude').disabled=true; updateAltitudeLabels(); }
 }
 async function calculateInflation(silent=false){
   $('inflationStatus').textContent='Calculating…';
@@ -995,8 +1008,8 @@ async function calculateInflation(silent=false){
 function scheduleInflationCalculation(){clearTimeout(state.inflationTimer);state.inflationTimer=setTimeout(()=>calculateInflation(true).catch(()=>{}),220);}
 function setBurstAltitudeMode(mode){
   state.burstAltitudeMode=mode==='manual'?'manual':'auto';$('burstAltitudeMode').value=state.burstAltitudeMode;
-  if(state.burstAltitudeMode==='manual'){ $('burstAltitude').disabled=false;$('burstAltitude').value=String(state.manualBurstAltitude);updateAltitudeLabels(); }
-  else { $('burstAltitude').disabled=true;if(state.inflationResult){$('burstAltitude').value=String(Math.round(state.inflationResult.burst_altitude_m));updateAltitudeLabels();}else calculateInflation(true).catch(()=>{}); }
+  if(state.burstAltitudeMode==='manual'){ $('burstAltitude').disabled=false;$('burstAltitude').value=String(altFromMeters(state.manualBurstAltitude));updateAltitudeLabels(); }
+  else { $('burstAltitude').disabled=true;if(state.inflationResult){$('burstAltitude').value=String(altFromMeters(state.inflationResult.burst_altitude_m));updateAltitudeLabels();}else calculateInflation(true).catch(()=>{}); }
 }
 async function ensureAutomaticBurst(){
   if(state.predictType!=='burst'||state.burstAltitudeMode!=='auto')return true;
@@ -1013,7 +1026,7 @@ function composeDateTime(date,time,zone,what='launch') {
   const clock=String(time||'10:00');
   const d=new Date(`${date}T${clock.length===5?`${clock}:00`:clock}${zone==='utc'?'Z':''}`);
   if(Number.isNaN(d.getTime()))throw new Error(`Invalid ${what} date/time`);
-  if(d.getTime()<Date.now()-(PAST_WINDOW_HOURS*3600+300)*1000)throw new Error(`Past predictions are limited to the last ${PAST_WINDOW_HOURS} hours.`);
+  if(d.getTime()<Date.now()-(PAST_WINDOW_HOURS*3600+300)*1000)throw new Error(`Past predictions are limited to the last ${PAST_WINDOW_DAYS} days.`);
   if(d.getTime()>Date.now()+FUTURE_WINDOW_DAYS*24*3600*1000)throw new Error(`The ${what} time may be at most ${FUTURE_WINDOW_DAYS} days in the future.`);
   return d;
 }
@@ -1038,7 +1051,7 @@ function predictionBody(target) {
     launch:{name:target._label||target.properties?.name||'Launch',latitude:Number(lat),longitude:Number(lon)},
     launch_datetime:buildLaunchDateTime().toISOString(),
     ascent_rate_ms:Number($('ascentRate').value),descent_rate_ms:Number($('descentRate').value),
-    burst_altitude_m:Number($('burstAltitude').value),float_altitude_m:Number($('floatAltitude').value),
+    burst_altitude_m:burstAltitudeM(),float_altitude_m:floatAltitudeM(),
     float_ascent_rate_ms:Number($('floatRate').value),float_duration_min:Number($('floatDuration').value),
   };
 }
@@ -1258,7 +1271,9 @@ function clearSweep(){state.sweepFeatures=[];state.sweepDirty=true;refreshPredic
 // starts at the burst position, altitude, and time the operator enters.
 function burstDrawing(id=state.burstDrawingId){return state.drawings.find(d=>d.properties?.drawing_id===id&&d.properties?.kind==='burst')||null;}
 function parseCoordinate(text,limit){const value=Number(String(text??'').trim());return String(text??'').trim()!==''&&Number.isFinite(value)&&Math.abs(value)<=limit?value:NaN;}
-function updateBurstAltitudeNote(){const ft=Number($('burstPointAltitudeFt').value);$('burstPointAltitudeM').textContent=Number.isFinite(ft)&&ft>0?`${fmt(ft*0.3048)} m`:'—';}
+// Create Burst has a feet box and a meters box; the feet box is what gets sent.
+function updateBurstAltitudeNote(){const f=$('burstPointAltitudeFt'),m=$('burstPointAltitudeM');if(document.activeElement===m)return;const ft=Number(f.value);m.value=f.value!==''&&Number.isFinite(ft)?String(metersFromFeet(ft)):'';}
+function burstPointMetersEdited(){const f=$('burstPointAltitudeFt'),m=$('burstPointAltitudeM');const meters=Number(m.value);f.value=m.value!==''&&Number.isFinite(meters)?String(Number((meters/M_PER_FT).toFixed(1))):'';}
 function setBurstTimeNow(){
   const now=new Date(),utc=$('burstTimezone').value==='utc';
   const pad=v=>String(v).padStart(2,'0');
@@ -1268,7 +1283,7 @@ function setBurstTimeNow(){
 function resetBurstForm(){
   state.burstDrawingId=null;
   $('burstName').value='';$('burstLatitude').value='';$('burstLongitude').value='';
-  $('burstPointAltitudeFt').value=String(Math.round(feet($('burstAltitude').value||28000)/100)*100);
+  $('burstPointAltitudeFt').value=String(Math.round(feet(burstAltitudeM()||28000)/100)*100);
   $('burstDescentRate').value=$('descentRate').value||'9';
   $('burstTimezone').value=$('launchTimezone').value;
   $('burstDate').min=earliestDateValue();
@@ -1350,7 +1365,7 @@ function wireBurstControls(){
   $('runBurstPoint')?.addEventListener('click',runBurstPoint);
   $('newBurstPoint')?.addEventListener('click',()=>{resetBurstForm();if(state.drawMode!=='burst')setDrawMode('burst');});
   $('burstTimeNow')?.addEventListener('click',setBurstTimeNow);
-  $('burstPointAltitudeFt')?.addEventListener('input',updateBurstAltitudeNote);
+  $('burstPointAltitudeFt')?.addEventListener('input',updateBurstAltitudeNote);$('burstPointAltitudeM')?.addEventListener('input',burstPointMetersEdited);$('burstPointAltitudeM')?.addEventListener('blur',updateBurstAltitudeNote);
   ['burstLatitude','burstLongitude'].forEach(id=>$(id)?.addEventListener('change',burstCoordinatesChanged));
   $('burstName')?.addEventListener('change',()=>{const d=burstDrawing(),name=$('burstName').value.trim();if(d&&name){d.properties.name=name;refreshDrawings();showSelectedDrawing();}});
 }
@@ -1367,7 +1382,7 @@ function newBalloon(overrides={}){
   const fallbackSite=selectedPresetSites()[0]?._id||state.launchLocations[0]?._id||'';
   const b={id:`b${index+1}`,name:`Balloon ${index+1}`,color:BALLOON_COLORS[index%BALLOON_COLORS.length],siteId:fallbackSite,mode:'burst',
     date:$('launchDate').value,time:$('launchTime').value||'10:00',ascent:Number($('ascentRate').value)||5.5,descent:Number($('descentRate').value)||9,
-    burstAlt:Number($('burstAltitude').value)||28000,floatAlt:Number($('floatAltitude').value)||22000,floatRate:Number($('floatRate').value)||1,floatDuration:Number($('floatDuration').value)||60,
+    burstAlt:Math.round(burstAltitudeM())||28000,floatAlt:Math.round(floatAltitudeM())||22000,floatRate:Number($('floatRate').value)||1,floatDuration:Number($('floatDuration').value)||60,
     sweepOn:true,sweepParam:'ascent_rate_ms',sweepLower:0,sweepUpper:0,sweepStep:.5,...overrides};
   setBalloonSweepDefaults(b);return b;
 }
@@ -1384,10 +1399,12 @@ function multiSiteOptions(selected){
 }
 function balloonCardHtml(b){
   const field=(label,key,attrs,cls='')=>`<label class="${cls}"><span>${label}</span><input data-field="${key}" value="${esc(b[key])}" ${attrs}></label>`;
+  // A feet box that mirrors the meters box beside it.
+  const feetField=(label,key)=>`<label><span>${label}</span><input data-feet-for="${key}" value="${esc(feetFromMeters(b[key]))}" type="number" min="3000" step="500"></label>`;
   const isFloat=b.mode==='float';
   const flight=isFloat
-    ?field('Float altitude (m)','floatAlt','type="number" min="1000" step="500"')+field('Float rate (m/s)','floatRate','type="number" min="0.1" step="0.5"')+field('Float duration (min)','floatDuration','type="number" min="1" step="10"')
-    :field('Burst altitude (m)','burstAlt','type="number" min="1000" step="100"');
+    ?field('Float altitude (m)','floatAlt','type="number" min="1000" step="500"')+feetField('Float altitude (ft)','floatAlt')+field('Float rate (m/s)','floatRate','type="number" min="0.1" step="0.5"')+field('Float duration (min)','floatDuration','type="number" min="1" step="10"')
+    :field('Burst altitude (m)','burstAlt','type="number" min="1000" step="100"')+feetField('Burst altitude (ft)','burstAlt');
   const sweepUnit=b.sweepParam==='altitude'?'m':'m/s';
   return `<article class="multi-card" data-balloon="${esc(b.id)}" style="--balloon:${esc(b.color)}">
     <header><i class="multi-swatch" aria-hidden="true"></i><input class="multi-name" data-field="name" type="text" maxlength="60" value="${esc(b.name)}" aria-label="Balloon name"><button type="button" data-remove-balloon title="Remove this balloon" aria-label="Remove ${esc(b.name)}">×</button></header>
@@ -1418,10 +1435,15 @@ function refreshMultiBalloonSites(){
 }
 const MULTI_NUMERIC_FIELDS=new Set(['ascent','descent','burstAlt','floatAlt','floatRate','floatDuration','sweepLower','sweepUpper','sweepStep']);
 function multiFieldChanged(e){
-  const input=e.target.closest('[data-field]');const card=e.target.closest('[data-balloon]');if(!input||!card)return;
+  const card=e.target.closest('[data-balloon]');if(!card)return;
   const b=state.balloons.find(x=>x.id===card.dataset.balloon);if(!b)return;
+  // A feet box writes its altitude into the balloon and the meters box beside it.
+  const feetBox=e.target.closest('[data-feet-for]');
+  if(feetBox){const key=feetBox.dataset.feetFor;b[key]=metersFromFeet(feetBox.value);const metersBox=card.querySelector(`[data-field="${key}"]`);if(metersBox)metersBox.value=String(b[key]);return;}
+  const input=e.target.closest('[data-field]');if(!input)return;
   const key=input.dataset.field;
   b[key]=input.type==='checkbox'?input.checked:MULTI_NUMERIC_FIELDS.has(key)?Number(input.value):input.value;
+  if(key==='burstAlt'||key==='floatAlt'){const mirror=card.querySelector(`[data-feet-for="${key}"]`);if(mirror)mirror.value=String(feetFromMeters(b[key]));}
   if(e.type!=='change')return;
   // These change which fields the card shows, so the card is redrawn.
   if(key==='mode'||key==='sweepParam'){setBalloonSweepDefaults(b);renderMultiBalloons();}
@@ -1539,6 +1561,10 @@ const LAUNCH_THEME_PRESETS={
   country:{primary:'#b58b4c',secondary:'#ddc28f',accent:'#8e6b39'},
   summer:{primary:'#087fbd',secondary:'#edcf81',accent:'#ffd34f'},
   pride:{primary:'#e40303',secondary:'#ffed00',accent:'#750787'},
+  electric:{primary:'#ffe600',secondary:'#35e0ff',accent:'#7c4dff'},
+  water:{primary:'#1c86c9',secondary:'#9fdcf5',accent:'#0b5d8f'},
+  david:{primary:'#c40000',secondary:'#ff2b2b',accent:'#5c0000'},
+  lost:{primary:'#f5c400',secondary:'#ff8a00',accent:'#1a1a1a'},
 };
 function applyLaunchTheme(name='standard',persist=true){
   const key=Object.prototype.hasOwnProperty.call(LAUNCH_THEME_PRESETS,name)?name:'standard';
@@ -1585,7 +1611,10 @@ function wireControls(){
   document.addEventListener('click',()=>toggleLaunchTimePopover(false));
   $('predictType').addEventListener('change',e=>{setPredictionType(e.target.value);markReadinessStale();});
   $('burstAltitudeMode').addEventListener('change',e=>{setBurstAltitudeMode(e.target.value);markReadinessStale();});
-  $('burstAltitude').addEventListener('input',()=>{if(state.burstAltitudeMode==='manual')state.manualBurstAltitude=Number($('burstAltitude').value);updateAltitudeLabels();markReadinessStale();});$('floatAltitude').addEventListener('input',()=>{updateAltitudeLabels();markReadinessStale();});
+  $('burstAltitude').addEventListener('input',()=>{if(state.burstAltitudeMode==='manual'){const meters=burstAltitudeM();if(Number.isFinite(meters))state.manualBurstAltitude=meters;}updateAltitudeLabels();markReadinessStale();});
+  $('burstAltitudeFt').addEventListener('input',()=>feetBoxEdited('burstAltitude','burstAltitudeFt'));$('floatAltitudeFt').addEventListener('input',()=>feetBoxEdited('floatAltitude','floatAltitudeFt'));
+  // Leaving a feet box snaps it to the exact conversion of the meters box.
+  for(const id of ['burstAltitudeFt','floatAltitudeFt'])$(id).addEventListener('blur',updateAltitudeLabels);$('floatAltitude').addEventListener('input',()=>{updateAltitudeLabels();markReadinessStale();});
   $('ascentRate').addEventListener('input',()=>{$('inflationAscentRate').value=$('ascentRate').value;scheduleInflationCalculation();markReadinessStale();});
   $('inflationAscentRate').addEventListener('input',()=>{$('ascentRate').value=$('inflationAscentRate').value;scheduleInflationCalculation();});
   ['inflationPressure','inflationTemperature','inflationBalloonMass','inflationPayloadMass'].forEach(id=>$(id).addEventListener('input',scheduleInflationCalculation));

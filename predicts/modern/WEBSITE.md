@@ -91,7 +91,7 @@ const r = await fetch('https://predicts.yoursite.edu/api/predict-descent', {
 const {summary} = await r.json();   // summary.landing = {latitude, longitude, altitude_m}
 ```
 
-Launch and burst times may be from 48 hours in the past through 7 days ahead.
+Launch and burst times may be from 7 days in the past through 7 days ahead.
 
 ## Notes for a public site
 

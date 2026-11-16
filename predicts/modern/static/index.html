@@ -14,7 +14,7 @@
   <link rel="modulepreload" href="static/geometry.mjs" />
   <link rel="modulepreload" href="static/ui_helpers.mjs" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.9.0" rel="stylesheet" />
+  <link href="static/styles.css?v=3.9.1" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -31,8 +31,8 @@
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.9.0</span>
-      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option></select></label>
+      <span class="build-badge" id="buildBadge">v3.9.1</span>
+      <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option><option value="electric">Electric</option><option value="water">Water</option><option value="david">David</option><option value="lost">Lost</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
       </button>
@@ -59,9 +59,9 @@
     <label class="control-field"><span>Ascent Rate (m/s)</span><input id="ascentRate" type="number" value="5.5" step="0.5" min="0.1"></label>
     <div class="control-field burst-control burst-altitude-control"><span>Burst Altitude</span>
       <select id="burstAltitudeMode" aria-label="Burst altitude source"><option value="auto" selected>Automatic (Inflation Calculator)</option><option value="manual">Manual</option></select>
-      <div class="input-with-note"><input id="burstAltitude" type="number" value="28000" step="100" min="1000" disabled><small id="burstFeet">Calculating…</small></div>
+      <div class="input-with-note altitude-pair"><label class="unit-box"><input id="burstAltitude" type="number" value="28000" step="100" min="1000" aria-label="Burst altitude in meters" disabled><i>m</i></label><label class="unit-box"><input id="burstAltitudeFt" type="number" value="91864" step="500" min="3000" aria-label="Burst altitude in feet" disabled><i>ft</i></label><small id="burstFeet" title="Calculating automatic burst altitude">…</small></div>
     </div>
-    <label class="control-field float-control advanced-control hidden"><span>Float Altitude (m)</span><div class="input-with-note"><input id="floatAltitude" type="number" value="22000" step="1000" min="1000"><small id="floatFeet">72178 ft</small></div></label>
+    <div class="control-field float-control advanced-control hidden"><span>Float Altitude</span><div class="input-with-note altitude-pair"><label class="unit-box"><input id="floatAltitude" type="number" value="22000" step="1000" min="1000" aria-label="Float altitude in meters"><i>m</i></label><label class="unit-box"><input id="floatAltitudeFt" type="number" value="72178" step="1000" min="3000" aria-label="Float altitude in feet"><i>ft</i></label></div></div>
     <label class="control-field float-control advanced-control hidden"><span>Float Rate (m/s)</span><input id="floatRate" type="number" value="1" step="0.5" min="0.1"></label>
     <label class="control-field float-control advanced-control hidden"><span>Float Duration (min)</span><input id="floatDuration" type="number" value="60" step="20" min="1"></label>
     <label class="control-field"><span>S.L. Descent Rate (m/s)</span><input id="descentRate" type="number" value="9" step="0.5" min="0.1"></label>
@@ -222,7 +222,8 @@
         <label class="wide"><span>Name</span><input id="burstName" type="text" maxlength="80" placeholder="Burst 1"></label>
         <label><span>Latitude</span><input id="burstLatitude" type="text" inputmode="decimal" autocomplete="off" placeholder="39.70000"></label>
         <label><span>Longitude</span><input id="burstLongitude" type="text" inputmode="decimal" autocomplete="off" placeholder="-77.90000"></label>
-        <label><span>Burst altitude (ft)</span><input id="burstPointAltitudeFt" type="number" min="500" max="200000" step="100" value="90000"><small id="burstPointAltitudeM">27,432 m</small></label>
+        <label><span>Burst altitude (ft)</span><input id="burstPointAltitudeFt" type="number" min="500" max="200000" step="100" value="90000"></label>
+        <label><span>Burst altitude (m)</span><input id="burstPointAltitudeM" type="number" min="150" max="60000" step="100" value="27432"></label>
         <label><span>S.L. descent rate (m/s)</span><input id="burstDescentRate" type="number" min="0.1" max="50" step="0.5" value="9"></label>
         <label><span>Burst date</span><input id="burstDate" type="date"></label>
         <label><span>Burst time</span><input id="burstTime" type="time" step="1"></label>
@@ -407,7 +408,7 @@
         <p>A quick reference for the tools built into this standalone predictor. Operational colors for trajectories, airspace, and site viability stay fixed even when a launch theme is applied.</p>
       </div>
       <div class="info-grid">
-        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be from 48 hours in the past through the model's seven-day forecast window, so a flight can be replayed after the fact.</p></article>
+        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be from 7 days in the past through the model's seven-day forecast window, so a flight can be replayed after the fact.</p></article>
         <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
         <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click any launch marker for weather, address details, coordinates, and a direct Ventusky link.</p></article>
         <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
@@ -426,6 +427,6 @@
   </section>
 
   <script defer src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.9.0"></script>
+  <script type="module" src="static/app.js?v=3.9.1"></script>
 </body>
 </html>

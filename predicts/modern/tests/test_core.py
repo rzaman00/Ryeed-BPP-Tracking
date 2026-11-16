@@ -346,7 +346,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.9.0"
+    assert h["version"] == "3.9.1"
     assert h["airspace"] == "FAA live services with disk cache"
     assert h["launch_weather"] == "Open-Meteo multi-model forecast and winds aloft"
     assert h["faa_refresh"] == "automatic every 15 minutes with disk cache"
@@ -1150,11 +1150,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.9.0'
+    assert h['version']=='3.9.1'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.9.0' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.9.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1278,15 +1278,16 @@ def test_v38_launcher_starts_only_prediction_server():
         assert token not in launcher
 
 
-# v3.9.0 — past replay window, burst-point descent, website hosting, speed-ups
-def test_v39_launch_window_allows_last_48_hours_only():
+# v3.9.x — past replay window, burst-point descent, website hosting, speed-ups
+def test_v39_launch_window_allows_last_7_days_only():
     import app as appmod
     from fastapi import HTTPException
     now = datetime.now(timezone.utc)
     appmod.validate_launch_window(now - timedelta(hours=47))
+    appmod.validate_launch_window(now - timedelta(days=6, hours=23))
     appmod.validate_launch_window(now + timedelta(days=6))
-    with pytest.raises(HTTPException, match="last 48 hours"):
-        appmod.validate_launch_window(now - timedelta(hours=49))
+    with pytest.raises(HTTPException, match="last 7 days"):
+        appmod.validate_launch_window(now - timedelta(days=7, hours=1))
     with pytest.raises(HTTPException, match="7 days"):
         appmod.validate_launch_window(now + timedelta(days=8))
 
@@ -1489,7 +1490,7 @@ def test_v39_frontend_contract_for_burst_multi_balloon_and_hosting():
     toolbar = html[html.index('class="bottom-tools advanced-map-control"'):html.index('id="aboutMap"')]
     assert 'id="openMultiBalloon"' in toolbar
     assert "/api/predict-descent" in js and "burst_altitude_ft:altitudeFt" in js
-    assert "PAST_WINDOW_HOURS = 48" in js
+    assert "PAST_WINDOW_HOURS = 168" in js
     # No absolute server paths: the page must work under any website sub-path.
     assert "fetch(apiUrl(url)" in js and 'meta name="bpp-api-base"' in html
     assert 'href="/' not in html and 'src="/' not in html
@@ -1502,9 +1503,9 @@ def test_v39_config_reports_new_capabilities():
     import asyncio
     import app as appmod
     config = asyncio.run(appmod.config())
-    assert config["past_prediction_hours"] == 48
+    assert config["past_prediction_hours"] == 168
     assert config["burst_point_descent"] is True and config["multiple_balloons"] is True
-    assert "48 hours" in asyncio.run(appmod.health())["prediction_window"]
+    assert "last 7 days" in asyncio.run(appmod.health())["prediction_window"]
 
 
 def test_v39_open_meteo_wind_column_is_parsed_into_east_north_winds(monkeypatch):
@@ -1531,7 +1532,7 @@ def test_v39_open_meteo_wind_column_is_parsed_into_east_north_winds(monkeypatch)
 
     monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
     u, v, elevation = asyncio.run(appmod.fetch_open_meteo_wind_column(39.7, -78.0))
-    assert seen["models"] == "gfs_seamless" and seen["past_days"] >= 2 and seen["wind_speed_unit"] == "mph"
+    assert seen["models"] == "gfs_seamless" and seen["past_days"] >= 8 and seen["wind_speed_unit"] == "mph"
     assert elevation == 212.0
     assert list(u) == [datetime(2026, 11, 14, 14, tzinfo=timezone.utc)]   # the incomplete hour is dropped
     row_u, row_v = u[list(u)[0]], v[list(v)[0]]
@@ -1576,3 +1577,35 @@ def test_v39_phone_layout_has_parameters_tab_that_hides_controls():
     assert ".mobile-only-tab{display:none}" in css
     for selector in ["#predictControlStrip", ".layer-panel", ".bottom-tools", ".prediction-summary", ".drawing-control"]:
         assert f'html:not([data-mobile-params="open"]) #predictsView {selector}' in css
+
+
+# v3.9.1 — altitude entry in feet, 7-day past window, extra launch themes
+def test_v391_altitude_has_meters_and_feet_boxes_and_requests_stay_in_meters():
+    base = Path(__file__).resolve().parents[1]
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    for box in ["burstAltitude", "burstAltitudeFt", "floatAltitude", "floatAltitudeFt", "burstPointAltitudeFt", "burstPointAltitudeM"]:
+        assert f'<input id="{box}"' in html
+    for name in ["metersFromFeet", "feetFromMeters", "mirrorFeetBox", "feetBoxEdited", "burstPointMetersEdited"]:
+        assert f"function {name}(" in js
+    assert "data-feet-for" in js
+    # Requests are always built from the meter helpers, never the raw box value.
+    assert "burst_altitude_m:burstAltitudeM(),float_altitude_m:floatAltitudeM()," in js
+    assert "burst_altitude_m:Number($('burstAltitude').value)" not in js
+
+
+def test_v391_wind_replay_requests_cover_the_whole_past_window():
+    import app as appmod
+    assert appmod.PAST_PREDICTION_WINDOW_H == 168
+    assert appmod.OPEN_METEO_REPLAY_PAST_DAYS * 24 > appmod.PAST_PREDICTION_WINDOW_H
+
+
+def test_v391_new_launch_themes_are_wired_in_all_three_files():
+    base = Path(__file__).resolve().parents[1]
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    css = (base / "static" / "styles.css").read_text(encoding="utf-8")
+    for theme in ["electric", "water", "david", "lost"]:
+        assert f'<option value="{theme}">' in html
+        assert f"  {theme}:{{primary:" in js
+        assert f'html[data-launch-theme="{theme}"] .site-header' in css

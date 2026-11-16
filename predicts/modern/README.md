@@ -1,4 +1,4 @@
-# BPP Predicts v3.9.0
+# BPP Predicts v3.9.1
 
 Standalone UMD Balloon Payload Program launch planning, prediction, weather,
 airspace, inflation, and readiness application.
@@ -19,7 +19,7 @@ descent-only track from the burst point to the landing site.
 
 ## Past predictions
 
-Launch and burst times may be up to 48 hours in the past, so a flight can be
+Launch and burst times may be up to 7 days in the past, so a flight can be
 replayed after the fact. The Model tile in the summary reads `Historical` and
 its tooltip names the wind source that was used.
 
@@ -68,4 +68,4 @@ freshness in the Layers panel. Operators can also request an immediate refresh.
   airspace, water, and landing thresholds in the local browser.
 - Missing required safety evidence always produces NO-GO.
 
-Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.9.0`.
+Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.9.1`.

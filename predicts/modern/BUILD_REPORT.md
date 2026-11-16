@@ -1,4 +1,15 @@
-# Build report — BPP Prediction Suite v3.9.0
+# Build report — BPP Prediction Suite v3.9.1
+
+## New in v3.9.1
+
+- **Altitude in meters and feet**: Burst Altitude and Float Altitude in the top
+  bar, the Create Burst panel, and each Multiple Balloon card now have a meters
+  box and a feet box side by side. Typing in either fills in the other. Requests
+  to the server are unchanged (meters; Create Burst sends feet as before).
+- **Past predictions** now reach back 7 days (was 48 hours). The archived GFS
+  wind request covers 8 days so a launch 7 days back is inside its range.
+- **Launch themes**: Electric, Water, David, and Lost. Operational status colors
+  are untouched.
 
 ## New in v3.9.0
 

@@ -41,9 +41,13 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-BUILD_VERSION = "3.9.0"
-# Launches up to this many hours in the past can be replayed.
-PAST_PREDICTION_WINDOW_H = 48
+BUILD_VERSION = "3.9.1"
+# Launches up to this many hours in the past can be replayed (7 days).
+PAST_PREDICTION_WINDOW_H = 168
+PAST_PREDICTION_WINDOW_DAYS = PAST_PREDICTION_WINDOW_H // 24
+# Days of archived hourly winds requested for replays; one more than the window
+# so a launch exactly 7 days back is still inside the returned range.
+OPEN_METEO_REPLAY_PAST_DAYS = PAST_PREDICTION_WINDOW_DAYS + 1
 # A launch older than this is treated as "past" for wind-source selection.
 PAST_LAUNCH_GRACE = timedelta(minutes=5)
 # Website hosting options. All are optional; the defaults keep local use unchanged.
@@ -846,7 +850,7 @@ async def fetch_open_meteo_wind_column(latitude: float, longitude: float) -> tup
     params = {
         "latitude": latitude, "longitude": longitude, "hourly": ",".join(fields),
         "timezone": "UTC", "wind_speed_unit": "mph", "models": OPEN_METEO_REPLAY_MODEL,
-        "past_days": 3, "forecast_days": 2,
+        "past_days": OPEN_METEO_REPLAY_PAST_DAYS, "forecast_days": 2,
     }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=8.0), follow_redirects=True) as client:
@@ -1312,7 +1316,7 @@ async def fetch_forecast_model(
         "temperature_unit": "fahrenheit",
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
-        "past_days": 3,
+        "past_days": OPEN_METEO_REPLAY_PAST_DAYS,
         "forecast_days": 16,
     }
     if api_model:
@@ -2656,13 +2660,13 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
     )
 
 def validate_launch_window(value: datetime) -> None:
-    """Accept launches from the last 48 hours through the seven-day model window."""
+    """Accept launches from the last 7 days through the seven-day model window."""
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
     if value < now - timedelta(hours=PAST_PREDICTION_WINDOW_H, minutes=5):
-        raise HTTPException(status_code=400, detail=f"Past predictions are limited to the last {PAST_PREDICTION_WINDOW_H} hours.")
+        raise HTTPException(status_code=400, detail=f"Past predictions are limited to the last {PAST_PREDICTION_WINDOW_DAYS} days.")
     if value > now + timedelta(days=7):
         raise HTTPException(status_code=400, detail="Launch time may be at most 7 days in the future.")
 
@@ -2680,7 +2684,7 @@ async def health():
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
         "optimal_site": "conservative B/C/D, SUA, TFR and Chesapeake water-crossing safety ranking",
-        "prediction_window": f"last {PAST_PREDICTION_WINDOW_H} hours through 7 days in the future",
+        "prediction_window": f"last {PAST_PREDICTION_WINDOW_DAYS} days through 7 days in the future",
         "launch_weather": "Open-Meteo multi-model forecast and winds aloft",
         "faa_refresh": f"automatic every {FAA_AUTO_REFRESH_INTERVAL_S // 60} minutes with disk cache",
     }
