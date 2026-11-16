@@ -1,4 +1,58 @@
-# Build report — BPP Prediction Suite v3.8.1
+# Build report — BPP Prediction Suite v3.9.0
+
+## New in v3.9.0
+
+- **Create Burst** (Drawing Tools): click the map or type GPS coordinates, enter
+  the burst altitude in feet and the time the balloon burst, and get a
+  descent-only landing prediction. Burst points can be selected, renamed, edited,
+  re-run, and deleted like other drawings. New endpoint `POST /api/predict-descent`.
+- **Past predictions**: launch and burst times from the last 48 hours are accepted
+  everywhere (Run Predicts, sweeps, optimal search, readiness, weather, forecast
+  comparison). Tawhiri archived cycles are tried first; if none covers the time,
+  hourly GFS winds above the site are used and the result is labelled as an
+  approximation. The older NOAA reanalysis ended in March 2026 and could not
+  cover recent dates.
+- **Multiple Balloon** (Operations Advanced toolbar): each balloon has its own
+  launch site, burst/float type, launch date and time, rates, altitude, and its
+  own parameter sweep. All balloons and sweeps run together; each balloon is
+  outlined in its own colour and a results table lists every landing.
+- **Website hosting**: every request is relative to where the app is served, so
+  it works at a domain root, under a sub-path, in an iframe (`?embed=1`), or with
+  the API on another server. See `WEBSITE.md`, `deploy/`, and `Procfile`.
+
+- **Phone layout**: on a narrow screen the map and ground track fill the
+  screen. A `Parameters` tab at the top opens the launch settings, layers,
+  drawing tools, toolbar, and summary; tapping it again hides them.
+
+## Speed
+
+- One pooled, kept-alive connection to Tawhiri instead of a new TLS connection
+  for every prediction.
+- Identical predictions inside three minutes are answered from memory, and
+  identical predictions already in flight share one upstream call.
+- FAA layers are parsed once and reused until the cache file changes; the
+  airspace and landing spatial indexes and the water index are reused the same way.
+- Airspace responses are prepared once and answered with `304 Not Modified` on
+  reload. Static files revalidate instead of re-downloading.
+- Optimal-site scoring builds trajectory segments once instead of twice per
+  prediction. Measured against a local stand-in for Tawhiri, an 11-site,
+  5-rate optimal search took about 1.1 s instead of 1.4 s.
+- The map appears without waiting for the inflation and config requests.
+- Map sources redraw once per animation frame; the 3-D curtain is only built
+  while 3-D is on; moving the mouse while drawing no longer rebuilds side lists.
+- Prediction batches run six at a time instead of four.
+
+## Fixed
+
+- The Parameter Sweep panel sat underneath the control strip, hiding its title
+  and close button. Tool panels now open inside the map area.
+- A launch a few hours in the past could fail when the newest model cycle
+  started after it; earlier cycles are now tried.
+
+Operational trajectory, airspace, and site-status colours, launch themes, safety
+rules, and every existing control are unchanged.
+
+## v3.8.1
 
 - Fixed the optimized-status/map mismatch: optimal-site results now include and
   display the exact best-ascent trajectory that produced each site color.

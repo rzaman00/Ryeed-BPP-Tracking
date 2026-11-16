@@ -4,7 +4,22 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.8.1';
+const BUILD_VERSION = '3.9.0';
+// Every request is made relative to where this app is served from, so the page
+// works unchanged at a domain root, under a sub-path such as /predicts/, or with
+// the API on another server (set the bpp-api-base meta tag or
+// window.BPP_PREDICTS_API_BASE).
+const APP_BASE = (() => {
+  const configured = document.querySelector('meta[name="bpp-api-base"]')?.content?.trim() || window.BPP_PREDICTS_API_BASE || '';
+  const base = configured ? new URL(configured, document.baseURI).href : new URL('..', import.meta.url).href;
+  return base.endsWith('/') ? base : `${base}/`;
+})();
+function apiUrl(path) { return new URL(String(path).replace(/^\/+/, ''), APP_BASE).href; }
+const PAST_WINDOW_HOURS = 48;
+const FUTURE_WINDOW_DAYS = 7;
+const PREDICT_CONCURRENCY = 6;
+const BALLOON_COLORS = ['#1264d8', '#7b3fb2', '#0e9aa7', '#374151', '#b45309', '#be185d'];
+const EMPTY_FC = Object.freeze({ type: 'FeatureCollection', features: [] });
 const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };
 const state = {
   workspaceMode: 'predict',
@@ -18,6 +33,14 @@ const state = {
   predictions: new Map(),
   activePredictionId: null,
   sweepFeatures: [],
+  multiSweepFeatures: [],
+  sweepDirty: true,
+  balloons: [],
+  balloonSeq: 0,
+  multiRunning: false,
+  multiResults: [],
+  burstDrawingId: null,
+  burstRunning: false,
   landingMarkers: new Map(),
   launchMarkers: new Map(),
   referenceLoaded: new Set(),
@@ -76,7 +99,7 @@ function toast(message, error = false, timeout = 3600) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
@@ -232,7 +255,8 @@ function addOperationalLayers() {
   map.addLayer({id:'drawing-3d',type:'fill-extrusion',source:'drawings',filter:['all',['==',['geometry-type'],'Polygon'],['!', ['boolean',['get','preview'],false]]],layout:{visibility:'none'},paint:{'fill-extrusion-color':['case',['boolean',['get','selected'],false],'#f2b84b','#9254d6'],'fill-extrusion-base':0,'fill-extrusion-height':['coalesce',['to-number',['get','upper_altitude_m']],0],'fill-extrusion-opacity':.26}});
   map.addLayer({id:'drawing-line',type:'line',source:'drawings',filter:['==',['geometry-type'],'Polygon'],paint:{'line-color':['case',['boolean',['get','selected'],false],'#b86e00','#7626c5'],'line-width':['case',['boolean',['get','selected'],false],3,2]}});
   map.addLayer({id:'drawing-guide',type:'line',source:'drawings',filter:['==',['geometry-type'],'LineString'],paint:{'line-color':'#f2b84b','line-width':3,'line-dasharray':[2,1.5],'line-opacity':.95}});
-  map.addLayer({id:'drawing-point',type:'circle',source:'drawings',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':['case',['boolean',['get','selected'],false],7,6],'circle-color':'#9254d6','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
+  map.addLayer({id:'drawing-burst-ring',type:'circle',source:'drawings',filter:['all',['==',['geometry-type'],'Point'],['==',['get','kind'],'burst']],paint:{'circle-radius':['case',['boolean',['get','selected'],false],15,13],'circle-color':'rgba(242,138,34,.16)','circle-stroke-width':2,'circle-stroke-color':COLORS.descent}});
+  map.addLayer({id:'drawing-point',type:'circle',source:'drawings',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':['case',['boolean',['get','selected'],false],7,6],'circle-color':['match',['get','kind'],'burst',COLORS.descent,'#9254d6'],'circle-stroke-width':2,'circle-stroke-color':'#fff'}});
 
   // Parameter sweep is deliberately quieter than the primary trajectories.
   map.addLayer({id:'sweep-lines',type:'line',source:'sweep',paint:{'line-color':['match',['get','stage'],'ascent',COLORS.ascent,'float',COLORS.float,'descent',COLORS.descent,'#777'],'line-width':2,'line-opacity':.38,'line-dasharray':[2,2]}});
@@ -244,7 +268,7 @@ function addOperationalLayers() {
   map.addLayer({id:'forecast-model-landings-layer',type:'circle',source:'forecast-model-landings',paint:{'circle-radius':7,'circle-color':['get','color'],'circle-stroke-width':2.5,'circle-stroke-color':'#ffffff'}});
 
   // Primary flight path casing + bright stage colors keep trajectory visually dominant.
-  map.addLayer({id:'prediction-casing',type:'line',source:'prediction',paint:{'line-color':'#ffffff','line-width':['interpolate',['linear'],['zoom'],5,7,10,10],'line-opacity':.92}});
+  map.addLayer({id:'prediction-casing',type:'line',source:'prediction',paint:{'line-color':['coalesce',['get','balloon_color'],'#ffffff'],'line-width':['interpolate',['linear'],['zoom'],5,7,10,10],'line-opacity':.92}});
   map.addLayer({id:'prediction-lines',type:'line',source:'prediction',paint:{'line-color':['match',['get','stage'],'ascent',COLORS.ascent,'float',COLORS.float,'descent',COLORS.descent,'#111'],'line-width':['interpolate',['linear'],['zoom'],5,4,10,6],'line-opacity':1}});
   map.addLayer({id:'prediction-3d-curtain',type:'fill-extrusion',source:'prediction-3d',layout:{visibility:'none'},paint:{
     'fill-extrusion-color':['match',['get','stage'],'ascent',COLORS.ascent,'float',COLORS.float,'descent',COLORS.descent,'#111'],
@@ -305,7 +329,7 @@ function registerFeaturePopups() {
     const feature=e.features?.[0];if(!feature)return;const props=feature.properties||{};
     const label=formatSweepParameter(props.sweep_parameter,props.sweep_value);
     const stage=props.stage?String(props.stage).replace(/^./,x=>x.toUpperCase()):'Trajectory';
-    openMapPopup().setLngLat(e.lngLat).setHTML(`<strong>Parameter Sweep</strong><div>${esc(label)}</div><div><b>Stage:</b> ${esc(stage)}</div>`).addTo(map);
+    openMapPopup().setLngLat(e.lngLat).setHTML(`<strong>${esc(props.balloon_name?`${props.balloon_name} · Sweep`:'Parameter Sweep')}</strong><div>${esc(label)}</div><div><b>Stage:</b> ${esc(stage)}</div>`).addTo(map);
   });
   map.on('mouseenter','sweep-hitbox',()=>{map.getCanvas().style.cursor='pointer';});
   map.on('mouseleave','sweep-hitbox',()=>{map.getCanvas().style.cursor='';});
@@ -365,6 +389,7 @@ function setDimension(mode) {
   map.easeTo({ pitch:is3d?55:0, bearing:is3d?-12:0, duration:500 });
   if (map.getLayer('prediction-3d-curtain')) map.setLayoutProperty('prediction-3d-curtain','visibility',is3d?'visible':'none');
   if (map.getLayer('drawing-3d')) map.setLayoutProperty('drawing-3d','visibility',is3d?'visible':'none');
+  refreshPredictionSources();
   syncAirspaceVisibility();
 }
 
@@ -508,7 +533,7 @@ function setMapMode(mode){
     setDimension('2d');
     const dimension=qs('input[name="dimension"][value="2d"]');if(dimension)dimension.checked=true;
   }
-  if(!advanced){$('drawingMenu')?.classList.add('hidden');$('sweepPanel')?.classList.add('hidden');}
+  if(!advanced){$('drawingMenu')?.classList.add('hidden');$('sweepPanel')?.classList.add('hidden');$('multiPanel')?.classList.add('hidden');closeBurstPanel();}
   syncAirspaceVisibility();syncReferenceVisibility();
   if(advanced||state.mapMode==='operations-basic'){
     const requested=['controlled','class_e','sua','tfr'].filter(key=>layerChecked(key)&&(advanced||['controlled','sua','tfr'].includes(key)));
@@ -618,7 +643,7 @@ function refreshOptimalSiteHighlights(){
 function applyOptimizedPredictions(analysis){
   const ranking=analysis?.ranking||[];const optimized=ranking.filter(item=>item.best_prediction);
   if(!optimized.length)return;
-  state.predictions.clear();
+  clearSitePredictions();
   for(const item of optimized){
     const entry=decoratePrediction(item.site_id,item.site_name,item.best_prediction);
     entry.optimized_ascent_rate_ms=Number(item.best_ascent_rate_ms);entry.optimized_status=item.site_status;
@@ -802,7 +827,7 @@ function markReadinessStale(){
   if(state.appView==='readiness')renderReadiness();
 }
 function readinessAgeMinutes(row){
-  return Number.isFinite(Number(row.weather_received_at))?Math.max(0,(Date.now()-Number(row.weather_received_at))/60000):Infinity;
+  return row.weather_received_at!=null&&Number.isFinite(Number(row.weather_received_at))?Math.max(0,(Date.now()-Number(row.weather_received_at))/60000):Infinity;
 }
 function readinessLabel(status){return status==='go'?'GO':status==='caution'?'CAUTION':'NO-GO';}
 function readinessFactorTitle(key){return {gusts:'Gusts',precipitation:'Precipitation',airspace:'Airspace conflicts',freshness:'Forecast age',landing:'Landing / water risk'}[key]||key;}
@@ -901,6 +926,22 @@ function updateAltitudeLabels(){
   $('floatFeet').textContent=`${fmt(feet($('floatAltitude').value))} ft`;
 }
 
+// Phone layout: the map and ground track fill the screen. The Parameters tab
+// shows or hides every control (launch settings, layers, tools, summary).
+const MOBILE_QUERY=window.matchMedia('(max-width: 760px)');
+function isMobileLayout(){return MOBILE_QUERY.matches;}
+function setMobileParameters(open){
+  const on=Boolean(open);
+  document.documentElement.dataset.mobileParams=on?'open':'closed';
+  const tab=$('parametersTab');if(tab){tab.classList.toggle('active',on);tab.setAttribute('aria-pressed',String(on));}
+  $('predictsTab')?.classList.toggle('active',state.appView==='predicts'&&!(on&&isMobileLayout()));
+  requestAnimationFrame(()=>map?.resize?.());
+}
+function toggleMobileParameters(){
+  const open=document.documentElement.dataset.mobileParams!=='open'||state.appView!=='predicts';
+  if(state.appView!=='predicts')setAppView('predicts');
+  setMobileParameters(open);
+}
 function setAppView(view){
   const allowed=new Set(['predicts','safety','readiness','inflation','info']);
   state.appView=allowed.has(view)?view:'predicts';
@@ -912,6 +953,8 @@ function setAppView(view){
   $('infoView')?.classList.toggle('hidden',state.appView!=='info');
   qsa('[data-app-view]').forEach(b=>{const active=b.dataset.appView===state.appView;b.classList.toggle('active',active);b.setAttribute('aria-selected',active?'true':'false');});
   setWorkspaceMode('predict');
+  if(!mapView)setMobileParameters(false);
+  else setMobileParameters(document.documentElement.dataset.mobileParams==='open');
   if(mapView)setTimeout(()=>map?.resize?.(),40);
   else if($('forecastPanel')&&!$('forecastPanel').classList.contains('hidden'))closeForecastPanel();
   if(state.appView==='readiness'){
@@ -965,15 +1008,20 @@ function setWorkspaceMode(mode) {
   $('predictControlStrip')?.classList.remove('hidden');
 }
 
-function buildLaunchDateTime() {
-  const date=$('launchDate').value,time=$('launchTime').value||'10:00';
-  if(!date)throw new Error('Choose a launch date');
-  const zone=$('launchTimezone').value;
-  const d=new Date(`${date}T${time}:00${zone==='utc'?'Z':''}`);
-  if(Number.isNaN(d.getTime()))throw new Error('Invalid launch date/time');
-  if(d.getTime()<Date.now()-5*60*1000)throw new Error('Past predictions are not supported. Choose the current time or a future launch time.');
+function composeDateTime(date,time,zone,what='launch') {
+  if(!date)throw new Error(`Choose a ${what} date`);
+  const clock=String(time||'10:00');
+  const d=new Date(`${date}T${clock.length===5?`${clock}:00`:clock}${zone==='utc'?'Z':''}`);
+  if(Number.isNaN(d.getTime()))throw new Error(`Invalid ${what} date/time`);
+  if(d.getTime()<Date.now()-(PAST_WINDOW_HOURS*3600+300)*1000)throw new Error(`Past predictions are limited to the last ${PAST_WINDOW_HOURS} hours.`);
+  if(d.getTime()>Date.now()+FUTURE_WINDOW_DAYS*24*3600*1000)throw new Error(`The ${what} time may be at most ${FUTURE_WINDOW_DAYS} days in the future.`);
   return d;
 }
+function buildLaunchDateTime() {
+  return composeDateTime($('launchDate').value,$('launchTime').value||'10:00',$('launchTimezone').value,'launch');
+}
+function dateInputValue(d){return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
+function earliestDateValue(){return dateInputValue(new Date(Date.now()-(PAST_WINDOW_HOURS+24)*3600*1000));}
 function updateLaunchTimeControl(){
   const value=$('launchTime')?.value||'10:00';const [rawHour,rawMinute]=value.split(':').map(Number);const hour=rawHour%12||12;const suffix=rawHour>=12?'PM':'AM';const zone=$('launchTimezone')?.value==='utc'?'UTC':'Local';
   if($('launchTimeDisplay'))$('launchTimeDisplay').textContent=`${hour}:${String(rawMinute||0).padStart(2,'0')} ${suffix} · ${zone}`;
@@ -1026,10 +1074,10 @@ async function runPredicts() {
   invalidateOptimalSiteAnalysis();
   state.forecastComparison=null;closeForecastPanel();
   $('siteStatusLegend')?.classList.add('hidden');
-  state.predictions.clear();state.activePredictionId=null;clearPredictionMarkers();refreshPredictionSources();renderSummary();
+  clearSitePredictions();state.activePredictionId=null;clearPredictionMarkers();refreshPredictionSources();renderSummary();
   let completed=0,failed=0,finished=0;
   setRunButton('running',`0/${targets.length}`);
-  const outcomes=await mapWithConcurrency(targets,4,async target=>{
+  const outcomes=await mapWithConcurrency(targets,PREDICT_CONCURRENCY,async target=>{
     try{return {target,result:await api('/api/predict',{method:'POST',body:JSON.stringify(predictionBody(target))})};}
     catch(error){return {target,error};}
     finally{finished++;$('runState').textContent=`${finished}/${targets.length}`;}
@@ -1041,14 +1089,19 @@ async function runPredicts() {
   }
   refreshPredictionSources();refreshMarkers();renderSummary();
   setRunButton('success',failed?`${completed} ok, ${failed} failed`:`${completed} updated`);
+  // On a phone, get the controls out of the way so the new track is visible.
+  if(completed&&isMobileLayout())setMobileParameters(false);
   if(completed){fitPredictions();toast(`${completed} prediction${completed===1?'':'s'} updated.`);}
   if(failed){const details=outcomes.filter(x=>x.error).map(x=>`${x.target._label}: ${x.error.message}`).join(' | ');toast(details,true,7000);}
 }
 
-function decoratePrediction(id,label,result) {
-  const features=(result.features||[]).map(f=>({...f,properties:{...(f.properties||{}),site_id:id,site_name:label}}));
-  return {...result,features,site_id:id,site_name:label};
+function decoratePrediction(id,label,result,extra=null) {
+  const features=(result.features||[]).map(f=>({...f,properties:{...(f.properties||{}),site_id:id,site_name:label,...(extra||{})}}));
+  return {...result,features,site_id:id,site_name:label,...(extra||{})};
 }
+// Burst-point and Multiple Balloon results stay on the map across normal runs.
+function isPinnedPrediction(id){return /^(burst|balloon)-/.test(String(id));}
+function clearSitePredictions(){for(const id of [...state.predictions.keys()])if(!isPinnedPrediction(id))state.predictions.delete(id);}
 
 function visiblePredictionEntries(){return[...state.predictions.values()].filter(p=>isSiteVisible(p.site_id));}
 function visiblePredictionFeatures(){return visiblePredictionEntries().flatMap(p=>p.features||[]);}
@@ -1065,21 +1118,36 @@ function predictionPointCollections() {
   const launches=[];const landings=[];
   for(const pred of visiblePredictionEntries()){
     const s=pred.summary;if(!s?.landing||!s?.launch)continue;
-    launches.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(s.launch.longitude),Number(s.launch.latitude)]},properties:{site_id:pred.site_id,site_name:pred.site_name}});
+    if(!pred.burst_point)launches.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(s.launch.longitude),Number(s.launch.latitude)]},properties:{site_id:pred.site_id,site_name:pred.site_name}});
     landings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(s.landing.longitude),Number(s.landing.latitude)]},properties:{site_id:pred.site_id,site_name:pred.site_name,landing_time:s.landing_time||'',active:pred.site_id===state.activePredictionId}});
   }
   return {launches:{type:'FeatureCollection',features:launches},landings:{type:'FeatureCollection',features:landings}};
 }
 
+// Several state changes in one click used to redraw the map sources several
+// times. Redraws are now collected and done once per animation frame.
+let predictionRenderQueued=false,curtainsDrawn=false;
 function refreshPredictionSources() {
+  if(predictionRenderQueued)return;
+  predictionRenderQueued=true;
+  requestAnimationFrame(flushPredictionSources);
+}
+function flushPredictionSources() {
+  predictionRenderQueued=false;
   if(!map?.getSource('prediction'))return;
   const features=visiblePredictionFeatures();
   const points=predictionPointCollections();
   map.getSource('prediction').setData({type:'FeatureCollection',features});
-  map.getSource('prediction-3d').setData(build3dCurtains(features));
+  // The 3-D curtain is thousands of polygons; only build it while 3-D is shown.
+  if(state.dimension==='3d'){map.getSource('prediction-3d').setData(build3dCurtains(features));curtainsDrawn=true;}
+  else if(curtainsDrawn){map.getSource('prediction-3d').setData(EMPTY_FC);curtainsDrawn=false;}
   map.getSource('prediction-launch-points').setData(points.launches);
   map.getSource('prediction-landing-points').setData(points.landings);
-  map.getSource('sweep').setData({type:'FeatureCollection',features:state.sweepFeatures});
+  if(state.sweepDirty){
+    map.getSource('sweep').setData({type:'FeatureCollection',features:state.multiSweepFeatures.length?[...state.sweepFeatures,...state.multiSweepFeatures]:state.sweepFeatures});
+    state.sweepDirty=false;
+  }
+  $('burstLegend')?.classList.toggle('hidden',!state.drawings.some(d=>d.properties?.kind==='burst'));
 }
 
 // Prediction endpoints are rendered as map layers so there are no DOM marker offsets.
@@ -1101,11 +1169,16 @@ function renderSummary() {
   
 }
 
+// Leave room for the Layers panel only when it is actually on screen.
+function fitPadding(top,bottom,left,right,rightWithPanel){
+  if(isMobileLayout())return {top:36,bottom:36,left:28,right:28};
+  return {top,bottom,left,right:$('layerPanel').classList.contains('collapsed')?right:rightWithPanel};
+}
 function predictionBounds(entries=visiblePredictionEntries()) {
   const b=new maplibregl.LngLatBounds();let count=0;for(const p of entries)for(const f of p.features||[])if(f.geometry?.type==='LineString')for(const c of f.geometry.coordinates){b.extend([c[0],c[1]]);count++;}return count?b:null;
 }
-function fitPredictions(){const b=predictionBounds();if(!b){toast('Run a prediction first.',true);return;}map.fitBounds(b,{padding:{top:70,bottom:80,left:65,right:$('layerPanel').classList.contains('collapsed')?70:295},maxZoom:10,duration:700});}
-function focusPrediction(id){const p=state.predictions.get(id);const b=predictionBounds(p?[p]:[]);if(b)map.fitBounds(b,{padding:{top:80,bottom:90,left:80,right:$('layerPanel').classList.contains('collapsed')?80:300},maxZoom:10,duration:600});}
+function fitPredictions(){const b=predictionBounds();if(!b){toast('Run a prediction first.',true);return;}map.fitBounds(b,{padding:fitPadding(70,80,65,70,295),maxZoom:10,duration:700});}
+function focusPrediction(id){const p=state.predictions.get(id);const b=predictionBounds(p?[p]:[]);if(b)map.fitBounds(b,{padding:fitPadding(80,90,80,80,300),maxZoom:10,duration:600});}
 function centerLanding(){const s=state.predictions.get(state.activePredictionId)?.summary;if(s)map.easeTo({center:[s.landing.longitude,s.landing.latitude],zoom:11,pitch:state.dimension==='3d'?45:0,duration:550});}
 async function copyLanding(){const s=state.predictions.get(state.activePredictionId)?.summary;if(!s)return;await navigator.clipboard.writeText(`${s.landing.latitude.toFixed(6)}, ${s.landing.longitude.toFixed(6)}`);toast('Landing coordinates copied.');}
 
@@ -1120,28 +1193,31 @@ function downloadBlob(content,type,name){const blob=content instanceof Blob?cont
 
 // Drawing and geofence workflow ------------------------------------------------
 function drawingFeatureCollection(includePreview=true){const features=state.drawings.map(d=>({...d,properties:{...(d.properties||{}),selected:d.properties?.drawing_id===state.selectedDrawingId}}));if(includePreview&&state.rectanglePreview)features.push(state.rectanglePreview);return{type:'FeatureCollection',features};}
-function refreshDrawings(){map.getSource('drawings')?.setData(drawingFeatureCollection());buildCustomPredictSiteList();refreshSweepSites();refreshForecastSites();}
-function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:`Geofence ${n}`;}
+let drawingRenderQueued=false;
+function renderDrawingSource(){if(drawingRenderQueued)return;drawingRenderQueued=true;requestAnimationFrame(()=>{drawingRenderQueued=false;map?.getSource('drawings')?.setData(drawingFeatureCollection());});}
+function refreshDrawings(){renderDrawingSource();buildCustomPredictSiteList();refreshSweepSites();refreshForecastSites();refreshMultiBalloonSites();}
+function nextDrawingName(kind){const n=state.drawings.filter(x=>x.properties?.kind===kind).length+1;return kind==='point'?`Custom Launch ${n}`:kind==='burst'?`Burst ${n}`:`Geofence ${n}`;}
 function addPointDrawing(lon,lat,name=null){const id=crypto.randomUUID?crypto.randomUUID():`p-${Date.now()}-${Math.random()}`;state.drawings.push({type:'Feature',geometry:{type:'Point',coordinates:[Number(lon),Number(lat)]},properties:{kind:'point',drawing_id:id,name:name||nextDrawingName('point'),predict_enabled:true}});state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();setDrawMode('select');markReadinessStale();toast('Custom launch site added and enabled for predicts.');}
 function rectangleBaselinePreview(a,b){return{type:'Feature',geometry:{type:'LineString',coordinates:[[a.lng,a.lat],[b.lng,b.lat]]},properties:{kind:'rectangle-guide',preview:true}};}
 function rectanglePolygonFeature(a,b,c,preview=false){const g=orientedRectangle(a,b,c);return{type:'Feature',geometry:{type:'Polygon',coordinates:[g.ring]},properties:{kind:'rectangle',drawing_id:preview?'preview':(crypto.randomUUID?crypto.randomUUID():`r-${Date.now()}-${Math.random()}`),name:preview?'Rectangle preview':nextDrawingName('rectangle'),preview,baseline_length_m:g.baseline_length_m,width_m:g.width_m,area_m2:g.area_m2,upper_altitude_ft:10000,upper_altitude_m:3048}};}
 function cancelRectangleDraft(message='Rectangle drawing cancelled.'){state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();if(message)toast(message);}
-function setDrawMode(mode){state.drawMode=mode;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;qsa('[data-draw-mode]').forEach(b=>b.classList.toggle('active',b.dataset.drawMode===mode));refreshDrawings();if(mode==='point')toast('Draw point: click once to create a working custom launch site.');if(mode==='rectangle')toast('Oriented rectangle: click the START of the first edge, then its END, then click to set the width.');if(mode==='select')toast('Select drawing: click a custom launch point or rectangle.');}
+function setDrawMode(mode){state.drawMode=mode;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;qsa('[data-draw-mode]').forEach(b=>b.classList.toggle('active',b.dataset.drawMode===mode));refreshDrawings();if(mode==='burst')openBurstPanel();if(mode==='point')toast('Draw point: click once to create a working custom launch site.');if(mode==='rectangle')toast('Oriented rectangle: click the START of the first edge, then its END, then click to set the width.');if(mode==='select')toast('Select drawing: click a custom launch point or rectangle.');}
 function handleMapDrawClick(e){
   if(!state.drawMode)return false;
   if(state.drawMode==='point'){addPointDrawing(e.lngLat.lng,e.lngLat.lat);return true;}
+  if(state.drawMode==='burst'){placeBurstPoint(e.lngLat.lng,e.lngLat.lat);return true;}
   if(state.drawMode==='rectangle'){
     if(!state.rectangleStart){state.rectangleStart={lng:e.lngLat.lng,lat:e.lngLat.lat};state.rectanglePreview=null;toast('Baseline started. Move in any direction and click to set its direction and length.');}
     else if(!state.rectangleEnd){const next={lng:e.lngLat.lng,lat:e.lngLat.lat};if(haversineMeters(state.rectangleStart,next)<1){toast('Make the baseline at least 1 meter long.',true);return true;}state.rectangleEnd=next;state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);toast('Baseline locked. Move to either side and click to set the rectangle width.');}
     else{try{const f=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},false);state.drawings.push(f);state.selectedDrawingId=f.properties.drawing_id;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();showSelectedDrawing();setDrawMode('select');toast(`Oriented geofence created: ${fmt(f.properties.baseline_length_m)} m × ${fmt(f.properties.width_m)} m.`);}catch(err){toast(err.message,true);}}
     refreshDrawings();return true;
   }
-  if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');$('deleteDrawing').disabled=true;}return true;}return false;
+  if(state.drawMode==='select'){const hits=map.queryRenderedFeatures(e.point,{layers:['drawing-point','drawing-fill','drawing-line']});const id=hits[0]?.properties?.drawing_id;if(id){state.selectedDrawingId=id;refreshDrawings();showSelectedDrawing();if(hits[0].properties?.kind==='burst')editBurstPoint(id);}else{state.selectedDrawingId=null;refreshDrawings();$('drawingInfo').classList.add('hidden');qs('.map-workspace')?.classList.remove('geofence-focus');$('deleteDrawing').disabled=true;}return true;}return false;
 }
-function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}refreshDrawings();}
+function handleDrawMouseMove(e){if(state.drawMode!=='rectangle'||!state.rectangleStart)return;if(!state.rectangleEnd){state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,{lng:e.lngLat.lng,lat:e.lngLat.lat});}else{try{state.rectanglePreview=rectanglePolygonFeature(state.rectangleStart,state.rectangleEnd,{lng:e.lngLat.lng,lat:e.lngLat.lat},true);}catch{state.rectanglePreview=rectangleBaselinePreview(state.rectangleStart,state.rectangleEnd);}}renderDrawingSource();}
 function selectedDrawing(){return state.drawings.find(d=>d.properties?.drawing_id===state.selectedDrawingId);}
-function drawingCoordinateText(d){if(!d)return'';if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²\n3D upper bound: ${fmt(d.properties?.upper_altitude_ft??10000,0)} ft (${fmt(d.properties?.upper_altitude_m??3048,0)} m)`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
-function showSelectedDrawing(){const d=selectedDrawing();const workspace=qs('.map-workspace');if(!d){$('drawingInfo').classList.add('hidden');workspace?.classList.remove('geofence-focus');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');workspace?.classList.add('geofence-focus');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
+function drawingCoordinateText(d){if(!d)return'';if(d.properties?.kind==='burst'){const [lon,lat]=d.geometry.coordinates;const when=d.properties.burst_datetime?localTime(d.properties.burst_datetime):'not set';return `Burst point (lat, lon):\n${lat.toFixed(6)}, ${lon.toFixed(6)}\nAltitude: ${d.properties.burst_altitude_ft?`${fmt(d.properties.burst_altitude_ft)} ft`:'not set'}\nBurst time: ${when}`;}if(d.geometry.type==='Point'){const [lon,lat]=d.geometry.coordinates;return `Point:\n(${lon.toFixed(6)}, ${lat.toFixed(6)})\nEnabled for predicts: ${d.properties?.predict_enabled!==false?'yes':'no'}`;}const ring=d.geometry.coordinates?.[0]||[];const metrics=d.properties?.baseline_length_m?`\nLength: ${fmt(d.properties.baseline_length_m,1)} m\nWidth: ${fmt(d.properties.width_m,1)} m\nArea: ${fmt(d.properties.area_m2,0)} m²\n3D upper bound: ${fmt(d.properties?.upper_altitude_ft??10000,0)} ft (${fmt(d.properties?.upper_altitude_m??3048,0)} m)`:'';return 'Oriented geofence corners:\n'+ring.slice(0,-1).map(c=>`(${Number(c[0]).toFixed(6)}, ${Number(c[1]).toFixed(6)})`).join('\n')+metrics;}
+function showSelectedDrawing(){const d=selectedDrawing();const workspace=qs('.map-workspace');if(!d){$('drawingInfo').classList.add('hidden');workspace?.classList.remove('geofence-focus');$('rectangleAltitudeRow')?.classList.add('hidden');$('deleteDrawing').disabled=true;return;}$('drawingInfo').classList.remove('hidden');workspace?.classList.toggle('geofence-focus',d.properties?.kind!=='burst');$('drawingInfoTitle').textContent=d.properties?.name||'Selected drawing';$('drawingCoordinates').textContent=drawingCoordinateText(d);$('drawingName').value=d.properties?.name||'';const isRect=d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon';$('rectangleAltitudeRow')?.classList.toggle('hidden',!isRect);if(isRect&&$('drawingUpperAltitude'))$('drawingUpperAltitude').value=Number(d.properties?.upper_altitude_ft??10000).toFixed(0);$('deleteDrawing').disabled=false;}
 
 function saveDrawingAltitude(){
   const d=selectedDrawing();if(!d||!(d.properties?.kind==='rectangle'||d.geometry?.type==='Polygon'))return;
@@ -1152,8 +1228,8 @@ function saveDrawingAltitude(){
 }
 
 function saveDrawingName(){const d=selectedDrawing();if(!d)return;const name=$('drawingName').value.trim();if(!name){toast('Enter a name first.',true);return;}d.properties.name=name;refreshDrawings();showSelectedDrawing();markReadinessStale();toast('Drawing name saved.');}
-function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.selectedDrawingId=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();markReadinessStale();}
-function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.properties?.kind==='point').map(d=>`custom-${d.properties.drawing_id}`);state.drawings=[];customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();markReadinessStale();toast('All drawings cleared.');}
+function deleteSelectedDrawing(){const id=state.selectedDrawingId;if(!id)return;state.drawings=state.drawings.filter(d=>d.properties?.drawing_id!==id);state.predictions.delete(`custom-${id}`);state.predictions.delete(`burst-${id}`);if(state.burstDrawingId===id)state.burstDrawingId=null;state.selectedDrawingId=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();markReadinessStale();}
+function deleteAllDrawings(){const customIds=state.drawings.filter(d=>d.geometry?.type==='Point').map(d=>`${d.properties?.kind==='burst'?'burst':'custom'}-${d.properties.drawing_id}`);state.drawings=[];state.burstDrawingId=null;customIds.forEach(id=>state.predictions.delete(id));state.selectedDrawingId=null;state.rectangleStart=null;state.rectangleEnd=null;state.rectanglePreview=null;refreshDrawings();refreshPredictionSources();refreshMarkers();renderSummary();showSelectedDrawing();markReadinessStale();toast('All drawings cleared.');}
 function downloadDrawings(){if(!state.drawings.length){toast('No drawings to download.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:state.drawings},null,2),'application/geo+json','BPP_map_drawings.geojson');}
 function downloadGeofence(){const rectangles=state.drawings.filter(d=>d.properties?.kind==='rectangle');if(!rectangles.length){toast('Draw an oriented rectangle first.',true);return;}downloadBlob(JSON.stringify({type:'FeatureCollection',features:rectangles},null,2),'application/geo+json','BPP_geofence.geojson');}
 async function copyDrawing(){const d=selectedDrawing();if(!d)return;await navigator.clipboard.writeText(drawingCoordinateText(d));toast('Drawing coordinates copied.');}
@@ -1169,13 +1245,290 @@ async function queryAddresses(){
 // Parameter sweep ------------------------------------------------------------
 function refreshSweepSites(){const select=$('sweepSite');if(!select)return;const current=select.value;select.innerHTML='';for(const s of state.launchLocations){const o=document.createElement('option');o.value=s._id;o.textContent=s._label;select.appendChild(o);}for(const d of state.drawings.filter(x=>x.properties?.kind==='point')){const o=document.createElement('option');o.value=`custom-${d.properties.drawing_id}`;o.textContent=d.properties.name||'Custom Launch';select.appendChild(o);}if([...select.options].some(o=>o.value===current))select.value=current;}
 function findSweepTarget(id){if(id.startsWith('custom-')){const did=id.slice(7),d=state.drawings.find(x=>x.properties?.drawing_id===did);return d?{...d,_id:id,_label:d.properties.name}:null;}return state.launchLocations.find(x=>x._id===id)||null;}
-async function runSweep(){const target=findSweepTarget($('sweepSite').value);if(!target){toast('Choose a launch site for the sweep.',true);return;}if(!(await ensureAutomaticBurst()))return;const lower=Number($('sweepLower').value),upper=Number($('sweepUpper').value),step=Number($('sweepStep').value);if(!Number.isFinite(lower)||!Number.isFinite(upper)||!Number.isFinite(step)||step<=0||lower>upper){toast('Invalid sweep bounds.',true);return;}const values=[];for(let v=lower;v<=upper+step*1e-6;v+=step){values.push(Number(v.toFixed(6)));if(values.length>20){toast('Sweep is limited to 20 predictions at a time.',true);return;}}state.sweepFeatures=[];$('sweepProgress').textContent=`Running 0/${values.length}…`;
+async function runSweep(){const target=findSweepTarget($('sweepSite').value);if(!target){toast('Choose a launch site for the sweep.',true);return;}if(!(await ensureAutomaticBurst()))return;const lower=Number($('sweepLower').value),upper=Number($('sweepUpper').value),step=Number($('sweepStep').value);if(!Number.isFinite(lower)||!Number.isFinite(upper)||!Number.isFinite(step)||step<=0||lower>upper){toast('Invalid sweep bounds.',true);return;}const values=[];for(let v=lower;v<=upper+step*1e-6;v+=step){values.push(Number(v.toFixed(6)));if(values.length>20){toast('Sweep is limited to 20 predictions at a time.',true);return;}}state.sweepFeatures=[];state.sweepDirty=true;$('sweepProgress').textContent=`Running 0/${values.length}…`;
   const param=$('sweepParameter').value;let done=0;
-  const outcomes=await mapWithConcurrency(values,4,async value=>{const body=predictionBody(target);if(param==='altitude'){if(state.predictType==='burst')body.burst_altitude_m=value;else body.float_altitude_m=value;}else body[param]=value;try{return {value,result:await api('/api/predict',{method:'POST',body:JSON.stringify(body)})};}catch(error){console.warn('sweep',value,error);return {value,error};}finally{done++;$('sweepProgress').textContent=`Running ${done}/${values.length}…`;}});
-  const failures=outcomes.filter(x=>x.error);for(const outcome of outcomes.filter(x=>!x.error)){for(const f of outcome.result.features||[])state.sweepFeatures.push({...f,properties:{...(f.properties||{}),sweep_value:outcome.value,sweep_parameter:param}});}refreshPredictionSources();
+  const outcomes=await mapWithConcurrency(values,PREDICT_CONCURRENCY,async value=>{const body=predictionBody(target);if(param==='altitude'){if(state.predictType==='burst')body.burst_altitude_m=value;else body.float_altitude_m=value;}else body[param]=value;try{return {value,result:await api('/api/predict',{method:'POST',body:JSON.stringify(body)})};}catch(error){console.warn('sweep',value,error);return {value,error};}finally{done++;$('sweepProgress').textContent=`Running ${done}/${values.length}…`;}});
+  const failures=outcomes.filter(x=>x.error);for(const outcome of outcomes.filter(x=>!x.error)){for(const f of outcome.result.features||[])state.sweepFeatures.push({...f,properties:{...(f.properties||{}),sweep_value:outcome.value,sweep_parameter:param}});}state.sweepDirty=true;refreshPredictionSources();
   $('sweepProgress').textContent=`Finished ${values.length-failures.length}/${values.length} sweep predictions. Dashed lines are sweep results.`;toast(failures.length?`Parameter sweep completed with ${failures.length} failure${failures.length===1?'':'s'}.`:'Parameter sweep complete.',Boolean(failures.length),5200);
 }
-function clearSweep(){state.sweepFeatures=[];refreshPredictionSources();$('sweepProgress').textContent='Sweep results cleared.';}
+function clearSweep(){state.sweepFeatures=[];state.sweepDirty=true;refreshPredictionSources();$('sweepProgress').textContent='Sweep results cleared.';}
+
+// Create Burst ---------------------------------------------------------------
+// A burst point is a drawing (kind 'burst') plus a descent-only prediction that
+// starts at the burst position, altitude, and time the operator enters.
+function burstDrawing(id=state.burstDrawingId){return state.drawings.find(d=>d.properties?.drawing_id===id&&d.properties?.kind==='burst')||null;}
+function parseCoordinate(text,limit){const value=Number(String(text??'').trim());return String(text??'').trim()!==''&&Number.isFinite(value)&&Math.abs(value)<=limit?value:NaN;}
+function updateBurstAltitudeNote(){const ft=Number($('burstPointAltitudeFt').value);$('burstPointAltitudeM').textContent=Number.isFinite(ft)&&ft>0?`${fmt(ft*0.3048)} m`:'—';}
+function setBurstTimeNow(){
+  const now=new Date(),utc=$('burstTimezone').value==='utc';
+  const pad=v=>String(v).padStart(2,'0');
+  $('burstDate').value=utc?now.toISOString().slice(0,10):dateInputValue(now);
+  $('burstTime').value=utc?now.toISOString().slice(11,19):`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+function resetBurstForm(){
+  state.burstDrawingId=null;
+  $('burstName').value='';$('burstLatitude').value='';$('burstLongitude').value='';
+  $('burstPointAltitudeFt').value=String(Math.round(feet($('burstAltitude').value||28000)/100)*100);
+  $('burstDescentRate').value=$('descentRate').value||'9';
+  $('burstTimezone').value=$('launchTimezone').value;
+  $('burstDate').min=earliestDateValue();
+  setBurstTimeNow();updateBurstAltitudeNote();
+  $('burstProgress').textContent='Click the map where the balloon burst, or type its coordinates.';
+}
+function openBurstPanel(){
+  $('sweepPanel')?.classList.add('hidden');$('multiPanel')?.classList.add('hidden');
+  if($('burstPanel').classList.contains('hidden')){resetBurstForm();$('burstPanel').classList.remove('hidden');}
+  toast('Create Burst: click the map where the balloon burst, or type its GPS coordinates.');
+}
+function closeBurstPanel(){
+  const panel=$('burstPanel');if(!panel||panel.classList.contains('hidden'))return;
+  panel.classList.add('hidden');
+  if(state.drawMode==='burst'){state.drawMode=null;qsa('[data-draw-mode]').forEach(b=>b.classList.remove('active'));}
+}
+function placeBurstPoint(lon,lat){
+  lon=Number(lon);lat=Number(lat);
+  let d=burstDrawing();
+  if(d){d.geometry.coordinates=[lon,lat];state.predictions.delete(`burst-${d.properties.drawing_id}`);refreshPredictionSources();renderSummary();}
+  else{
+    const id=crypto.randomUUID?crypto.randomUUID():`b-${Date.now()}-${Math.random()}`;
+    d={type:'Feature',geometry:{type:'Point',coordinates:[lon,lat]},properties:{kind:'burst',drawing_id:id,name:$('burstName').value.trim()||nextDrawingName('burst')}};
+    state.drawings.push(d);state.burstDrawingId=id;
+  }
+  state.selectedDrawingId=d.properties.drawing_id;
+  $('burstLatitude').value=lat.toFixed(6);$('burstLongitude').value=lon.toFixed(6);
+  if(!$('burstName').value.trim())$('burstName').value=d.properties.name;
+  refreshDrawings();showSelectedDrawing();
+  $('burstProgress').textContent='Burst point set. Check the altitude and burst time, then choose Predict Landing.';
+}
+function editBurstPoint(id){
+  const d=burstDrawing(id);if(!d)return;
+  state.burstDrawingId=id;const [lon,lat]=d.geometry.coordinates;const p=d.properties;
+  $('burstName').value=p.name||'';$('burstLatitude').value=Number(lat).toFixed(6);$('burstLongitude').value=Number(lon).toFixed(6);
+  if(p.burst_altitude_ft)$('burstPointAltitudeFt').value=String(p.burst_altitude_ft);
+  if(p.descent_rate_ms)$('burstDescentRate').value=String(p.descent_rate_ms);
+  if(p.burst_date){$('burstDate').value=p.burst_date;$('burstTime').value=p.burst_time;$('burstTimezone').value=p.burst_timezone||'local';}
+  updateBurstAltitudeNote();$('burstPanel').classList.remove('hidden');
+  $('burstProgress').textContent='Editing this burst point. Change any value and choose Predict Landing.';
+}
+// Typing coordinates is equivalent to clicking the map. A pasted "lat, lon"
+// pair in the latitude box fills both fields.
+function burstCoordinatesChanged(){
+  const pair=String($('burstLatitude').value).match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if(pair){$('burstLatitude').value=pair[1];$('burstLongitude').value=pair[2];}
+  const lat=parseCoordinate($('burstLatitude').value,90),lon=parseCoordinate($('burstLongitude').value,180);
+  if(!Number.isFinite(lat)||!Number.isFinite(lon))return;
+  placeBurstPoint(lon,lat);
+  map?.easeTo({center:[lon,lat],zoom:Math.max(map.getZoom(),9),duration:500});
+}
+async function runBurstPoint(){
+  if(state.burstRunning)return;
+  const lat=parseCoordinate($('burstLatitude').value,90),lon=parseCoordinate($('burstLongitude').value,180);
+  if(!Number.isFinite(lat)||!Number.isFinite(lon)){toast('Click the map or enter a valid latitude and longitude for the burst point.',true);return;}
+  const altitudeFt=Number($('burstPointAltitudeFt').value),descent=Number($('burstDescentRate').value);
+  if(!Number.isFinite(altitudeFt)||altitudeFt<500||altitudeFt>200000){toast('Enter a burst altitude from 500 to 200,000 ft.',true);return;}
+  if(!Number.isFinite(descent)||descent<=0||descent>50){toast('Enter a descent rate from 0.1 to 50 m/s.',true);return;}
+  let when;
+  try{when=composeDateTime($('burstDate').value,$('burstTime').value,$('burstTimezone').value,'burst');}catch(e){toast(e.message,true);return;}
+  let d=burstDrawing();
+  if(!d||d.geometry.coordinates[0]!==lon||d.geometry.coordinates[1]!==lat){placeBurstPoint(lon,lat);d=burstDrawing();}
+  const name=$('burstName').value.trim()||d.properties.name;
+  Object.assign(d.properties,{name,burst_altitude_ft:altitudeFt,descent_rate_ms:descent,burst_datetime:when.toISOString(),burst_date:$('burstDate').value,burst_time:$('burstTime').value,burst_timezone:$('burstTimezone').value});
+  const id=`burst-${d.properties.drawing_id}`;
+  state.burstRunning=true;$('runBurstPoint').disabled=true;$('burstProgress').textContent='Predicting the descent…';
+  try{
+    const result=await api('/api/predict-descent',{method:'POST',body:JSON.stringify({burst:{name,latitude:lat,longitude:lon},burst_datetime:when.toISOString(),burst_altitude_ft:altitudeFt,descent_rate_ms:descent})});
+    state.predictions.set(id,decoratePrediction(id,name,result,{burst_point:true}));state.activePredictionId=id;
+    refreshDrawings();showSelectedDrawing();refreshPredictionSources();renderSummary();focusPrediction(id);
+    const s=result.summary;
+    $('burstProgress').textContent=`Landing ${s.landing.latitude.toFixed(5)}, ${s.landing.longitude.toFixed(5)} · ${localTime(s.landing_time)} · ${duration(s.flight_duration_s)} descent · ${fmt(miles(s.ground_distance_m),1)} mi drift${s.approximation?`\n${s.approximation}`:''}`;
+    toast(`${name}: predicted landing ${s.landing.latitude.toFixed(4)}, ${s.landing.longitude.toFixed(4)}.`,false,6000);
+  }catch(e){$('burstProgress').textContent=`Could not predict the landing: ${e.message}`;toast(`Create Burst: ${e.message}`,true,7000);}
+  finally{state.burstRunning=false;$('runBurstPoint').disabled=false;}
+}
+function wireBurstControls(){
+  $('closeBurstPanel')?.addEventListener('click',closeBurstPanel);
+  $('runBurstPoint')?.addEventListener('click',runBurstPoint);
+  $('newBurstPoint')?.addEventListener('click',()=>{resetBurstForm();if(state.drawMode!=='burst')setDrawMode('burst');});
+  $('burstTimeNow')?.addEventListener('click',setBurstTimeNow);
+  $('burstPointAltitudeFt')?.addEventListener('input',updateBurstAltitudeNote);
+  ['burstLatitude','burstLongitude'].forEach(id=>$(id)?.addEventListener('change',burstCoordinatesChanged));
+  $('burstName')?.addEventListener('change',()=>{const d=burstDrawing(),name=$('burstName').value.trim();if(d&&name){d.properties.name=name;refreshDrawings();showSelectedDrawing();}});
+}
+
+// Multiple Balloon -----------------------------------------------------------
+// Each balloon carries its own launch site, time, flight parameters, and sweep.
+// All base runs and sweep runs are sent together.
+const MULTI_SWEEP_DEFAULTS={ascent_rate_ms:{spread:1,step:.5},descent_rate_ms:{spread:2,step:1},altitude:{spread:2000,step:1000}};
+const MULTI_MAX_BALLOONS=6;
+function balloonSweepBase(b,param=b.sweepParam){return param==='altitude'?(b.mode==='float'?b.floatAlt:b.burstAlt):param==='descent_rate_ms'?b.descent:b.ascent;}
+function setBalloonSweepDefaults(b){const d=MULTI_SWEEP_DEFAULTS[b.sweepParam]||MULTI_SWEEP_DEFAULTS.ascent_rate_ms;const base=Number(balloonSweepBase(b))||0;b.sweepLower=Math.max(d.step,Number((base-d.spread).toFixed(3)));b.sweepUpper=Number((base+d.spread).toFixed(3));b.sweepStep=d.step;}
+function newBalloon(overrides={}){
+  const index=state.balloonSeq++;
+  const fallbackSite=selectedPresetSites()[0]?._id||state.launchLocations[0]?._id||'';
+  const b={id:`b${index+1}`,name:`Balloon ${index+1}`,color:BALLOON_COLORS[index%BALLOON_COLORS.length],siteId:fallbackSite,mode:'burst',
+    date:$('launchDate').value,time:$('launchTime').value||'10:00',ascent:Number($('ascentRate').value)||5.5,descent:Number($('descentRate').value)||9,
+    burstAlt:Number($('burstAltitude').value)||28000,floatAlt:Number($('floatAltitude').value)||22000,floatRate:Number($('floatRate').value)||1,floatDuration:Number($('floatDuration').value)||60,
+    sweepOn:true,sweepParam:'ascent_rate_ms',sweepLower:0,sweepUpper:0,sweepStep:.5,...overrides};
+  setBalloonSweepDefaults(b);return b;
+}
+function ensureBalloons(){
+  if(state.balloons.length)return;
+  // Start with the common pairing: a standard burst flight and a float flight an hour later.
+  const [h,m]=String($('launchTime').value||'10:00').split(':').map(Number);
+  const later=`${String((h+1)%24).padStart(2,'0')}:${String(m||0).padStart(2,'0')}`;
+  state.balloons.push(newBalloon({name:'Burst balloon'}),newBalloon({name:'Float balloon',mode:'float',time:h<23?later:$('launchTime').value}));
+}
+function multiSiteOptions(selected){
+  const targets=forecastTargets();
+  return targets.map(t=>`<option value="${esc(t._id)}"${t._id===selected?' selected':''}>${esc(t._label)}</option>`).join('')||'<option value="">No launch sites loaded</option>';
+}
+function balloonCardHtml(b){
+  const field=(label,key,attrs,cls='')=>`<label class="${cls}"><span>${label}</span><input data-field="${key}" value="${esc(b[key])}" ${attrs}></label>`;
+  const isFloat=b.mode==='float';
+  const flight=isFloat
+    ?field('Float altitude (m)','floatAlt','type="number" min="1000" step="500"')+field('Float rate (m/s)','floatRate','type="number" min="0.1" step="0.5"')+field('Float duration (min)','floatDuration','type="number" min="1" step="10"')
+    :field('Burst altitude (m)','burstAlt','type="number" min="1000" step="100"');
+  const sweepUnit=b.sweepParam==='altitude'?'m':'m/s';
+  return `<article class="multi-card" data-balloon="${esc(b.id)}" style="--balloon:${esc(b.color)}">
+    <header><i class="multi-swatch" aria-hidden="true"></i><input class="multi-name" data-field="name" type="text" maxlength="60" value="${esc(b.name)}" aria-label="Balloon name"><button type="button" data-remove-balloon title="Remove this balloon" aria-label="Remove ${esc(b.name)}">×</button></header>
+    <div class="multi-grid">
+      <label class="span-2"><span>Launch site</span><select data-field="siteId">${multiSiteOptions(b.siteId)}</select></label>
+      <label><span>Type</span><select data-field="mode"><option value="burst"${isFloat?'':' selected'}>Burst</option><option value="float"${isFloat?' selected':''}>Float</option></select></label>
+      ${field('Launch date','date',`type="date" min="${earliestDateValue()}"`)}
+      ${field('Launch time','time','type="time"')}
+      ${field('Ascent rate (m/s)','ascent','type="number" min="0.1" step="0.5"')}
+      ${field('S.L. descent (m/s)','descent','type="number" min="0.1" step="0.5"')}
+      ${flight}
+    </div>
+    <div class="multi-sweep${b.sweepOn?'':' off'}">
+      <label class="multi-sweep-toggle"><input data-field="sweepOn" type="checkbox"${b.sweepOn?' checked':''}><span>Parameter sweep</span></label>
+      <label><span>Parameter</span><select data-field="sweepParam"><option value="ascent_rate_ms"${b.sweepParam==='ascent_rate_ms'?' selected':''}>Ascent rate (m/s)</option><option value="descent_rate_ms"${b.sweepParam==='descent_rate_ms'?' selected':''}>Descent rate (m/s)</option><option value="altitude"${b.sweepParam==='altitude'?' selected':''}>${isFloat?'Float':'Burst'} altitude (m)</option></select></label>
+      ${field(`Lower (${sweepUnit})`,'sweepLower','type="number" step="any"')}${field(`Upper (${sweepUnit})`,'sweepUpper','type="number" step="any"')}${field('Step','sweepStep','type="number" min="0.01" step="any"')}
+    </div>
+  </article>`;
+}
+function renderMultiBalloons(){
+  const root=$('multiBalloonList');if(!root)return;
+  root.innerHTML=state.balloons.map(balloonCardHtml).join('');
+  $('addMultiBalloon').disabled=state.balloons.length>=MULTI_MAX_BALLOONS;
+}
+function refreshMultiBalloonSites(){
+  const panel=$('multiPanel');if(!panel||panel.classList.contains('hidden'))return;
+  qsa('#multiBalloonList select[data-field="siteId"]').forEach(select=>{const b=state.balloons.find(x=>x.id===select.closest('[data-balloon]')?.dataset.balloon);if(b)select.innerHTML=multiSiteOptions(b.siteId);});
+}
+const MULTI_NUMERIC_FIELDS=new Set(['ascent','descent','burstAlt','floatAlt','floatRate','floatDuration','sweepLower','sweepUpper','sweepStep']);
+function multiFieldChanged(e){
+  const input=e.target.closest('[data-field]');const card=e.target.closest('[data-balloon]');if(!input||!card)return;
+  const b=state.balloons.find(x=>x.id===card.dataset.balloon);if(!b)return;
+  const key=input.dataset.field;
+  b[key]=input.type==='checkbox'?input.checked:MULTI_NUMERIC_FIELDS.has(key)?Number(input.value):input.value;
+  if(e.type!=='change')return;
+  // These change which fields the card shows, so the card is redrawn.
+  if(key==='mode'||key==='sweepParam'){setBalloonSweepDefaults(b);renderMultiBalloons();}
+  else if(key==='sweepOn')card.querySelector('.multi-sweep')?.classList.toggle('off',!b.sweepOn);
+}
+function openMultiPanel(){
+  $('sweepPanel')?.classList.add('hidden');closeBurstPanel();
+  const panel=$('multiPanel');const opening=panel.classList.contains('hidden');panel.classList.toggle('hidden');
+  if(opening){ensureBalloons();renderMultiBalloons();}
+}
+function balloonSweepValues(b){
+  if(!b.sweepOn)return [];
+  const lower=Number(b.sweepLower),upper=Number(b.sweepUpper),step=Number(b.sweepStep);
+  if(!Number.isFinite(lower)||!Number.isFinite(upper)||!Number.isFinite(step)||step<=0||lower>upper)throw new Error(`${b.name}: invalid sweep bounds.`);
+  const values=[];
+  for(let v=lower;v<=upper+step*1e-6;v+=step){values.push(Number(v.toFixed(6)));if(values.length>20)throw new Error(`${b.name}: a sweep is limited to 20 predictions.`);}
+  return values;
+}
+function balloonRequestBody(b,target){
+  const [lon,lat]=target.geometry.coordinates;
+  const numbers={ascent:'ascent rate',descent:'descent rate',[b.mode==='float'?'floatAlt':'burstAlt']:`${b.mode} altitude`};
+  for(const [key,label] of Object.entries(numbers))if(!Number.isFinite(Number(b[key]))||Number(b[key])<=0)throw new Error(`${b.name}: enter a valid ${label}.`);
+  let when;
+  try{when=composeDateTime(b.date,b.time,$('launchTimezone').value,'launch');}catch(e){throw new Error(`${b.name}: ${e.message}`);}
+  return {
+    mode:b.mode,launch:{name:`${b.name} · ${target._label}`,latitude:Number(lat),longitude:Number(lon)},launch_datetime:when.toISOString(),
+    ascent_rate_ms:Number(b.ascent),descent_rate_ms:Number(b.descent),burst_altitude_m:Number(b.burstAlt),float_altitude_m:Number(b.floatAlt),
+    float_ascent_rate_ms:Number(b.floatRate)||1,float_duration_min:Number(b.floatDuration)||60,
+  };
+}
+function multiSweepLabel(param,value){const shown=fmt(value,3);return param==='altitude'?`Alt ${shown} m`:param==='descent_rate_ms'?`Descent ${shown} m/s`:`Ascent ${shown} m/s`;}
+function clearMultiBalloonResults(announce=true){
+  for(const id of [...state.predictions.keys()])if(String(id).startsWith('balloon-'))state.predictions.delete(id);
+  state.multiSweepFeatures=[];state.multiResults=[];state.sweepDirty=true;
+  refreshPredictionSources();renderSummary();renderMultiResults();
+  if(announce)$('multiProgress').textContent='Multiple Balloon results cleared.';
+}
+function renderMultiResults(){
+  const root=$('multiResults');if(!root)return;
+  if(!state.multiResults.length){root.innerHTML='';return;}
+  const rows=state.multiResults.map((r,i)=>{
+    if(r.error)return `<tr class="failed"><td><i style="background:${esc(r.color)}"></i>${esc(r.name)}</td><td>${esc(r.label)}</td><td colspan="4">${esc(r.error)}</td></tr>`;
+    return `<tr data-result="${i}" tabindex="0" title="Center the map on this landing"><td><i style="background:${esc(r.color)}"></i>${esc(r.name)}</td><td>${esc(r.label)}</td><td>${r.landing.latitude.toFixed(5)}, ${r.landing.longitude.toFixed(5)}</td><td>${esc(localTime(r.landing_time))}</td><td>${duration(r.flight_duration_s)}</td><td>${r.offset_m==null?'—':`${fmt(miles(r.offset_m),1)} mi`}</td></tr>`;
+  }).join('');
+  root.innerHTML=`<table class="multi-table"><thead><tr><th>Balloon</th><th>Run</th><th>Landing</th><th>Landing time</th><th>Flight time</th><th>From base</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+async function runMultiBalloon(){
+  if(state.multiRunning)return;
+  const jobs=[];
+  try{
+    if(!state.balloons.length)throw new Error('Add at least one balloon.');
+    for(const b of state.balloons){
+      const target=findSweepTarget(String(b.siteId||''));
+      if(!target)throw new Error(`${b.name}: choose a launch site.`);
+      const base=balloonRequestBody(b,target);
+      jobs.push({balloon:b,target,kind:'base',body:base});
+      for(const value of balloonSweepValues(b)){
+        const body={...base};
+        if(b.sweepParam==='altitude'){if(b.mode==='float')body.float_altitude_m=value;else body.burst_altitude_m=value;}else body[b.sweepParam]=value;
+        jobs.push({balloon:b,target,kind:'sweep',value,body});
+      }
+    }
+  }catch(e){toast(e.message,true,6000);return;}
+  state.multiRunning=true;$('runMultiBalloon').disabled=true;clearMultiBalloonResults(false);
+  let done=0;$('multiProgress').textContent=`Running 0/${jobs.length}…`;
+  const outcomes=await mapWithConcurrency(jobs,PREDICT_CONCURRENCY,async job=>{
+    try{return {job,result:await api('/api/predict',{method:'POST',body:JSON.stringify(job.body)})};}
+    catch(error){console.warn('multiple balloon',job.balloon.name,job.value,error);return {job,error};}
+    finally{done++;$('multiProgress').textContent=`Running ${done}/${jobs.length}…`;}
+  });
+  const baseLanding=new Map();
+  for(const {job,result} of outcomes){if(result&&job.kind==='base')baseLanding.set(job.balloon.id,result.summary?.landing);}
+  let failures=0;
+  for(const {job,result,error} of outcomes){
+    const b=job.balloon;const label=job.kind==='base'?'Base':multiSweepLabel(b.sweepParam,job.value);
+    if(error){failures++;state.multiResults.push({name:b.name,color:b.color,label,error:error.message});continue;}
+    const s=result.summary||{};
+    if(job.kind==='base'){
+      const id=`balloon-${b.id}`;
+      state.predictions.set(id,decoratePrediction(id,`${b.name} · ${job.target._label}`,result,{balloon_color:b.color,balloon_name:b.name}));
+      if(!isPinnedPrediction(state.activePredictionId)||!state.predictions.has(state.activePredictionId))state.activePredictionId=id;
+    }else{
+      for(const f of result.features||[])state.multiSweepFeatures.push({...f,properties:{...(f.properties||{}),sweep_value:job.value,sweep_parameter:b.sweepParam,balloon_name:b.name}});
+    }
+    const base=baseLanding.get(b.id);
+    state.multiResults.push({name:b.name,color:b.color,label,landing:s.landing,landing_time:s.landing_time,flight_duration_s:s.flight_duration_s,
+      offset_m:job.kind==='sweep'&&base&&s.landing?haversineMeters({lng:base.longitude,lat:base.latitude},{lng:s.landing.longitude,lat:s.landing.latitude}):null});
+  }
+  state.sweepDirty=true;state.multiRunning=false;$('runMultiBalloon').disabled=false;
+  refreshPredictionSources();renderSummary();renderMultiResults();
+  const ok=jobs.length-failures;
+  $('multiProgress').textContent=`Finished ${ok}/${jobs.length} predictions for ${state.balloons.length} balloon${state.balloons.length===1?'':'s'}. Solid lines are base runs; dashed lines are sweep results.`;
+  if(ok)fitPredictions();
+  toast(failures?`Multiple Balloon completed with ${failures} failure${failures===1?'':'s'}.`:'Multiple Balloon run complete.',Boolean(failures),5200);
+}
+function wireMultiBalloonControls(){
+  $('openMultiBalloon')?.addEventListener('click',openMultiPanel);
+  $('closeMultiPanel')?.addEventListener('click',()=>$('multiPanel').classList.add('hidden'));
+  $('runMultiBalloon')?.addEventListener('click',runMultiBalloon);
+  $('clearMultiBalloon')?.addEventListener('click',()=>clearMultiBalloonResults());
+  $('addMultiBalloon')?.addEventListener('click',()=>{if(state.balloons.length>=MULTI_MAX_BALLOONS)return;state.balloons.push(newBalloon());renderMultiBalloons();});
+  const list=$('multiBalloonList');
+  list?.addEventListener('input',multiFieldChanged);list?.addEventListener('change',multiFieldChanged);
+  list?.addEventListener('click',e=>{const button=e.target.closest('[data-remove-balloon]');if(!button)return;const id=button.closest('[data-balloon]')?.dataset.balloon;state.balloons=state.balloons.filter(b=>b.id!==id);state.predictions.delete(`balloon-${id}`);renderMultiBalloons();refreshPredictionSources();renderSummary();});
+  const center=e=>{if(e.type==='keydown'&&e.key!=='Enter')return;const row=e.target.closest('tr[data-result]');const r=row&&state.multiResults[Number(row.dataset.result)];if(r?.landing)map.easeTo({center:[r.landing.longitude,r.landing.latitude],zoom:Math.max(map.getZoom(),10),duration:550});};
+  $('multiResults')?.addEventListener('click',center);$('multiResults')?.addEventListener('keydown',center);
+}
 
 
 const LAUNCH_THEME_PRESETS={
@@ -1226,7 +1579,7 @@ function wireControls(){
   $('predictsTab').addEventListener('click',()=>setAppView('predicts'));$('safetyRulesTab')?.addEventListener('click',()=>setAppView('safety'));$('readinessTab')?.addEventListener('click',()=>setAppView('readiness'));$('inflationTab').addEventListener('click',()=>setAppView('inflation'));$('infoTab')?.addEventListener('click',()=>setAppView('info'));
   $('saveSafetyRules')?.addEventListener('click',saveSafetyRules);$('resetSafetyRules')?.addEventListener('click',resetSafetyRules);
   $('refreshReadiness')?.addEventListener('click',refreshReadiness);$('readinessSort')?.addEventListener('change',e=>{state.readinessSort=e.target.value;renderReadiness();});
-  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('launchTimePopover')?.classList.contains('hidden')){toggleLaunchTimePopover(false);return;}if(!$('forecastPanel')?.classList.contains('hidden')){closeForecastPanel();return;}if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
+  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('launchTimePopover')?.classList.contains('hidden')){toggleLaunchTimePopover(false);return;}if(!$('forecastPanel')?.classList.contains('hidden')){closeForecastPanel();return;}if(!$('sweepPanel')?.classList.contains('hidden')){$('sweepPanel').classList.add('hidden');return;}if(!$('multiPanel')?.classList.contains('hidden')){$('multiPanel').classList.add('hidden');return;}if(!$('burstPanel')?.classList.contains('hidden')){closeBurstPanel();return;}if(state.drawMode==='rectangle'&&(state.rectangleStart||state.rectangleEnd)){cancelRectangleDraft();}});
   $('launchTimeButton')?.addEventListener('click',e=>{e.stopPropagation();toggleLaunchTimePopover();});
   $('launchTimePopover')?.addEventListener('click',e=>e.stopPropagation());
   document.addEventListener('click',()=>toggleLaunchTimePopover(false));
@@ -1249,7 +1602,11 @@ function wireControls(){
   $('zoomPredicts').addEventListener('click',fitPredictions);$('downloadKml').addEventListener('click',exportKml);$('downloadGeofence').addEventListener('click',downloadGeofence);$('queryAddresses').addEventListener('click',queryAddresses);$('aboutMap').addEventListener('click',()=>setAppView('info'));
   $('openForecastAnalysis')?.addEventListener('click',openForecastPanel);$('closeForecastPanel')?.addEventListener('click',closeForecastPanel);$('refreshForecastComparison')?.addEventListener('click',loadForecastComparison);$('forecastSite')?.addEventListener('change',loadForecastComparison);
   $('refreshFaaData')?.addEventListener('click',()=>refreshFaaData(true));
-  $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('sweepPanel').classList.toggle('hidden');});$('closeSweepPanel')?.addEventListener('click',()=>$('sweepPanel').classList.add('hidden'));$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
+  $('openSweep').addEventListener('click',()=>{refreshSweepSites();$('multiPanel')?.classList.add('hidden');closeBurstPanel();$('sweepPanel').classList.toggle('hidden');});$('closeSweepPanel')?.addEventListener('click',()=>$('sweepPanel').classList.add('hidden'));$('runSweep').addEventListener('click',runSweep);$('clearSweep').addEventListener('click',clearSweep);
+  wireBurstControls();wireMultiBalloonControls();
+  $('parametersTab')?.addEventListener('click',toggleMobileParameters);
+  $('predictsTab')?.addEventListener('click',()=>{if(isMobileLayout())setMobileParameters(false);});
+  MOBILE_QUERY.addEventListener?.('change',()=>setMobileParameters(document.documentElement.dataset.mobileParams==='open'));
   $('closeSummary').addEventListener('click',()=>$('predictionSummary').classList.add('hidden'));$('centerLanding').addEventListener('click',centerLanding);$('copyLanding').addEventListener('click',copyLanding);
 
   qsa('.layer-group').forEach((group,index)=>{
@@ -1260,18 +1617,19 @@ function wireControls(){
   });
 }
 
-function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);const todayValue=[now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');$('launchDate').min=todayValue;$('launchDate').value=[tomorrow.getFullYear(),String(tomorrow.getMonth()+1).padStart(2,'0'),String(tomorrow.getDate()).padStart(2,'0')].join('-');}
+function setDefaultDate(){const now=new Date();const tomorrow=new Date(now.getTime()+24*3600*1000);$('launchDate').min=earliestDateValue();$('launchDate').max=dateInputValue(new Date(now.getTime()+(FUTURE_WINDOW_DAYS+1)*24*3600*1000));$('launchDate').value=dateInputValue(tomorrow);}
 
 async function init() {
+  if(new URLSearchParams(location.search).get('embed')==='1')document.documentElement.dataset.embed='1';
   restoreLaunchTheme();
   applyTheme(preferredTheme(),false);
   if($('buildBadge'))$('buildBadge').textContent=`v${BUILD_VERSION}`;
   setDefaultDate();restoreSafetyRules();wireControls();updateLaunchTimeControl();updateOptimalSweepLabel();setAppView('predicts');setPredictionType('burst');setBurstAltitudeMode('auto');
-  await calculateInflation(true).catch(()=>{});
-  try{state.config=await api('/api/config');}catch(e){console.warn(e);}
+  calculateInflation(true).catch(()=>{});
+  api('/api/config').then(config=>{state.config=config;}).catch(e=>console.warn(e));
   map=new maplibregl.Map({container:'map',style:baseStyle(),center:[-77.4,39.4],zoom:8,minZoom:2,maxZoom:18,attributionControl:false});
   map.addControl(new maplibregl.AttributionControl({compact:true,customAttribution:'MapLibre'}),'bottom-right');map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'bottom-right');map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true}),'bottom-right');map.addControl(new maplibregl.ScaleControl({unit:'imperial'}),'bottom-left');map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
-  map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('controlled'),loadAirspace('sua'),loadAirspace('tfr'),loadLaunchLocations()]);syncAirspaceVisibility();await refreshFaaData(false);state.faaStatusTimer=setInterval(()=>refreshFaaData(false),60000);});
+  map.on('load',async()=>{addOperationalLayers();if(state.theme==='dark'){state.lightBasemap='topo';setBasemap('dark');const r=qs('input[name="basemap"][value="dark"]');if(r)r.checked=true;}await Promise.all([loadAirspace('controlled'),loadAirspace('sua'),loadAirspace('tfr'),loadLaunchLocations()]);syncAirspaceVisibility();await refreshFaaData(false);state.faaStatusTimer=setInterval(()=>{if(!document.hidden)refreshFaaData(false);},60000);});
   map.on('click',e=>handleMapDrawClick(e));map.on('mousemove',handleDrawMouseMove);
 }
 

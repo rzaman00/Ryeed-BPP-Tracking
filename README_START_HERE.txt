@@ -1,4 +1,4 @@
-BPP Prediction Suite v3.8.1
+BPP Prediction Suite v3.9.0
 
 Requirements:
 - Python 3.11 or newer.
@@ -9,6 +9,14 @@ Start on Windows:
 1. Double-click START_BPP_PREDICTS.bat.
 2. The application opens at http://127.0.0.1:8000/.
 3. Keep the launcher window open while using Predicts.
+
+New in v3.9.0:
+- Create Burst (Drawing Tools): mark where the balloon burst, enter its altitude
+  in feet and burst time, and get the landing site.
+- Past predictions for the last 48 hours.
+- Multiple Balloon (Operations Advanced toolbar): run several balloons, each
+  with its own time, parameters, and parameter sweep, at the same time.
+- Faster predictions and map, and website hosting (predicts/modern/WEBSITE.md).
 
 Prediction and safety features:
 - Burst and Float predictions with automatic inflation-based burst altitude.

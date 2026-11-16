@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import math
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field, model_validator
 from shapely.geometry import LineString, Point, shape
 from shapely.ops import nearest_points
 from shapely.strtree import STRtree
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from starlette.middleware.gzip import GZipMiddleware
 
 ROOT = Path(__file__).resolve().parent
@@ -38,7 +41,15 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-BUILD_VERSION = "3.8.1"
+BUILD_VERSION = "3.9.0"
+# Launches up to this many hours in the past can be replayed.
+PAST_PREDICTION_WINDOW_H = 48
+# A launch older than this is treated as "past" for wind-source selection.
+PAST_LAUNCH_GRACE = timedelta(minutes=5)
+# Website hosting options. All are optional; the defaults keep local use unchanged.
+ROOT_PATH = os.getenv("BPP_ROOT_PATH", "").strip().rstrip("/")
+CORS_ORIGINS = [o.strip() for o in os.getenv("BPP_CORS_ORIGINS", "").split(",") if o.strip()]
+FRAME_ANCESTORS = os.getenv("BPP_FRAME_ANCESTORS", "").strip()
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -70,6 +81,34 @@ FORECAST_PRESSURE_LEVELS_HPA = (1000, 925, 850, 700, 600, 500, 400, 300, 250, 20
 FAA_AUTO_REFRESH_INTERVAL_S = 15 * 60
 _faa_refresh_task: asyncio.Task[Any] | None = None
 
+# One pooled Tawhiri connection is reused for every prediction. Opening a new
+# TLS connection per request was the largest fixed cost of a sweep.
+_tawhiri_http: tuple[Any, httpx.AsyncClient] | None = None
+TAWHIRI_CACHE_TTL_S = 180.0
+TAWHIRI_CACHE_MAX = 512
+_tawhiri_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_tawhiri_inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
+
+
+def _tawhiri_client() -> httpx.AsyncClient:
+    """Return the pooled client for the running event loop."""
+    global _tawhiri_http
+    loop = asyncio.get_running_loop()
+    if _tawhiri_http is None or _tawhiri_http[0] is not loop or _tawhiri_http[1].is_closed:
+        _tawhiri_http = (loop, httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=24, max_keepalive_connections=12, keepalive_expiry=60.0),
+        ))
+    return _tawhiri_http[1]
+
+
+async def _close_tawhiri_client() -> None:
+    global _tawhiri_http
+    if _tawhiri_http is not None:
+        with suppress(Exception):
+            await _tawhiri_http[1].aclose()
+        _tawhiri_http = None
+
 
 async def _faa_refresh_loop() -> None:
     """Keep FAA caches current without delaying application startup."""
@@ -94,10 +133,23 @@ async def app_lifespan(_: FastAPI):
         with suppress(asyncio.CancelledError):
             await _faa_refresh_task
         _faa_refresh_task = None
+        await _close_tawhiri_client()
 
 
-app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION, lifespan=app_lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=6)
+app = FastAPI(title="UMD BPP Predicts", version=BUILD_VERSION, lifespan=app_lifespan, root_path=ROOT_PATH)
+# Level 5 is close to level 6 in size and noticeably cheaper on the multi-megabyte
+# FAA airspace layers.
+app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=5)
+if CORS_ORIGINS:
+    # Only needed when the page is served from a different origin than this API.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
+        expose_headers=["X-BPP-Build", "ETag"],
+        max_age=600,
+    )
 
 
 @app.middleware("http")
@@ -105,10 +157,14 @@ async def latest_build_headers(request: Request, call_next):
     """Prevent a stale browser cache from making an older frontend look current."""
     response = await call_next(request)
     response.headers["X-BPP-Build"] = BUILD_VERSION
-    if request.url.path == "/" or request.url.path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        # "no-cache" still forces the browser to check with the server on every
+        # load, so an old frontend can never be shown, but an unchanged file is
+        # answered with a tiny 304 instead of being downloaded again.
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    if FRAME_ANCESTORS:
+        response.headers["Content-Security-Policy"] = f"frame-ancestors {FRAME_ANCESTORS}"
     return response
 
 
@@ -140,6 +196,27 @@ class PredictRequest(BaseModel):
             raise ValueError("Burst altitude must be above launch/current altitude")
         if self.mode == "float" and self.float_altitude_m <= current_alt:
             raise ValueError("Float altitude must be above launch/current altitude")
+        return self
+
+
+class DescentRequest(BaseModel):
+    """A burst point: where and when the balloon burst, and how high it was."""
+
+    burst: LaunchPoint
+    burst_datetime: datetime
+    burst_altitude_m: float | None = Field(default=None, gt=0, le=60_000)
+    burst_altitude_ft: float | None = Field(default=None, gt=0, le=200_000)
+    descent_rate_ms: float = Field(default=9.0, gt=0, le=50)
+
+    @model_validator(mode="after")
+    def resolve_altitude(self):
+        if self.burst_altitude_m is None and self.burst_altitude_ft is None:
+            raise ValueError("Give the burst altitude in feet (burst_altitude_ft) or meters (burst_altitude_m)")
+        if self.burst_altitude_m is None:
+            self.burst_altitude_m = float(self.burst_altitude_ft) * 0.3048
+        self.burst_altitude_ft = float(self.burst_altitude_m) / 0.3048
+        if self.burst_altitude_m > 60_000:
+            raise ValueError("Burst altitude is above the supported 60 km ceiling")
         return self
 
 
@@ -355,32 +432,93 @@ def parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _tawhiri_cache_key(params: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(sorted((str(key), str(value)) for key, value in params.items()))
+
+
 async def tawhiri_request(params: dict[str, Any]) -> dict[str, Any]:
-    last_error: Exception | None = None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-        for attempt in range(3):
-            try:
-                response = await client.get(TAWHIRI_API_URL, params=params)
-                response.raise_for_status()
-                payload = response.json()
-                if payload.get("error"):
-                    description = payload["error"].get("description", "Tawhiri prediction failed")
-                    raise ExternalServiceError(description)
-                if not payload.get("prediction"):
-                    raise ExternalServiceError("Tawhiri returned no prediction")
-                return payload
-            except ExternalServiceError:
-                # A structured Tawhiri error will not become valid after retrying the
-                # identical parameters (notably unavailable historical datasets).
+    """Run one Tawhiri prediction.
+
+    Identical requests inside a short window (a sweep re-run, readiness after an
+    optimal search, two browser tabs) are answered from memory, and identical
+    requests that are already running share one upstream call.
+    """
+    key = _tawhiri_cache_key(params)
+    cached = _tawhiri_cache.get(key)
+    if cached and time.monotonic() - cached[0] < TAWHIRI_CACHE_TTL_S:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    pending = _tawhiri_inflight.get(key)
+    if pending is not None and pending.get_loop() is loop and not pending.done():
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            # Either this request was cancelled (stop), or only the request that
+            # was doing the work was (then this one does the work itself).
+            task = asyncio.current_task()
+            if not pending.cancelled() or (task is not None and task.cancelling()):
                 raise
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if 400 <= exc.response.status_code < 500 and exc.response.status_code not in {408, 429}:
-                    break
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc
-            if attempt < 2:
-                await asyncio.sleep(0.35 * (attempt + 1))
+    future: asyncio.Future[Any] = loop.create_future()
+    _tawhiri_inflight[key] = future
+    try:
+        payload = await _tawhiri_fetch(params)
+    except asyncio.CancelledError:
+        future.cancel()
+        raise
+    except Exception as exc:
+        if not future.done():
+            future.set_exception(exc)
+            future.exception()  # mark retrieved; waiters still receive it
+        raise
+    else:
+        if not future.done():
+            future.set_result(payload)
+        _tawhiri_cache[key] = (time.monotonic(), payload)
+        if len(_tawhiri_cache) > TAWHIRI_CACHE_MAX:
+            cutoff = time.monotonic() - TAWHIRI_CACHE_TTL_S
+            for stale in [k for k, (stamp, _) in _tawhiri_cache.items() if stamp < cutoff]:
+                _tawhiri_cache.pop(stale, None)
+            while len(_tawhiri_cache) > TAWHIRI_CACHE_MAX:
+                _tawhiri_cache.pop(next(iter(_tawhiri_cache)), None)
+        return payload
+    finally:
+        if _tawhiri_inflight.get(key) is future:
+            _tawhiri_inflight.pop(key, None)
+
+
+async def _tawhiri_fetch(params: dict[str, Any]) -> dict[str, Any]:
+    last_error: Exception | None = None
+    client = _tawhiri_client()
+    for attempt in range(3):
+        try:
+            response = await client.get(TAWHIRI_API_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("error"):
+                description = payload["error"].get("description", "Tawhiri prediction failed")
+                raise ExternalServiceError(description)
+            if not payload.get("prediction"):
+                raise ExternalServiceError("Tawhiri returned no prediction")
+            return payload
+        except ExternalServiceError:
+            # A structured Tawhiri error will not become valid after retrying the
+            # identical parameters (notably unavailable historical datasets).
+            raise
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            # Tawhiri reports bad parameters and missing datasets as JSON with a
+            # 4xx status; surface its own description instead of a bare status.
+            description = None
+            with suppress(Exception):
+                description = exc.response.json().get("error", {}).get("description")
+            if description:
+                raise ExternalServiceError(str(description)) from exc
+            if 400 <= exc.response.status_code < 500 and exc.response.status_code not in {408, 429}:
+                break
+        except (httpx.HTTPError, ValueError) as exc:
+            last_error = exc
+        if attempt < 2:
+            await asyncio.sleep(0.35 * (attempt + 1))
     raise ExternalServiceError(f"Tawhiri request failed: {last_error}")
 
 
@@ -499,12 +637,24 @@ def _historical_dataset_candidates(launch_datetime: datetime) -> list[datetime]:
     return [cycle - timedelta(hours=6 * offset) for offset in range(4)]
 
 
+def is_past_launch(launch_datetime: datetime) -> bool:
+    """True when the launch time is already behind us (replay, not forecast)."""
+    return _as_utc(launch_datetime) < datetime.now(timezone.utc) - PAST_LAUNCH_GRACE
+
+
 async def tawhiri_for_launch(params: dict[str, Any], launch_datetime: datetime) -> tuple[dict[str, Any], bool]:
     """Use current Tawhiri normally; explicitly select archived cycles for older launches."""
     dt = _as_utc(launch_datetime)
-    if dt >= datetime.now(timezone.utc) - timedelta(hours=8):
-        return await tawhiri_request(params), False
     errors: list[str] = []
+    if dt >= datetime.now(timezone.utc) - timedelta(hours=8):
+        try:
+            return await tawhiri_request(params), False
+        except ExternalServiceError as exc:
+            # The newest model cycle can start after a launch from a few hours
+            # ago. Only then is it worth trying the cycles before it.
+            if not is_past_launch(dt):
+                raise
+            errors.append(f"latest: {exc}")
     for dataset in _historical_dataset_candidates(dt):
         historical_params = dict(params)
         historical_params["dataset"] = utc_iso(dataset)
@@ -675,41 +825,116 @@ def _integrate_vertical_stage(
     return points, latitude, longitude, altitude_m, when
 
 
-async def run_historical_reanalysis(req: PredictRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Historical fallback using NOAA/PSL NCEP/NCAR Reanalysis 1 upper-air winds.
+OPEN_METEO_REPLAY_MODEL = "gfs_seamless"
+OPEN_METEO_REPLAY_MAX_AGE = timedelta(days=60)
+_replay_wind_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
-    NCEP/NCAR Reanalysis 1 is a 2.5-degree, 4-times-daily reanalysis. It is ideal
-    for replay/analysis, but is intentionally labelled as a coarser historical
-    reconstruction rather than presented as equivalent to a current high-resolution
-    Tawhiri forecast.
+
+async def fetch_open_meteo_wind_column(latitude: float, longitude: float) -> tuple[dict[datetime, dict[float, float]], dict[datetime, dict[float, float]], float | None]:
+    """Hourly GFS pressure-level winds above one point for the recent past.
+
+    Returns east and north wind (m/s) keyed by time then pressure level, in the
+    same shape the NOAA reanalysis replay uses, plus the model ground elevation.
+    """
+    key = (round(latitude, 2), round(longitude, 2))
+    cached = _replay_wind_cache.get(key)
+    if cached and time.monotonic() - cached[0] < WEATHER_CACHE_TTL_S:
+        return cached[1]
+    fields: list[str] = []
+    for pressure in FORECAST_PRESSURE_LEVELS_HPA:
+        fields.extend((f"wind_speed_{pressure}hPa", f"wind_direction_{pressure}hPa"))
+    params = {
+        "latitude": latitude, "longitude": longitude, "hourly": ",".join(fields),
+        "timezone": "UTC", "wind_speed_unit": "mph", "models": OPEN_METEO_REPLAY_MODEL,
+        "past_days": 3, "forecast_days": 2,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=8.0), follow_redirects=True) as client:
+            response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ExternalServiceError(f"Open-Meteo winds-aloft request failed: {exc}") from exc
+    hourly = payload.get("hourly") or {}
+    u_profiles: dict[datetime, dict[float, float]] = {}
+    v_profiles: dict[datetime, dict[float, float]] = {}
+    for index, stamp in enumerate(hourly.get("time") or []):
+        try:
+            when = _as_utc(datetime.fromisoformat(str(stamp)))
+        except ValueError:
+            continue
+        u_row: dict[float, float] = {}
+        v_row: dict[float, float] = {}
+        for pressure in FORECAST_PRESSURE_LEVELS_HPA:
+            speeds = hourly.get(f"wind_speed_{pressure}hPa") or []
+            directions = hourly.get(f"wind_direction_{pressure}hPa") or []
+            if index >= len(speeds) or index >= len(directions):
+                continue
+            if speeds[index] is None or directions[index] is None:
+                continue
+            u_row[float(pressure)], v_row[float(pressure)] = _wind_components(speeds[index], directions[index])
+        if len(u_row) >= 4:
+            u_profiles[when] = u_row
+            v_profiles[when] = v_row
+    if not u_profiles:
+        raise ExternalServiceError("Open-Meteo returned no usable winds-aloft profile")
+    elevation = payload.get("elevation")
+    result = (u_profiles, v_profiles, float(elevation) if isinstance(elevation, (int, float)) else None)
+    _replay_wind_cache[key] = (time.monotonic(), result)
+    if len(_replay_wind_cache) > 64:
+        _replay_wind_cache.pop(next(iter(_replay_wind_cache)), None)
+    return result
+
+
+def _require_wind_coverage(profiles: dict[datetime, dict[float, float]], when: datetime, source: str) -> None:
+    times = sorted(profiles)
+    if when < times[0] - timedelta(hours=1) or when > times[-1] + timedelta(hours=1):
+        raise ExternalServiceError(f"{source} does not cover {when:%Y-%m-%d %H:%MZ}")
+
+
+async def run_open_meteo_replay(req: PredictRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Replay a recent launch from archived hourly GFS winds above the launch site.
+
+    Used only when Tawhiri no longer holds the model cycle for a past launch.
+    It is a single-column estimate, so it is labelled as an approximation.
     """
     dt = _as_utc(req.launch_datetime)
-    if dt < NCEP_REANALYSIS_START or dt > NCEP_REANALYSIS_END:
-        raise ExternalServiceError(
-            "NOAA NCEP/NCAR Reanalysis fallback is available from 1948-01-01 through 2026-03-17. "
-            "Tawhiri did not have an archived model cycle for this date."
-        )
-    start, end = _ncep_time_window(req)
-    u_profiles, v_profiles = await asyncio.gather(
-        _fetch_ncep_variable("uwnd", req.launch.latitude, req.launch.longitude, start, end),
-        _fetch_ncep_variable("vwnd", req.launch.latitude, req.launch.longitude, start, end),
-    )
+    u_profiles, v_profiles, _ = await fetch_open_meteo_wind_column(req.launch.latitude, req.launch.longitude)
+    _require_wind_coverage(u_profiles, dt, "Open-Meteo GFS winds")
+    common = {
+        "mode": req.mode,
+        "launch_name": req.launch.name,
+        "dataset": f"Open-Meteo GFS winds {dt:%Y-%m-%d %HZ}",
+        "historical": True,
+        "historical_source": "Open-Meteo GFS hourly winds aloft (launch column)",
+        "approximation": "Past replay uses hourly GFS winds above the launch site with vertical interpolation; winds above 30 hPa are held constant.",
+    }
+    if extra_meta:
+        common.update(extra_meta)
+    return _replay_from_profiles(req, u_profiles, v_profiles, common)
+
+
+async def run_past_fallback(req: PredictRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Pick the archive able to cover a past launch Tawhiri could not replay."""
+    dt = _as_utc(req.launch_datetime)
+    if dt > NCEP_REANALYSIS_END or dt >= datetime.now(timezone.utc) - OPEN_METEO_REPLAY_MAX_AGE:
+        return await run_open_meteo_replay(req, extra_meta)
+    return await run_historical_reanalysis(req, extra_meta)
+
+
+def _replay_from_profiles(
+    req: PredictRequest,
+    u_profiles: dict[datetime, dict[float, float]],
+    v_profiles: dict[datetime, dict[float, float]],
+    common: dict[str, Any],
+) -> dict[str, Any]:
+    """Integrate ascent, optional float, and descent through a wind archive."""
     latitude = req.launch.latitude
     longitude = req.launch.longitude
     launch_alt = float(req.launch.altitude_m or 0.0)
     altitude = launch_alt
-    when = dt
+    when = _as_utc(req.launch_datetime)
     features: list[dict[str, Any]] = []
-    common = {
-        "mode": req.mode,
-        "launch_name": req.launch.name,
-        "dataset": f"NOAA NCEP/NCAR Reanalysis 1 {dt:%Y-%m-%d}",
-        "historical": True,
-        "historical_source": "NOAA/PSL NCEP/NCAR Reanalysis 1",
-        "approximation": "Historical replay uses 4x-daily 2.5° reanalysis winds with vertical interpolation through 17 pressure levels.",
-    }
-    if extra_meta:
-        common.update(extra_meta)
 
     target = req.burst_altitude_m if req.mode == "burst" else req.float_altitude_m
     ascent, latitude, longitude, altitude, when = _integrate_vertical_stage(
@@ -752,16 +977,111 @@ async def run_historical_reanalysis(req: PredictRequest, extra_meta: dict[str, A
     }
 
 
+async def run_descent(req: DescentRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Predict the landing from a known burst point (descent only)."""
+    burst_altitude = float(req.burst_altitude_m)
+    params: dict[str, Any] = {
+        "profile": "standard_profile",
+        "launch_longitude": to_tawhiri_lon(req.burst.longitude),
+        "launch_latitude": req.burst.latitude,
+        "launch_datetime": utc_iso(req.burst_datetime),
+        "launch_altitude": burst_altitude,
+        # Tawhiri needs an ascent leg; one meter keeps it to a fraction of a second.
+        "ascent_rate": 5.0,
+        "burst_altitude": burst_altitude + 1.0,
+        "descent_rate": req.descent_rate_ms,
+    }
+    common: dict[str, Any] = {
+        "mode": "descent", "launch_name": req.burst.name, "burst_point": True,
+        "burst_altitude_m": burst_altitude, "burst_altitude_ft": burst_altitude / 0.3048,
+    }
+    if extra_meta:
+        common.update(extra_meta)
+    try:
+        raw, historical_cycle = await tawhiri_for_launch(params, req.burst_datetime)
+    except ExternalServiceError as tawhiri_error:
+        if not is_past_launch(req.burst_datetime):
+            raise
+        try:
+            return await _descent_from_open_meteo(req, common)
+        except ExternalServiceError as archive_error:
+            raise ExternalServiceError(
+                f"Tawhiri could not replay this burst time ({tawhiri_error}); "
+                f"backup winds failed ({archive_error})"
+            ) from archive_error
+    common.update({
+        "dataset": raw.get("request", {}).get("dataset"),
+        "historical": historical_cycle,
+        "historical_source": "Tawhiri archived model cycle" if historical_cycle else None,
+    })
+    features = [stage_feature("descent", prediction_trajectory(raw, "descent", 1), common)]
+    summary = summarize(features, common)
+    return {"type": "FeatureCollection", "features": features, "summary": summary, "request": raw.get("request", {})}
+
+
+async def _descent_from_open_meteo(req: DescentRequest, common: dict[str, Any]) -> dict[str, Any]:
+    dt = _as_utc(req.burst_datetime)
+    u_profiles, v_profiles, elevation = await fetch_open_meteo_wind_column(req.burst.latitude, req.burst.longitude)
+    _require_wind_coverage(u_profiles, dt, "Open-Meteo GFS winds")
+    ground_alt = max(0.0, elevation or 0.0)
+    common = {
+        **common,
+        "dataset": f"Open-Meteo GFS winds {dt:%Y-%m-%d %HZ}",
+        "historical": True,
+        "historical_source": "Open-Meteo GFS hourly winds aloft (burst-point column)",
+        "approximation": "Descent uses hourly GFS winds above the burst point and the model ground elevation there.",
+    }
+    descent, *_ = _integrate_vertical_stage(
+        "descent", req.burst.latitude, req.burst.longitude, float(req.burst_altitude_m), dt, ground_alt,
+        lambda alt: req.descent_rate_ms * math.exp(max(0.0, alt - ground_alt) / 17_000.0),
+        u_profiles, v_profiles, 30.0,
+    )
+    features = [stage_feature("descent", descent, common)]
+    summary = summarize(features, common)
+    return {
+        "type": "FeatureCollection", "features": features, "summary": summary,
+        "request": {"dataset": common["dataset"], "source": common["historical_source"], "historical": True},
+    }
+
+
+async def run_historical_reanalysis(req: PredictRequest, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Historical fallback using NOAA/PSL NCEP/NCAR Reanalysis 1 upper-air winds.
+
+    NCEP/NCAR Reanalysis 1 is a 2.5-degree, 4-times-daily reanalysis. It is ideal
+    for replay/analysis, but is intentionally labelled as a coarser historical
+    reconstruction rather than presented as equivalent to a current high-resolution
+    Tawhiri forecast.
+    """
+    dt = _as_utc(req.launch_datetime)
+    if dt < NCEP_REANALYSIS_START or dt > NCEP_REANALYSIS_END:
+        raise ExternalServiceError(
+            "NOAA NCEP/NCAR Reanalysis fallback is available from 1948-01-01 through 2026-03-17. "
+            "Tawhiri did not have an archived model cycle for this date."
+        )
+    start, end = _ncep_time_window(req)
+    u_profiles, v_profiles = await asyncio.gather(
+        _fetch_ncep_variable("uwnd", req.launch.latitude, req.launch.longitude, start, end),
+        _fetch_ncep_variable("vwnd", req.launch.latitude, req.launch.longitude, start, end),
+    )
+    common = {
+        "mode": req.mode,
+        "launch_name": req.launch.name,
+        "dataset": f"NOAA NCEP/NCAR Reanalysis 1 {dt:%Y-%m-%d}",
+        "historical": True,
+        "historical_source": "NOAA/PSL NCEP/NCAR Reanalysis 1",
+        "approximation": "Historical replay uses 4x-daily 2.5° reanalysis winds with vertical interpolation through 17 pressure levels.",
+    }
+    if extra_meta:
+        common.update(extra_meta)
+
+    return _replay_from_profiles(req, u_profiles, v_profiles, common)
+
+
 async def _prediction_with_historical_fallback(req: PredictRequest, mode: str, extra_meta: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Return a NOAA fallback only when an older Tawhiri archive is unavailable."""
-    if _as_utc(req.launch_datetime) >= datetime.now(timezone.utc) - timedelta(hours=8):
+    if not is_past_launch(req.launch_datetime):
         return None
-    try:
-        if mode == "burst":
-            return await run_historical_reanalysis(req, extra_meta)
-        return await run_historical_reanalysis(req, extra_meta)
-    except ExternalServiceError:
-        raise
+    return await run_past_fallback(req, extra_meta)
 
 
 async def fetch_launch_weather(
@@ -992,7 +1312,7 @@ async def fetch_forecast_model(
         "temperature_unit": "fahrenheit",
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
-        "past_days": 1,
+        "past_days": 3,
         "forecast_days": 16,
     }
     if api_model:
@@ -1157,9 +1477,9 @@ async def run_burst(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     try:
         raw, historical_cycle = await tawhiri_for_launch(params, req.launch_datetime)
     except ExternalServiceError as tawhiri_error:
-        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+        if is_past_launch(req.launch_datetime):
             try:
-                return await run_historical_reanalysis(req, extra_meta)
+                return await run_past_fallback(req, extra_meta)
             except ExternalServiceError as archive_error:
                 raise ExternalServiceError(f"Historical Tawhiri replay failed ({tawhiri_error}); NOAA fallback failed ({archive_error})") from archive_error
         raise
@@ -1195,9 +1515,9 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     try:
         first, historical_cycle = await tawhiri_for_launch(first_params, req.launch_datetime)
     except ExternalServiceError as tawhiri_error:
-        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+        if is_past_launch(req.launch_datetime):
             try:
-                return await run_historical_reanalysis(req, extra_meta)
+                return await run_past_fallback(req, extra_meta)
             except ExternalServiceError as archive_error:
                 raise ExternalServiceError(f"Historical Tawhiri replay failed ({tawhiri_error}); NOAA fallback failed ({archive_error})") from archive_error
         raise
@@ -1216,16 +1536,16 @@ async def run_float(req: PredictRequest, extra_meta: dict[str, Any] | None = Non
     }
     if second_params["burst_altitude"] <= second_params["launch_altitude"]:
         second_params["burst_altitude"] = second_params["launch_altitude"] + 1
-    if historical_cycle and first.get("request", {}).get("dataset"):
+    if historical_cycle and first.get("request", {}).get("dataset"):  # same cycle for both legs
         second_params["dataset"] = first["request"]["dataset"]
     try:
         second = await tawhiri_request(second_params)
         float_trajectory = prediction_trajectory(second, "ascent", 0)
         descent_trajectory = prediction_trajectory(second, "descent", 1)
     except ExternalServiceError as tawhiri_error:
-        if _as_utc(req.launch_datetime) < datetime.now(timezone.utc) - timedelta(hours=8):
+        if is_past_launch(req.launch_datetime):
             try:
-                return await run_historical_reanalysis(req, extra_meta)
+                return await run_past_fallback(req, extra_meta)
             except ExternalServiceError as archive_error:
                 raise ExternalServiceError(
                     f"Historical Tawhiri float replay failed ({tawhiri_error}); "
@@ -1307,6 +1627,30 @@ def load_geojson(path: Path) -> tuple[dict[str, Any], str | None]:
         return data, None
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return empty_fc(), f"Could not load {path.name}: {exc}"
+
+
+_geojson_memo: dict[str, tuple[tuple[int, int], dict[str, Any], str | None]] = {}
+
+
+def load_geojson_cached(path: Path) -> tuple[dict[str, Any], str | None]:
+    """load_geojson, but a file is parsed once and reused until it changes on disk.
+
+    The FAA layers are several megabytes; re-reading them for every map load and
+    every optimal-site request was pure overhead. Callers must not mutate the result.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        _geojson_memo.pop(str(path), None)
+        return load_geojson(path)
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    hit = _geojson_memo.get(str(path))
+    if hit and hit[0] == stamp:
+        return hit[1], hit[2]
+    data, warning = load_geojson(path)
+    if warning is None:
+        _geojson_memo[str(path)] = (stamp, data, warning)
+    return data, warning
 
 
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -1634,7 +1978,7 @@ async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[
     if dataset == "uncontrolled":
         dataset = "class_e"
     cache_path = AIRSPACE_CACHE_DIR / f"{dataset}.geojson"
-    cached, _ = load_geojson(cache_path)
+    cached, _ = load_geojson_cached(cache_path)
     if not force and cached.get("features") and cache_fresh(cache_path, AIRSPACE_TTLS[dataset]):
         return cached, None, "FAA cache"
     try:
@@ -1792,12 +2136,35 @@ def _polygon_records(collection: dict[str, Any], layer: str) -> list[dict[str, A
     return records
 
 
+_spatial_index_memo: dict[tuple[Any, ...], tuple[Any, dict[str, Any]]] = {}
+
+
+def _memo_by_identity(kind: str, collections: dict[str, dict[str, Any]], builder) -> dict[str, Any]:
+    """Reuse an index while the very same airspace objects are still in use.
+
+    Keeping a reference to the collections guarantees their ids are not recycled.
+    """
+    key = (kind, *((layer, id(collection)) for layer, collection in collections.items()))
+    hit = _spatial_index_memo.get(key)
+    if hit is not None:
+        return hit[1]
+    built = builder(collections)
+    _spatial_index_memo[key] = (dict(collections), built)
+    while len(_spatial_index_memo) > 4:
+        _spatial_index_memo.pop(next(iter(_spatial_index_memo)), None)
+    return built
+
+
 def build_airspace_spatial_indexes(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Build reusable R-trees once for a full optimal-site sweep.
 
     Each record retains the FAA vertical floor/ceiling so the API can report both
     the conservative footprint rule and the technically precise 3-D intrusion.
     """
+    return _memo_by_identity("airspace", collections, _build_airspace_spatial_indexes)
+
+
+def _build_airspace_spatial_indexes(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     layers: dict[str, dict[str, Any]] = {}
     all_records: list[dict[str, Any]] = []
     for layer, collection in collections.items():
@@ -1918,13 +2285,21 @@ def _prediction_segments(prediction: dict[str, Any]) -> list[dict[str, Any]]:
     return segments
 
 
+_water_index_memo: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+
+
 def _load_water_hazard_index() -> dict[str, Any]:
     """Load the small, bundled operational water-no-go dataset.
 
     The predictor must remain useful offline, so the Chesapeake safety rule does
     not depend on a live map or coastline API being available during a launch.
     """
+    global _water_index_memo
     try:
+        stat = WATER_HAZARDS_FILE.stat()
+        stamp = (str(WATER_HAZARDS_FILE), stat.st_mtime_ns, stat.st_size)
+        if _water_index_memo is not None and _water_index_memo[0] == stamp:
+            return _water_index_memo[1]
         collection = json.loads(WATER_HAZARDS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Operational water-hazard data is unavailable: {exc}") from exc
@@ -1938,11 +2313,13 @@ def _load_water_hazard_index() -> dict[str, Any]:
             continue
         records.append({"geometry": geometry, "feature": feature})
     geometries = [record["geometry"] for record in records]
-    return {
+    index = {
         "records": records,
         "geometries": geometries,
         "tree": STRtree(geometries) if geometries else None,
     }
+    _water_index_memo = (stamp, index)
+    return index
 
 
 def _horizontal_overlap_m(line: Any, polygon: Any) -> float:
@@ -1952,10 +2329,12 @@ def _horizontal_overlap_m(line: Any, polygon: Any) -> float:
         return 0.0
 
 
-def score_prediction_against_water(prediction: dict[str, Any], index: dict[str, Any]) -> dict[str, Any]:
+def score_prediction_against_water(
+    prediction: dict[str, Any], index: dict[str, Any], segments: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     total = 0.0
     hazard_names: set[str] = set()
-    for segment in _prediction_segments(prediction):
+    for segment in (segments if segments is not None else _prediction_segments(prediction)):
         line = segment["line"]
         segment_overlap = 0.0
         for record in _queried_records(index, line):
@@ -2101,11 +2480,13 @@ def _segment_intrusion_m(segment: dict[str, Any], index: dict[str, Any]) -> floa
 
 
 def score_prediction_against_airspace(
-    prediction: dict[str, Any], indexes: dict[str, Any], safety_rules: OperationalSafetyRules | None = None
+    prediction: dict[str, Any], indexes: dict[str, Any], safety_rules: OperationalSafetyRules | None = None,
+    segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Score 3-D conflicts, vertical clearance, and footprint exposure time."""
     rules = safety_rules or OperationalSafetyRules()
-    segments = _prediction_segments(prediction)
+    if segments is None:
+        segments = _prediction_segments(prediction)
     if not segments:
         raise ValueError("Prediction contained no trajectory to score against airspace")
     horizontal_by_layer = {layer: 0.0 for layer in indexes.get("layers", {})}
@@ -2183,6 +2564,10 @@ def score_prediction_against_airspace(
 
 def _landing_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Index every B/C/D, SUA, and TFR polygon used for landing clearance."""
+    return _memo_by_identity("landing", collections, _build_landing_airspace_index)
+
+
+def _build_landing_airspace_index(collections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     for layer, collection in collections.items():
         if layer not in {"controlled", "sua", "tfr"}:
@@ -2271,13 +2656,13 @@ def optimal_site_sort_key(candidate: dict[str, Any]) -> tuple[int, int, float, f
     )
 
 def validate_launch_window(value: datetime) -> None:
-    """Accept only current/future launches inside the seven-day model window."""
+    """Accept launches from the last 48 hours through the seven-day model window."""
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
-    if value < now - timedelta(minutes=5):
-        raise HTTPException(status_code=400, detail="Past predictions are not supported. Choose the current time or a future launch time.")
+    if value < now - timedelta(hours=PAST_PREDICTION_WINDOW_H, minutes=5):
+        raise HTTPException(status_code=400, detail=f"Past predictions are limited to the last {PAST_PREDICTION_WINDOW_H} hours.")
     if value > now + timedelta(days=7):
         raise HTTPException(status_code=400, detail="Launch time may be at most 7 days in the future.")
 
@@ -2295,7 +2680,7 @@ async def health():
         "launch_sites": "local + GitHub LFS media + offline fallback",
         "airspace": "FAA live services with disk cache",
         "optimal_site": "conservative B/C/D, SUA, TFR and Chesapeake water-crossing safety ranking",
-        "prediction_window": "current time through 7 days in the future",
+        "prediction_window": f"last {PAST_PREDICTION_WINDOW_H} hours through 7 days in the future",
         "launch_weather": "Open-Meteo multi-model forecast and winds aloft",
         "faa_refresh": f"automatic every {FAA_AUTO_REFRESH_INTERVAL_S // 60} minutes with disk cache",
     }
@@ -2307,6 +2692,9 @@ async def config():
         "prediction_modes": ["burst", "float"],
         "airspace_layers": ["controlled", "class_e", "sua", "tfr"],
         "prediction_window_days": 7,
+        "past_prediction_hours": PAST_PREDICTION_WINDOW_H,
+        "burst_point_descent": True,
+        "multiple_balloons": True,
         "weather": True,
         "forecast_models": [name for _, name, _, _ in FORECAST_MODELS],
         "faa_auto_refresh_minutes": FAA_AUTO_REFRESH_INTERVAL_S // 60,
@@ -2319,12 +2707,26 @@ async def launch_locations():
     return {"data": data, "warning": "; ".join(dict.fromkeys(warnings)) if warnings else None, "sources": sources, "count": len(data.get("features", []))}
 
 
+_airspace_response_memo: dict[str, tuple[Any, tuple[Any, Any], bytes, str]] = {}
+
+
 @app.get("/api/airspace/{dataset}")
-async def airspace(dataset: Literal["controlled", "class_e", "sua", "tfr", "uncontrolled"], refresh: bool = Query(default=False)):
+async def airspace(request: Request, dataset: Literal["controlled", "class_e", "sua", "tfr", "uncontrolled"], refresh: bool = Query(default=False)):
     data, warning, source = await operational_airspace(dataset, force=refresh)
     normalized_layer = "class_e" if dataset == "uncontrolled" else dataset
-    data = annotate_airspace_verticals(data, normalized_layer)
-    return {"data": data, "warning": warning, "source": source, "count": len(data.get("features", []))}
+    hit = _airspace_response_memo.get(normalized_layer)
+    if hit is None or hit[0] is not data or hit[1] != (warning, source):
+        annotated = annotate_airspace_verticals(data, normalized_layer)
+        body = json.dumps(
+            {"data": annotated, "warning": warning, "source": source, "count": len(annotated.get("features", []))},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        hit = (data, (warning, source), body, f'"{hashlib.sha1(body).hexdigest()}"')
+        _airspace_response_memo[normalized_layer] = hit
+    headers = {"ETag": hit[3], "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == hit[3]:
+        return Response(status_code=304, headers=headers)
+    return Response(content=hit[2], media_type="application/json", headers=headers)
 
 
 @app.get("/api/airspace-status")
@@ -2443,6 +2845,16 @@ async def predict(req: PredictRequest):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/predict-descent")
+async def predict_descent(req: DescentRequest):
+    """Landing prediction from a burst point (GPS position, altitude, and burst time)."""
+    validate_launch_window(req.burst_datetime)
+    try:
+        return await run_descent(req)
+    except ExternalServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/optimal-site")
 async def optimal_site(req: OptimalSiteRequest):
     """Evaluate sites with altitude-aware overflight and landing-clearance rules."""
@@ -2483,6 +2895,14 @@ async def optimal_site(req: OptimalSiteRequest):
         sweep_rates.insert(0, req.ascent_rate_ms)
     sweep_rates = sorted(dict.fromkeys(round(float(v), 3) for v in sweep_rates), key=lambda v: (abs(v - req.ascent_rate_ms), v))
 
+    def score_geometry(prediction: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        segments = _prediction_segments(prediction)
+        return (
+            score_prediction_against_airspace(prediction, indexes, req.safety_rules, segments),
+            score_prediction_against_water(prediction, water_index, segments),
+            landing_airspace_clearance(prediction, landing_airspace_index),
+        )
+
     async def predict_at_rate(site: OptimalSiteCandidate, rate: float) -> dict[str, Any]:
         burst_altitude = req.burst_altitude_m
         if req.mode == "burst" and req.automatic_burst and req.inflation is not None:
@@ -2504,9 +2924,9 @@ async def optimal_site(req: OptimalSiteRequest):
         )
         async with semaphore:
             prediction = await (run_float(pred_req) if req.mode == "float" else run_burst(pred_req))
-        score = score_prediction_against_airspace(prediction, indexes, req.safety_rules)
-        water_score = score_prediction_against_water(prediction, water_index)
-        landing_airspace = landing_airspace_clearance(prediction, landing_airspace_index)
+        # Scored inline on purpose: moving this to worker threads was measured
+        # 2.5x slower for a full sweep because the threads fight over the GIL.
+        score, water_score, landing_airspace = score_geometry(prediction)
         landing_airspace_distance = landing_airspace["landing_airspace_distance_m"]
         landing_water_distance = water_score["landing_large_water_distance_m"]
         landing_airspace_safe = (
@@ -2713,5 +3133,6 @@ async def optimal_site(req: OptimalSiteRequest):
 
 if __name__ == "__main__":
     host = os.getenv("BPP_PREDICTS_HOST", "127.0.0.1")
-    port = int(os.getenv("BPP_PREDICTS_PORT", "8000"))
-    uvicorn.run("app:app", host=host, port=port, reload=False)
+    # Most web hosts hand the port to the app in PORT.
+    port = int(os.getenv("BPP_PREDICTS_PORT") or os.getenv("PORT") or "8000")
+    uvicorn.run("app:app", host=host, port=port, reload=False, proxy_headers=True, forwarded_allow_ips="*")

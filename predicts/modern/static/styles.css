@@ -609,3 +609,116 @@ html[data-theme="dark"] .forecast-agreement.high{color:#83e0aa;background:#12352
 
 @media(max-width:980px){.safety-rule-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.forecast-panel{top:8px;max-height:calc(100% - 58px)}}
 @media(max-width:650px){.safety-rules-page{padding:18px 10px 34px}.safety-rules-heading{align-items:stretch;flex-direction:column;gap:12px}.safety-rules-actions button{flex:1}.safety-rule-grid{grid-template-columns:1fr}.safety-rule-card p{min-height:0}.safety-rules-summary{align-items:flex-start;flex-direction:column;gap:4px}.forecast-panel{width:calc(100% - 12px);padding:10px}.forecast-panel-controls{align-items:stretch;flex-direction:column}.forecast-panel-controls button{width:100%}.forecast-agreement-row{align-items:flex-start;flex-direction:column}.winds-aloft-section>div:first-child{align-items:flex-start;flex-direction:column;gap:3px}}
+
+/* ==========================================================================
+   v3.9 — Create Burst, Multiple Balloon, and interface polish.
+   Everything here is additive: operational colours, launch themes, and the
+   existing layout are untouched.
+   ========================================================================== */
+
+/* Shared polish ----------------------------------------------------------- */
+:root{--ease-out:cubic-bezier(.2,.8,.2,1);--focus-ring:0 0 0 3px color-mix(in srgb,var(--launch-primary,#d71920) 28%,transparent)}
+button,select,input,.app-tab,.predict-site,.summary-row,.info-card,.safety-rule-card{transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease,color .15s ease,transform .12s var(--ease-out)}
+button:not(:disabled):active{transform:translateY(1px)}
+button:focus-visible,select:focus-visible,input:focus-visible,[role="button"]:focus-visible,.multi-table tr:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+button:disabled{cursor:not-allowed}
+.summary-metrics b,.landing-focus strong,.multi-table td,.readiness-table td,.forecast-model-table td,.inflation-result-grid b{font-variant-numeric:tabular-nums}
+.summary-metrics b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.layer-panel,.tool-panel,.prediction-summary,.readiness-table-wrap,.forecast-table-wrap,.multi-list{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--text-muted,#667085) 45%,transparent) transparent}
+.info-card:hover,.safety-rule-card:hover{box-shadow:0 10px 26px rgba(15,23,42,.10);transform:translateY(-1px)}
+.status-toast{border-radius:10px;padding:9px 14px;animation:bpp-rise .22s var(--ease-out)}
+.tool-panel:not(.hidden){animation:bpp-pop .2s var(--ease-out)}
+.prediction-summary:not(.hidden){animation:bpp-rise .22s var(--ease-out)}
+@keyframes bpp-rise{from{opacity:0;translate:0 8px}to{opacity:1;translate:0 0}}
+@keyframes bpp-pop{from{opacity:0;scale:.985}to{opacity:1;scale:1}}
+
+/* Tool panels: form rows shared by Sweep, Create Burst, Multiple Balloon ---- */
+.tool-panel{border-radius:16px;box-shadow:0 18px 44px rgba(15,23,42,.24);backdrop-filter:blur(14px);background:color-mix(in srgb,var(--surface,#fff) 96%,transparent)}
+.tool-panel .dialog-grid{padding:6px 0 10px;gap:10px}
+.tool-panel .dialog-grid label>span{color:var(--text-muted,#667085);letter-spacing:.02em}
+.tool-panel .dialog-grid label.wide{grid-column:1/-1}
+.tool-panel .dialog-grid small{font-weight:500;color:var(--text-muted,#667085);font-size:10px}
+.tool-panel .dialog-grid input,.tool-panel .dialog-grid select{height:32px;padding:4px 8px;font-size:12px;font-weight:500;min-width:0;width:100%}
+.tool-panel .dialog-actions{padding:2px 0 10px}
+.tool-panel .dialog-actions button{border-radius:9px;padding:8px 13px;background:var(--surface,#fff);color:var(--text,#161a20);border-color:var(--ui-border-strong,#8e979f)}
+.tool-panel .dialog-actions button:hover:not(:disabled){background:var(--hover,#eef4fb)}
+.tool-panel .dialog-actions .dialog-primary{background:var(--launch-primary);border-color:var(--launch-primary);color:#fff}
+.tool-panel .dialog-actions .dialog-primary:hover:not(:disabled){background:color-mix(in srgb,var(--launch-primary) 86%,#000)}
+.tool-panel .dialog-actions button:disabled{opacity:.55}
+.tool-panel .dialog-progress{padding:0 0 4px;font-size:11px;line-height:1.5}
+
+/* Create Burst and Multiple Balloon dock on the right so the map stays visible */
+.burst-panel,.multi-panel{left:auto;right:8px;top:8px;transform:none;max-height:calc(100% - 62px)}
+.burst-panel{width:min(372px,calc(100% - 16px))}
+.multi-panel{width:min(452px,calc(100% - 16px))}
+.burst-panel .tool-panel-head,.multi-panel .tool-panel-head{align-items:flex-start;position:sticky;top:-14px;z-index:2;margin:-14px -14px 10px;padding:14px 14px 10px;background:inherit;border-bottom:1px solid var(--ui-border,#cfd6de);border-radius:16px 16px 0 0}
+.burst-panel .tool-panel-head small,.multi-panel .tool-panel-head small{line-height:1.4;max-width:34ch}
+
+/* Create Burst */
+.draw-symbol.burst{position:relative;border-radius:50%;background:var(--descent);box-shadow:0 0 0 2px #fff,0 0 0 4px var(--descent)}
+.drawing-menu .draw-symbol.burst{width:10px;height:10px;margin:0 3px}
+.trajectory-legend i.burst{width:10px;height:10px;border-radius:50%;background:var(--descent);box-shadow:0 0 0 2px #fff,0 0 0 3.5px var(--descent)}
+.trajectory-legend .burst-legend{gap:8px}
+.trajectory-legend .hidden{display:none}
+.burst-panel #burstProgress{border-top:1px solid var(--ui-border,#cfd6de);padding-top:10px;color:var(--text,#161a20)}
+
+/* Multiple Balloon */
+.multi-list{display:flex;flex-direction:column;gap:10px;margin-bottom:10px}
+.multi-card{border:1px solid var(--ui-border,#cfd6de);border-left:4px solid var(--balloon,#1264d8);border-radius:12px;background:var(--surface-2,#f7f8fa);overflow:hidden}
+.multi-card>header{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--ui-border,#cfd6de);background:color-mix(in srgb,var(--balloon,#1264d8) 7%,var(--surface,#fff))}
+.multi-swatch{flex:0 0 auto;width:12px;height:12px;border-radius:50%;background:var(--balloon,#1264d8);box-shadow:0 0 0 2px var(--surface,#fff),0 0 0 3px var(--balloon,#1264d8)}
+.multi-name{flex:1;min-width:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text,#161a20);font-size:13px;font-weight:750;padding:4px 6px}
+.multi-name:hover,.multi-name:focus{border-color:var(--ui-border-strong,#8e979f);background:var(--surface,#fff)}
+.multi-card>header button{border:0;background:transparent;color:var(--text-muted,#667085);font-size:18px;line-height:1;border-radius:7px;padding:3px 8px}
+.multi-card>header button:hover{background:color-mix(in srgb,#d83a45 14%,transparent);color:#c22c37}
+.multi-grid,.multi-sweep{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:10px}
+.multi-grid label,.multi-sweep label{display:flex;flex-direction:column;gap:3px;min-width:0}
+.multi-grid label>span,.multi-sweep label>span{font-size:10px;font-weight:700;color:var(--text-muted,#667085);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.multi-grid .span-2{grid-column:span 2}
+.multi-grid input,.multi-grid select,.multi-sweep input:not([type="checkbox"]),.multi-sweep select{height:30px;width:100%;min-width:0;border:1px solid var(--ui-border-strong,#9ca4ac);border-radius:8px;background:var(--surface,#fff);color:var(--text,#161a20);padding:3px 7px;font-size:12px}
+.multi-sweep{grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px dashed var(--ui-border,#cfd6de);background:color-mix(in srgb,var(--surface,#fff) 60%,transparent)}
+.multi-sweep .multi-sweep-toggle{grid-column:1/-1;flex-direction:row;align-items:center;gap:7px;cursor:pointer}
+.multi-sweep .multi-sweep-toggle span{font-size:11px;color:var(--text,#161a20)}
+.multi-sweep .multi-sweep-toggle input{width:15px;height:15px;accent-color:var(--balloon,#1264d8)}
+.multi-sweep.off label:not(.multi-sweep-toggle){display:none}
+.multi-results{overflow-x:auto}
+.multi-table{width:100%;border-collapse:collapse;font-size:11px}
+.multi-table th{text-align:left;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted,#667085);padding:6px 6px;border-bottom:1px solid var(--ui-border-strong,#9ca4ac);white-space:nowrap}
+.multi-table td{padding:6px 6px;border-bottom:1px solid var(--ui-border,#cfd6de);vertical-align:top}
+.multi-table td i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.multi-table tbody tr[data-result]{cursor:pointer}
+.multi-table tbody tr[data-result]:hover{background:var(--hover,#eef4fb)}
+.multi-table tr.failed td{color:#c22c37}
+
+/* Embedded in another website: ?embed=1 drops the brand block to save height */
+html[data-embed="1"] .site-brand,html[data-embed="1"] .build-badge{display:none}
+
+@media(max-width:900px){.burst-panel,.multi-panel{right:6px;top:6px;max-height:calc(100% - 56px)}}
+@media(max-width:560px){.burst-panel,.multi-panel{left:6px;right:6px;width:auto}.multi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.multi-sweep{grid-template-columns:repeat(2,minmax(0,1fr))}.multi-grid .span-2{grid-column:1/-1}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+.burst-panel .tool-panel-head,.multi-panel .tool-panel-head{background:var(--surface,#fff)}
+.burst-panel .tool-panel-head>div,.multi-panel .tool-panel-head>div{display:flex;flex-direction:column;gap:3px}
+.burst-panel .tool-panel-head strong,.multi-panel .tool-panel-head strong{font-size:17px}
+.burst-panel .tool-panel-head small,.multi-panel .tool-panel-head small{color:var(--text-muted,#667085);font-size:11px}
+.multi-table td:nth-child(2),.multi-table td:nth-child(5),.multi-table td:nth-child(6){white-space:nowrap}
+.multi-table td:first-child{max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Phone layout: map and ground track only, until the Parameters tab is opened */
+.mobile-only-tab{display:none}
+@media(max-width:760px){
+  .site-header .mobile-only-tab{display:inline-flex}
+  html:not([data-mobile-params="open"]) #predictsView #predictControlStrip,
+  html:not([data-mobile-params="open"]) #predictsView #optimalResult,
+  html:not([data-mobile-params="open"]) #predictsView .layer-panel,
+  html:not([data-mobile-params="open"]) #predictsView .layers-reopen,
+  html:not([data-mobile-params="open"]) #predictsView .drawing-control,
+  html:not([data-mobile-params="open"]) #predictsView .drawing-info,
+  html:not([data-mobile-params="open"]) #predictsView .bottom-tools,
+  html:not([data-mobile-params="open"]) #predictsView .site-status-legend,
+  html:not([data-mobile-params="open"]) #predictsView .weather-map-legend,
+  html:not([data-mobile-params="open"]) #predictsView .prediction-summary,
+  html:not([data-mobile-params="open"]) #predictsView .tool-panel{display:none!important}
+  html:not([data-mobile-params="open"]) #predictsView .trajectory-legend{bottom:10px}
+  html:not([data-mobile-params="open"]) #predictsView .status-toast{bottom:52px}
+  html[data-mobile-params="open"] #predictsView #predictControlStrip{max-height:46vh;overflow-y:auto}
+}

@@ -5,10 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#050505" />
   <title>UMD BPP Predicts</title>
-  <link rel="preconnect" href="https://unpkg.com" />
-  <link rel="preconnect" href="https://server.arcgisonline.com" />
+  <!-- Website hosting: leave empty when this page and the API share one server.
+       Set it to the API address only when the page is hosted somewhere else. -->
+  <meta name="bpp-api-base" content="" />
+  <link rel="preconnect" href="https://unpkg.com" crossorigin />
+  <link rel="preconnect" href="https://server.arcgisonline.com" crossorigin />
+  <link rel="dns-prefetch" href="https://services.arcgisonline.com" />
+  <link rel="modulepreload" href="static/geometry.mjs" />
+  <link rel="modulepreload" href="static/ui_helpers.mjs" />
   <link href="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link href="static/styles.css?v=3.8.1" rel="stylesheet" />
+  <link href="static/styles.css?v=3.9.0" rel="stylesheet" />
 </head>
 <body>
   <header class="site-header">
@@ -18,13 +24,14 @@
     </div>
     <nav class="app-tabs" aria-label="Application sections">
       <button class="app-tab active" id="predictsTab" type="button" data-app-view="predicts">Predicts</button>
+      <button class="app-tab mobile-only-tab" id="parametersTab" type="button" aria-pressed="false" title="Show or hide launch settings, layers, and tools">Parameters</button>
       <button class="app-tab" id="safetyRulesTab" type="button" data-app-view="safety">BPP Safety Rules</button>
       <button class="app-tab" id="readinessTab" type="button" data-app-view="readiness">Readiness</button>
       <button class="app-tab" id="inflationTab" type="button" data-app-view="inflation">Inflation Calculator</button>
       <button class="app-tab" id="infoTab" type="button" data-app-view="info">Info</button>
     </nav>
     <div class="header-actions">
-      <span class="build-badge" id="buildBadge">v3.8.1</span>
+      <span class="build-badge" id="buildBadge">v3.9.0</span>
       <label class="launch-theme-select" title="Change launch colors without changing operational status colors"><span>Launch Theme</span><select id="launchThemeSelect" aria-label="Launch theme"><option value="standard">Standard</option><option value="maryland">Maryland</option><option value="night">Night Launch</option><option value="aurora">Aurora</option><option value="country">Country Desert</option><option value="summer">Summer Beach</option><option value="pride">Pride</option></select></label>
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode">
         <span id="themeIcon" aria-hidden="true">☾</span><span id="themeLabel">Dark</span>
@@ -80,6 +87,7 @@
       <div class="drawing-menu hidden" id="drawingMenu">
         <button data-draw-mode="point" type="button"><span class="draw-symbol point"></span>Draw point</button>
         <button data-draw-mode="rectangle" type="button"><span class="draw-symbol rectangle"></span>Draw oriented rectangle</button>
+        <button data-draw-mode="burst" type="button" title="Mark where the balloon burst and predict its landing site"><span class="draw-symbol burst"></span>Create Burst</button>
         <button data-draw-mode="select" type="button"><span class="tool-icon">↖</span>Select drawing</button>
         <button id="deleteDrawing" type="button" disabled><span class="tool-icon">⌫</span>Delete selection</button>
         <button id="deleteAllDrawings" type="button"><span class="tool-icon">🗑</span>Delete all drawings</button>
@@ -177,7 +185,7 @@
     </section>
 
     <div class="trajectory-legend" id="trajectoryLegend">
-      <span><i class="ascent"></i>Ascent</span><span><i class="float"></i>Float</span><span><i class="descent"></i>Descent</span><span><i class="landing"></i>Landing</span>
+      <span><i class="ascent"></i>Ascent</span><span><i class="float"></i>Float</span><span><i class="descent"></i>Descent</span><span><i class="landing"></i>Landing</span><span class="burst-legend hidden" id="burstLegend"><i class="burst"></i>Burst point</span>
     </div>
 
     <div class="bottom-tools advanced-map-control" role="toolbar" aria-label="Prediction map tools">
@@ -185,6 +193,7 @@
       <button id="downloadKml" type="button">Download Predict KMLs</button>
       <button id="downloadGeofence" type="button">Download Geofence GeoJSON</button>
       <button id="openSweep" type="button">Parameter Sweep</button>
+      <button id="openMultiBalloon" type="button" title="Run several balloons with their own times, parameters, and sweeps together">Multiple Balloon</button>
       <button id="queryAddresses" type="button">Query Addresses</button>
       <button id="aboutMap" type="button">About Map</button>
     </div>
@@ -204,6 +213,45 @@
       </div>
       <section class="winds-aloft-section"><div><h3>Winds aloft</h3><p>Wind speed by approximate standard pressure-level altitude. Hover points for direction and model values.</p></div><div id="windsAloftChart" class="winds-aloft-chart"><p class="forecast-empty">Run the comparison to draw the altitude profile.</p></div></section>
       <p class="forecast-method-note"><strong>Operational note:</strong> Tawhiri remains the primary trajectory. Dashed model tracks are screening estimates using each model’s winds at the launch location and are intended to expose forecast disagreement.</p>
+    </section>
+
+    <section id="burstPanel" class="tool-panel burst-panel hidden" aria-labelledby="burstPanelTitle">
+      <div class="tool-panel-head"><div><strong id="burstPanelTitle">Create Burst</strong><small>Descent-only landing prediction from the point where the balloon burst.</small></div><button id="closeBurstPanel" type="button" aria-label="Close create burst">×</button></div>
+      <p>Click the map where the balloon burst, or type its GPS coordinates. You can paste <b>latitude, longitude</b> into the latitude box.</p>
+      <div class="dialog-grid">
+        <label class="wide"><span>Name</span><input id="burstName" type="text" maxlength="80" placeholder="Burst 1"></label>
+        <label><span>Latitude</span><input id="burstLatitude" type="text" inputmode="decimal" autocomplete="off" placeholder="39.70000"></label>
+        <label><span>Longitude</span><input id="burstLongitude" type="text" inputmode="decimal" autocomplete="off" placeholder="-77.90000"></label>
+        <label><span>Burst altitude (ft)</span><input id="burstPointAltitudeFt" type="number" min="500" max="200000" step="100" value="90000"><small id="burstPointAltitudeM">27,432 m</small></label>
+        <label><span>S.L. descent rate (m/s)</span><input id="burstDescentRate" type="number" min="0.1" max="50" step="0.5" value="9"></label>
+        <label><span>Burst date</span><input id="burstDate" type="date"></label>
+        <label><span>Burst time</span><input id="burstTime" type="time" step="1"></label>
+        <label class="wide"><span>Time zone</span><select id="burstTimezone"><option value="local">Local</option><option value="utc">UTC</option></select></label>
+      </div>
+      <div class="dialog-actions"><button id="runBurstPoint" type="button" class="dialog-primary">Predict Landing</button><button id="newBurstPoint" type="button">New Burst Point</button><button id="burstTimeNow" type="button">Set Time To Now</button></div>
+      <div id="burstProgress" class="dialog-progress"></div>
+    </section>
+
+    <section id="multiPanel" class="tool-panel multi-panel hidden" aria-labelledby="multiPanelTitle">
+      <div class="tool-panel-head"><div><strong id="multiPanelTitle">Multiple Balloon</strong><small>Each balloon has its own site, launch time, parameters, and sweep. Times use the Launch Time zone setting.</small></div><button id="closeMultiPanel" type="button" aria-label="Close multiple balloon">×</button></div>
+      <div id="multiBalloonList" class="multi-list"></div>
+      <div class="dialog-actions"><button id="runMultiBalloon" type="button" class="dialog-primary">Run All Balloons</button><button id="addMultiBalloon" type="button">Add Balloon</button><button id="clearMultiBalloon" type="button">Clear Results</button></div>
+      <div id="multiProgress" class="dialog-progress"></div>
+      <div id="multiResults" class="multi-results"></div>
+    </section>
+
+    <section id="sweepPanel" class="tool-panel hidden" aria-labelledby="sweepPanelTitle">
+      <div class="tool-panel-head"><strong id="sweepPanelTitle">Parameter Sweep</strong><button id="closeSweepPanel" type="button" aria-label="Close parameter sweep">×</button></div>
+      <p>Run a controlled series of predictions from one launch site. Click a dotted result line to see its exact parameter value.</p>
+      <div class="dialog-grid">
+        <label><span>Launch site</span><select id="sweepSite"></select></label>
+        <label><span>Parameter</span><select id="sweepParameter"><option value="ascent_rate_ms">Ascent rate (m/s)</option><option value="descent_rate_ms">Descent rate (m/s)</option><option value="altitude">Burst/Float altitude (m)</option></select></label>
+        <label><span>Lower</span><input id="sweepLower" type="number" value="4.5" step="0.5"></label>
+        <label><span>Upper</span><input id="sweepUpper" type="number" value="6.5" step="0.5"></label>
+        <label><span>Step</span><input id="sweepStep" type="number" value="0.5" step="0.1" min="0.01"></label>
+      </div>
+      <div class="dialog-actions"><button id="runSweep" type="button" class="dialog-primary">Run Sweep</button><button id="clearSweep" type="button">Clear Sweep</button></div>
+      <div id="sweepProgress" class="dialog-progress"></div>
     </section>
 
     <div class="status-toast hidden" id="toast"></div>
@@ -359,13 +407,15 @@
         <p>A quick reference for the tools built into this standalone predictor. Operational colors for trajectories, airspace, and site viability stay fixed even when a launch theme is applied.</p>
       </div>
       <div class="info-grid">
-        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be now through the model's seven-day forecast window.</p></article>
+        <article class="info-card"><h2>Predictions</h2><p>Run Burst or Float predictions from preset or custom launch sites. Launch times can be from 48 hours in the past through the model's seven-day forecast window, so a flight can be replayed after the fact.</p></article>
         <article class="info-card"><h2>Optimal Site</h2><p>Search either the currently selected/custom sites or the full preset list. Airspace is evaluated at the balloon altitude where the path crosses it, with optional ascent-rate sweeping.</p></article>
         <article class="info-card"><h2>Launch Weather</h2><p>Switch Map Mode to Launch Weather to see launch-site wind, gusts, rain, and temperature. Click any launch marker for weather, address details, coordinates, and a direct Ventusky link.</p></article>
         <article class="info-card"><h2>Inflation Calculator</h2><p>The integrated calculator follows the supplied MATLAB model and can automatically feed its burst-height result into Predicts, while preserving a manual burst-altitude option.</p></article>
         <article class="info-card"><h2>Forecast Models</h2><p>Compare Open-Meteo Best Match, NOAA GFS, ECMWF IFS, and DWD ICON surface conditions, landing estimates, forecast agreement, and winds aloft from a prediction summary.</p></article>
         <article class="info-card"><h2>Airspace & 3D</h2><p>Controlled B/C/D, special-use, and TFR layers remain visible in Basic mode. Advanced mode adds Class E, reference, drawing, and 3D volume controls.</p></article>
         <article class="info-card"><h2>Drawing Tools</h2><p>Add custom launch points or draw oriented rectangles. Rectangles can be assigned an upper altitude and visualized as 3D volumes.</p></article>
+        <article class="info-card"><h2>Create Burst</h2><p>In Drawing Tools, choose Create Burst and click the map where the balloon burst, or type its GPS coordinates. Enter the burst altitude in feet and the time it burst to get a descent-only landing prediction.</p></article>
+        <article class="info-card"><h2>Multiple Balloon</h2><p>In Operations Advanced, open Multiple Balloon to give each balloon its own launch site, launch time, burst or float settings, and parameter sweep, then run them all together on one map.</p></article>
         <article class="info-card"><h2>Launch Readiness</h2><p>Compare selected sites using visible weather, forecast freshness, airspace, landing-risk, ascent-rate, and flight-time evidence.</p></article>
         <article class="info-card"><h2>BPP Safety Rules</h2><p>Set local gust, precipitation, forecast-age, airspace, water, and landing thresholds. Saved rules immediately control readiness decisions.</p></article>
         <article class="info-card"><h2>Automatic FAA Refresh</h2><p>B/C/D, Class E, special-use airspace, and active TFR caches refresh automatically. The Layers panel shows freshness and supports a manual refresh.</p></article>
@@ -375,21 +425,7 @@
     </div>
   </section>
 
-  <section id="sweepPanel" class="tool-panel hidden" aria-labelledby="sweepPanelTitle">
-    <div class="tool-panel-head"><strong id="sweepPanelTitle">Parameter Sweep</strong><button id="closeSweepPanel" type="button" aria-label="Close parameter sweep">×</button></div>
-    <p>Run a controlled series of predictions from one launch site. Click a dotted result line to see its exact parameter value.</p>
-    <div class="dialog-grid">
-      <label><span>Launch site</span><select id="sweepSite"></select></label>
-      <label><span>Parameter</span><select id="sweepParameter"><option value="ascent_rate_ms">Ascent rate (m/s)</option><option value="descent_rate_ms">Descent rate (m/s)</option><option value="altitude">Burst/Float altitude (m)</option></select></label>
-      <label><span>Lower</span><input id="sweepLower" type="number" value="4.5" step="0.5"></label>
-      <label><span>Upper</span><input id="sweepUpper" type="number" value="6.5" step="0.5"></label>
-      <label><span>Step</span><input id="sweepStep" type="number" value="0.5" step="0.1" min="0.01"></label>
-    </div>
-    <div class="dialog-actions"><button id="runSweep" type="button" class="dialog-primary">Run Sweep</button><button id="clearSweep" type="button">Clear Sweep</button></div>
-    <div id="sweepProgress" class="dialog-progress"></div>
-  </section>
-
-  <script src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
-  <script type="module" src="static/app.js?v=3.8.1"></script>
+  <script defer src="https://unpkg.com/maplibre-gl@5.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="static/app.js?v=3.9.0"></script>
 </body>
 </html>
