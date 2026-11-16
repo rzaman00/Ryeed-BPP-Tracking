@@ -41,7 +41,7 @@ for _directory in (DATA_DIR, CACHE_DIR, AIRSPACE_CACHE_DIR):
 load_dotenv(ROOT / ".env")
 
 TAWHIRI_API_URL = os.getenv("TAWHIRI_API_URL", "https://api.v2.sondehub.org/tawhiri").strip()
-BUILD_VERSION = "3.9.1"
+BUILD_VERSION = "3.9.2"
 # Launches up to this many hours in the past can be replayed (7 days).
 PAST_PREDICTION_WINDOW_H = 168
 PAST_PREDICTION_WINDOW_DAYS = PAST_PREDICTION_WINDOW_H // 24
@@ -186,11 +186,12 @@ class PredictRequest(BaseModel):
     mode: Literal["burst", "float"] = "burst"
     launch: LaunchPoint
     launch_datetime: datetime
-    ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+    # Any positive rate is accepted so unusual flights can be modelled.
+    ascent_rate_ms: float = Field(default=5.5, gt=0)
     descent_rate_ms: float = Field(default=9.0, gt=0, le=50)
     burst_altitude_m: float = Field(default=28000, gt=100)
     float_altitude_m: float = Field(default=22000, gt=100)
-    float_ascent_rate_ms: float = Field(default=1.0, gt=0, le=10)
+    float_ascent_rate_ms: float = Field(default=1.0, gt=0)
     float_duration_min: float = Field(default=60, gt=0, le=24 * 60)
 
     @model_validator(mode="after")
@@ -255,7 +256,7 @@ class InflationRequest(BaseModel):
     site_temperature_f: float = Field(default=70.0, gt=-459.67, le=160)
     balloon_neck_mass_kg: float = Field(default=2.255, gt=0, le=20)
     payload_mass_kg: float = Field(default=6.588, ge=0, le=100)
-    target_ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+    target_ascent_rate_ms: float = Field(default=5.5, gt=0)
 
 
 def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
@@ -302,16 +303,29 @@ def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
     minimum_ascent_rate = ascent_rate(diameter_lower_bound)
     maximum_ascent_rate = ascent_rate(diameter_max)
     target = req.target_ascent_rate_ms
+    # Rates outside the 2-3 m launch-diameter range are still solved so edge
+    # cases can be modelled. The same equations are extended to any diameter
+    # between lift-off and burst, and the result carries a warning.
+    range_warning: str | None = None
+    lo, hi = diameter_lower_bound, diameter_max
     if target < minimum_ascent_rate or target > maximum_ascent_rate:
-        raise ValueError(
-            "The requested ascent rate is outside the range achievable with diameters "
-            f"from {diameter_min:.2f} to {diameter_max:.2f} m. The available range is "
-            f"approximately {minimum_ascent_rate:.3f} to {maximum_ascent_rate:.3f} m/s."
+        lo = liftoff_diameter * (1.0 + 1e-9)
+        hi = burst_diameter * (1.0 - 1e-6)
+        if target > ascent_rate(hi):
+            raise ValueError(
+                f"No balloon size below the {burst_diameter:.1f} m burst diameter reaches {target:g} m/s "
+                f"(the model tops out near {ascent_rate(hi):.1f} m/s). "
+                "Use a Manual burst altitude to run this ascent rate."
+            )
+        limit = (
+            f"above the {maximum_ascent_rate:.2f} m/s reached at a {diameter_max:.0f} m launch diameter"
+            if target > maximum_ascent_rate
+            else f"below the {minimum_ascent_rate:.2f} m/s reached at a {diameter_min:.0f} m launch diameter"
         )
+        range_warning = f"{target:g} m/s is {limit}. The burst altitude is extrapolated beyond the validated range."
 
     # MATLAB uses fzero on the same monotonic bracket. Bisection gives the same
     # physical root deterministically without adding a SciPy/MATLAB dependency.
-    lo, hi = diameter_lower_bound, diameter_max
     for _ in range(100):
         mid = (lo + hi) / 2.0
         if ascent_rate(mid) < target:
@@ -344,6 +358,8 @@ def calculate_inflation(req: InflationRequest) -> dict[str, Any]:
         "helium_density_kgm3": rho_helium,
         "minimum_ascent_rate_ms": minimum_ascent_rate,
         "maximum_ascent_rate_ms": maximum_ascent_rate,
+        "outside_validated_range": range_warning is not None,
+        "range_warning": range_warning,
         "model": "InflationCalculations2024.m direct equation port",
         "constants": {
             "g_ms2": g, "drag_coefficient": cd, "R_air": R_air, "R_helium": R_helium,
@@ -381,11 +397,12 @@ class OptimalSiteRequest(BaseModel):
     launch_sites: list[OptimalSiteCandidate] = Field(min_length=1, max_length=50)
     mode: Literal["burst", "float"] = "burst"
     launch_datetime: datetime
-    ascent_rate_ms: float = Field(default=5.5, gt=0, le=20)
+    # Any positive rate is accepted so unusual flights can be modelled.
+    ascent_rate_ms: float = Field(default=5.5, gt=0)
     descent_rate_ms: float = Field(default=9.0, gt=0, le=50)
     burst_altitude_m: float = Field(default=28000, gt=100)
     float_altitude_m: float = Field(default=22000, gt=100)
-    float_ascent_rate_ms: float = Field(default=1.0, gt=0, le=10)
+    float_ascent_rate_ms: float = Field(default=1.0, gt=0)
     float_duration_min: float = Field(default=60, gt=0, le=24 * 60)
     airspace_layers: list[Literal["controlled", "class_e", "sua", "tfr"]] = Field(
         default_factory=lambda: ["controlled", "class_e", "sua", "tfr"],
@@ -400,8 +417,8 @@ class OptimalSiteRequest(BaseModel):
     @model_validator(mode="after")
     def validate_sweep_rates(self):
         for value in self.ascent_rate_sweep_ms:
-            if not math.isfinite(value) or value <= 0 or value > 20:
-                raise ValueError("Optimal-site ascent-rate sweep values must be positive and at most 20 m/s")
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Optimal-site ascent-rate sweep values must be positive")
         return self
 
 
@@ -2622,7 +2639,7 @@ def default_ascent_rate_sweep(current: float) -> list[float]:
     out: list[float] = []
     for value in values:
         value = round(float(value), 3)
-        if 0 < value <= 20 and value not in out:
+        if value > 0 and value not in out:
             out.append(value)
     return out
 

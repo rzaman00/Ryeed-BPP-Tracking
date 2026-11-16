@@ -346,7 +346,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.9.1"
+    assert h["version"] == "3.9.2"
     assert h["airspace"] == "FAA live services with disk cache"
     assert h["launch_weather"] == "Open-Meteo multi-model forecast and winds aloft"
     assert h["faa_refresh"] == "automatic every 15 minutes with disk cache"
@@ -404,10 +404,29 @@ def test_inflation_calculator_matches_matlab_reference_values():
     assert r["burst_altitude_reference"] == "above launch site"
 
 
-def test_inflation_calculator_rejects_unachievable_rate():
+def test_inflation_calculator_extrapolates_out_of_range_rates_with_a_warning():
     import app as appmod
-    with pytest.raises(ValueError, match="outside the range achievable"):
-        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+    normal = appmod.calculate_inflation(appmod.InflationRequest())
+    assert normal["outside_validated_range"] is False and normal["range_warning"] is None
+    for rate in (8.0, 19.0):
+        r = appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=rate))
+        assert r["outside_validated_range"] is True and "extrapolated" in r["range_warning"]
+        assert r["expected_ascent_rate_ms"] == pytest.approx(rate, rel=1e-6)
+        assert r["burst_altitude_m"] > 0
+    # A faster rate needs a bigger balloon, which bursts lower.
+    fast = appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+    assert fast["burst_altitude_m"] < normal["burst_altitude_m"]
+    with pytest.raises(ValueError, match="Manual burst altitude"):
+        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=80.0))
+
+
+def test_ascent_rate_has_no_upper_limit():
+    import app as appmod
+    base = dict(launch={"name": "T", "latitude": 39.7, "longitude": -77.5}, launch_datetime=datetime.now(timezone.utc) + timedelta(hours=2))
+    assert appmod.PredictRequest(**base, ascent_rate_ms=35.0, float_ascent_rate_ms=14.0).ascent_rate_ms == 35.0
+    assert appmod.default_ascent_rate_sweep(25.0) == [25.0, 24.5, 25.5, 24.0, 26.0]
+    with pytest.raises(Exception):
+        appmod.PredictRequest(**base, ascent_rate_ms=0)
 
 
 def test_standalone_tabs_and_auto_manual_burst_contract():
@@ -1150,11 +1169,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.9.1'
+    assert h['version']=='3.9.2'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.9.1' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.9.2' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1609,3 +1628,13 @@ def test_v391_new_launch_themes_are_wired_in_all_three_files():
         assert f'<option value="{theme}">' in html
         assert f"  {theme}:{{primary:" in js
         assert f'html[data-launch-theme="{theme}"] .site-header' in css
+
+
+# v3.9.2 — animated launch themes
+def test_v392_listed_launch_themes_are_animated_and_respect_reduced_motion():
+    css = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
+    for keyframes in ["nightSky", "auroraSweep", "waterRoll", "davidProwl", "lostTape", "electricSparks"]:
+        assert f"@keyframes {keyframes}{{" in css and f"animation:{keyframes} " in css.replace("davidPulse 4.5s ease-in-out infinite,", "")
+    reduced = css[css.rindex("@media(prefers-reduced-motion:reduce)"):]
+    for theme in ["night", "aurora", "water", "david", "lost"]:
+        assert f'html[data-launch-theme="{theme}"] .site-header' in reduced

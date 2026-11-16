@@ -1,4 +1,4 @@
-# BPP Predicts v3.9.1
+# BPP Predicts v3.9.2
 
 Standalone UMD Balloon Payload Program launch planning, prediction, weather,
 airspace, inflation, and readiness application.
@@ -68,4 +68,4 @@ freshness in the Layers panel. Operators can also request an immediate refresh.
   airspace, water, and landing thresholds in the local browser.
 - Missing required safety evidence always produces NO-GO.
 
-Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.9.1`.
+Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.9.2`.

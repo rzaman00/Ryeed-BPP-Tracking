@@ -1,4 +1,4 @@
-BPP Prediction Suite v3.9.1
+BPP Prediction Suite v3.9.2
 
 Requirements:
 - Python 3.11 or newer.
@@ -9,6 +9,11 @@ Start on Windows:
 1. Double-click START_BPP_PREDICTS.bat.
 2. The application opens at http://127.0.0.1:8000/.
 3. Keep the launcher window open while using Predicts.
+
+New in v3.9.2:
+- Ascent rate accepts any positive value. Automatic burst altitude still
+  calculates outside the usual range and shows a warning.
+- Animated launch themes: Night Launch, Aurora, Water, David, Lost.
 
 New in v3.9.1:
 - Burst and float altitude have a meters box and a feet box side by side

@@ -1,4 +1,17 @@
-# Build report — BPP Prediction Suite v3.9.1
+# Build report — BPP Prediction Suite v3.9.2
+
+## New in v3.9.2
+
+- **Ascent rate has no upper limit.** The 20 m/s cap (10 m/s for float rate) is
+  removed from predictions, sweeps, and the optimal-site search; the rate only
+  has to be above zero. The inflation model no longer refuses rates outside the
+  2-3 m launch-diameter range: it extends the same equations to any diameter
+  between lift-off and burst and marks the result as extrapolated. Rates that
+  would need a balloon larger than its burst diameter still fail in Automatic
+  mode, with a message to use a Manual burst altitude.
+- **Animated launch themes**: Night Launch, Aurora, Water, David, and Lost now
+  move (Electric already did). Animations stop when the device asks for reduced
+  motion.
 
 ## New in v3.9.1
 

@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const qs = (sel, root = document) => root.querySelector(sel);
 const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const BUILD_VERSION = '3.9.1';
+const BUILD_VERSION = '3.9.2';
 // Every request is made relative to where this app is served from, so the page
 // works unchanged at a domain root, under a sub-path such as /predicts/, or with
 // the API on another server (set the bpp-api-base meta tag or
@@ -676,7 +676,7 @@ function candidateFromTarget(target){
 function optimalSweepRates(){
   const current=Number($('ascentRate').value);
   if(!$('optimalAscentSweep')?.checked)return [current];
-  return [current,current-.5,current+.5,current-1,current+1].filter((v,i,a)=>v>0&&v<=20&&a.indexOf(v)===i);
+  return [current,current-.5,current+.5,current-1,current+1].filter((v,i,a)=>v>0&&a.indexOf(v)===i);
 }
 function updateOptimalSweepLabel(){
   const on=Boolean($('optimalAscentSweep')?.checked);
@@ -936,7 +936,8 @@ function updateAltitudeLabels(){
   const auto=state.burstAltitudeMode==='auto';
   mirrorFeetBox('burstAltitude','burstAltitudeFt');mirrorFeetBox('floatAltitude','floatAltitudeFt');
   // The Automatic choice is already shown in the dropdown; only flag a pending calculation.
-  $('burstFeet').textContent=auto&&!state.inflationResult?'…':'';
+  const rangeWarning=auto&&state.inflationResult?.range_warning;
+  $('burstFeet').textContent=auto&&!state.inflationResult?'…':rangeWarning?'⚠':'';$('burstFeet').title=rangeWarning||'';
 }
 
 // Phone layout: the map and ground track fill the screen. The Parameters tab
@@ -987,7 +988,10 @@ function inflationRequestBody(){
   };
 }
 function renderInflationResult(r){
-  state.inflationResult=r;$('inflationError').classList.add('hidden');$('inflationStatus').textContent='Calculated';
+  state.inflationResult=r;
+  // An ascent rate outside the validated range still calculates, with a warning.
+  $('inflationError').classList.toggle('hidden',!r.range_warning);$('inflationError').classList.toggle('warning',Boolean(r.range_warning));$('inflationError').textContent=r.range_warning||'';
+  $('inflationStatus').textContent=r.range_warning?'Calculated · outside validated range':'Calculated';
   $('inflationExpectedAscent').textContent=`${fmt(r.expected_ascent_rate_ms,3)} m/s`;
   $('inflationLift').textContent=`${fmt(r.required_scale_lift_lb,3)} lb`;
   $('inflationPsi').textContent=`${fmt(r.required_psi,3)} PSI`;
@@ -1001,7 +1005,7 @@ async function calculateInflation(silent=false){
     const r=await api('/api/inflation/calculate',{method:'POST',body:JSON.stringify(inflationRequestBody())});
     renderInflationResult(r);return r;
   }catch(e){
-    state.inflationResult=null;$('inflationStatus').textContent='Check inputs';$('inflationError').textContent=e.message;$('inflationError').classList.remove('hidden');
+    state.inflationResult=null;$('inflationStatus').textContent='Check inputs';$('inflationError').textContent=e.message;$('inflationError').classList.remove('hidden','warning');
     if(!silent)toast(`Inflation calculator: ${e.message}`,true,6500);throw e;
   }
 }
@@ -1413,7 +1417,7 @@ function balloonCardHtml(b){
       <label><span>Type</span><select data-field="mode"><option value="burst"${isFloat?'':' selected'}>Burst</option><option value="float"${isFloat?' selected':''}>Float</option></select></label>
       ${field('Launch date','date',`type="date" min="${earliestDateValue()}"`)}
       ${field('Launch time','time','type="time"')}
-      ${field('Ascent rate (m/s)','ascent','type="number" min="0.1" step="0.5"')}
+      ${field('Ascent rate (m/s)','ascent','type="number" min="0.01" step="0.5"')}
       ${field('S.L. descent (m/s)','descent','type="number" min="0.1" step="0.5"')}
       ${flight}
     </div>
