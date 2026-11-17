@@ -10,3 +10,4 @@ Dockerfile
 **/.venv
 **/*.bat
 **/*.ps1
+**/cache/
