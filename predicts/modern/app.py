@@ -1518,6 +1518,15 @@ def bbox_param() -> str:
     return f'{b["lon_min"]},{b["lat_min"]},{b["lon_max"]},{b["lat_max"]}'
 
 
+def arcgis_error_detail(raw: Any) -> str:
+    # ArcGIS reports errors such as its 6000-units/min quota (code 429) inside an HTTP 200 body.
+    error = raw.get("error") if isinstance(raw, dict) else None
+    if not isinstance(error, dict):
+        return ""
+    details = " ".join(str(d) for d in error.get("details") or [])
+    return f" (code {error.get('code')}: {error.get('message')} {details})".replace("  ", " ")
+
+
 async def fetch_arcgis_airspace(where: str, layer_name: str) -> dict[str, Any]:
     page_size = 2000
     features: list[dict[str, Any]] = []
@@ -1542,7 +1551,7 @@ async def fetch_arcgis_airspace(where: str, layer_name: str) -> dict[str, Any]:
             response.raise_for_status()
             raw = response.json()
             if raw.get("type") != "FeatureCollection" or not isinstance(raw.get("features"), list):
-                raise ExternalServiceError("FAA class-airspace service returned an unexpected response")
+                raise ExternalServiceError(f"FAA class-airspace service returned an unexpected response{arcgis_error_detail(raw)}")
             for feature in raw["features"]:
                 feature = dict(feature)
                 props = dict(feature.get("properties") or {})
@@ -1584,7 +1593,7 @@ async def fetch_sua_airspace() -> dict[str, Any]:
             response.raise_for_status()
             raw = response.json()
             if raw.get("type") != "FeatureCollection":
-                raise ExternalServiceError("FAA special-use airspace service returned an unexpected response")
+                raise ExternalServiceError(f"FAA special-use airspace service returned an unexpected response{arcgis_error_detail(raw)}")
             features.extend(raw.get("features", []))
             if not (raw.get("properties") or {}).get("exceededTransferLimit"):
                 return {"type": "FeatureCollection", "features": features}
@@ -1637,24 +1646,49 @@ async def operational_airspace(dataset: str, force: bool = False) -> tuple[dict[
     cached, _ = load_geojson(cache_path)
     if not force and cached.get("features") and cache_fresh(cache_path, AIRSPACE_TTLS[dataset]):
         return cached, None, "FAA cache"
+    # One FAA download per dataset at a time: concurrent page loads, users and optimal-site
+    # searches on an empty cache otherwise multiply requests past the FAA ArcGIS quota.
+    started = time.time()
+    async with _airspace_fetch_locks.setdefault(dataset, asyncio.Lock()):
+        if _airspace_fetched_at.get(dataset, 0.0) >= started:
+            cached, _ = load_geojson(cache_path)
+            if cached.get("features"):
+                return cached, None, "FAA live"
+        return await _fetch_operational_airspace(dataset, cache_path, cached)
+
+
+_airspace_fetch_locks: dict[str, asyncio.Lock] = {}
+_airspace_fetched_at: dict[str, float] = {}
+
+
+async def _fetch_operational_airspace(dataset: str, cache_path: Path, cached: dict[str, Any]) -> tuple[dict[str, Any], str | None, str]:
     try:
         if dataset == "controlled": data = await fetch_controlled_airspace()
         elif dataset == "class_e": data = await fetch_class_e_airspace()
         elif dataset == "sua": data = await fetch_sua_airspace()
         elif dataset == "tfr": data = await fetch_tfr_airspace()
         else: raise ValueError("Unknown airspace dataset")
-        write_json_atomic(cache_path, data)
-        return data, None, "FAA live"
     except Exception as exc:
-        if cached.get("features"):
-            return cached, f"FAA refresh failed; showing last cached data: {exc}", "FAA stale cache"
-        # Last fallback: use a resolved old BPP file for controlled/TFR if available.
-        legacy_map = {"controlled": "controlled_airspace_reduced.geojson", "tfr": "tfr_airspace.geojson"}
-        if dataset in legacy_map:
-            legacy, _ = load_geojson(LEGACY_DATA / legacy_map[dataset])
-            if legacy.get("features"):
-                return legacy, f"FAA refresh failed; showing local legacy layer: {exc}", "legacy local"
-        return empty_fc(), f"Airspace could not be loaded: {exc}", "unavailable"
+        return _airspace_fallback(dataset, cached, exc)
+    try:
+        write_json_atomic(cache_path, data)
+        _airspace_fetched_at[dataset] = time.time()
+    except OSError as exc:
+        # Keep the good download; an unwritable cache (e.g. root-owned bind mount) must not hide it.
+        return data, f"FAA data loaded but could not be cached: {exc}", "FAA live"
+    return data, None, "FAA live"
+
+
+def _airspace_fallback(dataset: str, cached: dict[str, Any], exc: Exception) -> tuple[dict[str, Any], str | None, str]:
+    if cached.get("features"):
+        return cached, f"FAA refresh failed; showing last cached data: {exc}", "FAA stale cache"
+    # Last fallback: use a resolved old BPP file for controlled/TFR if available.
+    legacy_map = {"controlled": "controlled_airspace_reduced.geojson", "tfr": "tfr_airspace.geojson"}
+    if dataset in legacy_map:
+        legacy, _ = load_geojson(LEGACY_DATA / legacy_map[dataset])
+        if legacy.get("features"):
+            return legacy, f"FAA refresh failed; showing local legacy layer: {exc}", "legacy local"
+    return empty_fc(), f"Airspace could not be loaded: {exc}", "unavailable"
 
 
 def airspace_cache_status(dataset: str) -> dict[str, Any]:

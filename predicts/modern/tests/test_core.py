@@ -1278,3 +1278,42 @@ def test_v38_launcher_starts_only_prediction_server():
     for token in ['start_live_chase', 'docker', 'ChaseMapper', 'threading.Thread']:
         assert token not in launcher
 
+
+
+def test_concurrent_airspace_requests_share_one_faa_download(monkeypatch, tmp_path):
+    import asyncio
+    import app as appmod
+    monkeypatch.setattr(appmod, "AIRSPACE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(appmod, "_airspace_fetched_at", {})
+    monkeypatch.setattr(appmod, "_airspace_fetch_locks", {})
+    calls = []
+
+    async def fake_sua():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": None, "properties": {}}]}
+
+    monkeypatch.setattr(appmod, "fetch_sua_airspace", fake_sua)
+
+    async def burst():
+        return await asyncio.gather(*(appmod.operational_airspace("sua") for _ in range(6)))
+
+    results = asyncio.run(burst())
+    assert len(calls) == 1
+    assert all(source == "FAA live" and len(data["features"]) == 1 for data, _, source in results)
+
+
+def test_faa_quota_error_is_reported(monkeypatch, tmp_path):
+    import asyncio
+    import app as appmod
+    monkeypatch.setattr(appmod, "AIRSPACE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(appmod, "_airspace_fetch_locks", {})
+
+    async def throttled():
+        raw = {"error": {"code": 429, "message": "Too many requests.", "details": ["Retry after 60 sec."]}}
+        raise appmod.ExternalServiceError(f"FAA special-use airspace service returned an unexpected response{appmod.arcgis_error_detail(raw)}")
+
+    monkeypatch.setattr(appmod, "fetch_sua_airspace", throttled)
+    data, warning, source = asyncio.run(appmod.operational_airspace("sua"))
+    assert source == "unavailable" and data["features"] == []
+    assert "code 429" in warning and "Retry after 60 sec" in warning
