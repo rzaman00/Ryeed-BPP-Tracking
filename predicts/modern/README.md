@@ -1,4 +1,4 @@
-# BPP Predicts v3.8.2
+# BPP Predicts v3.9.3
 
 Standalone UMD Balloon Payload Program launch planning, prediction, weather,
 airspace, inflation, and readiness application.
@@ -16,6 +16,31 @@ Choose Launch Theme → Emo for the charcoal/crimson theme. See
 Use `START_BPP_PREDICTS.bat` from the repository root. The launcher creates the
 Python virtual environment when needed, verifies the server, and opens
 `http://127.0.0.1:8000/`. Docker is not required.
+
+## Create Burst
+
+In Operations Advanced, open Drawing Tools and choose `Create Burst`. Click the
+map where the balloon burst or type its GPS coordinates (a pasted
+`latitude, longitude` pair fills both boxes), enter the burst altitude in feet
+and the time it burst, then choose `Predict Landing`. The result is a
+descent-only track from the burst point to the landing site.
+
+## Past predictions
+
+Launch and burst times may be up to 7 days in the past, so a flight can be
+replayed after the fact. The Model tile in the summary reads `Historical` and
+its tooltip names the wind source that was used.
+
+## Multiple Balloon
+
+In Operations Advanced, choose `Multiple Balloon` in the bottom toolbar. Each
+balloon has its own launch site, type, launch date and time, rates, altitude,
+and parameter sweep. `Run All Balloons` runs every balloon and every sweep
+together. Launch times use the Launch Time zone setting.
+
+## Website hosting
+
+See `WEBSITE.md` for running the app on a website, under a sub-path, or in an iframe.
 
 ## Forecast analysis
 
@@ -51,5 +76,4 @@ freshness in the Layers panel. Operators can also request an immediate refresh.
   airspace, water, and landing thresholds in the local browser.
 - Missing required safety evidence always produces NO-GO.
 
-Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.8.2`.
-
+Verify the server at `http://127.0.0.1:8000/api/health`; the version is `3.9.3`.

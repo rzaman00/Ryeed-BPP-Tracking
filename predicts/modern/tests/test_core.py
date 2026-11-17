@@ -346,7 +346,7 @@ def test_health_and_config_report_final_build():
     import app as appmod
     h = asyncio.run(appmod.health())
     c = asyncio.run(appmod.config())
-    assert h["version"] == "3.8.2"
+    assert h["version"] == "3.9.3"
     assert h["airspace"] == "FAA live services with disk cache"
     assert h["launch_weather"] == "Open-Meteo multi-model forecast and winds aloft"
     assert h["faa_refresh"] == "automatic every 15 minutes with disk cache"
@@ -404,10 +404,29 @@ def test_inflation_calculator_matches_matlab_reference_values():
     assert r["burst_altitude_reference"] == "above launch site"
 
 
-def test_inflation_calculator_rejects_unachievable_rate():
+def test_inflation_calculator_extrapolates_out_of_range_rates_with_a_warning():
     import app as appmod
-    with pytest.raises(ValueError, match="outside the range achievable"):
-        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+    normal = appmod.calculate_inflation(appmod.InflationRequest())
+    assert normal["outside_validated_range"] is False and normal["range_warning"] is None
+    for rate in (8.0, 19.0):
+        r = appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=rate))
+        assert r["outside_validated_range"] is True and "extrapolated" in r["range_warning"]
+        assert r["expected_ascent_rate_ms"] == pytest.approx(rate, rel=1e-6)
+        assert r["burst_altitude_m"] > 0
+    # A faster rate needs a bigger balloon, which bursts lower.
+    fast = appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=19.0))
+    assert fast["burst_altitude_m"] < normal["burst_altitude_m"]
+    with pytest.raises(ValueError, match="Manual burst altitude"):
+        appmod.calculate_inflation(appmod.InflationRequest(target_ascent_rate_ms=80.0))
+
+
+def test_ascent_rate_has_no_upper_limit():
+    import app as appmod
+    base = dict(launch={"name": "T", "latitude": 39.7, "longitude": -77.5}, launch_datetime=datetime.now(timezone.utc) + timedelta(hours=2))
+    assert appmod.PredictRequest(**base, ascent_rate_ms=35.0, float_ascent_rate_ms=14.0).ascent_rate_ms == 35.0
+    assert appmod.default_ascent_rate_sweep(25.0) == [25.0, 24.5, 25.5, 24.0, 26.0]
+    with pytest.raises(Exception):
+        appmod.PredictRequest(**base, ascent_rate_ms=0)
 
 
 def test_standalone_tabs_and_auto_manual_burst_contract():
@@ -1151,11 +1170,11 @@ def test_v30_build_contract_and_docs():
     import app as appmod
     from pathlib import Path
     h=asyncio.run(appmod.health());c=asyncio.run(appmod.config())
-    assert h['version']=='3.8.2'
+    assert h['version']=='3.9.3'
     assert c['prediction_window_days']==7
     assert c['weather'] is True
     base=Path(__file__).resolve().parents[2]
-    assert '3.8.2' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
+    assert '3.9.3' in (base.parent/'VERSION.txt').read_text(encoding='utf-8')
 
 
 def test_v32_no_prompt_modal_or_history_hint():
@@ -1182,7 +1201,7 @@ def test_v34_launch_details_time_control_and_themes():
     assert 'Open this launch site in Ventusky' in js
     assert 'showLaunchSiteDetails' in js and 'launchAddress' in js
     assert "gust<=5" in js and "gust<=15" in js
-    assert 'Past predictions are not supported' in js
+    assert 'Past predictions are limited to the last' in js
     assert 'html[data-theme="light"] #runPredicts' in css
     assert '.info-page{background:var(--ui-bg);color:var(--text)}' in css
     assert 'country:{primary:\'#b58b4c\'' in js
@@ -1317,3 +1336,344 @@ def test_faa_quota_error_is_reported(monkeypatch, tmp_path):
     data, warning, source = asyncio.run(appmod.operational_airspace("sua"))
     assert source == "unavailable" and data["features"] == []
     assert "code 429" in warning and "Retry after 60 sec" in warning
+# v3.9.x — past replay window, burst-point descent, website hosting, speed-ups
+def test_v39_launch_window_allows_last_7_days_only():
+    import app as appmod
+    from fastapi import HTTPException
+    now = datetime.now(timezone.utc)
+    appmod.validate_launch_window(now - timedelta(hours=47))
+    appmod.validate_launch_window(now - timedelta(days=6, hours=23))
+    appmod.validate_launch_window(now + timedelta(days=6))
+    with pytest.raises(HTTPException, match="last 7 days"):
+        appmod.validate_launch_window(now - timedelta(days=7, hours=1))
+    with pytest.raises(HTTPException, match="7 days"):
+        appmod.validate_launch_window(now + timedelta(days=8))
+
+
+def test_v39_descent_request_accepts_feet_and_meters():
+    import app as appmod
+    when = datetime.now(timezone.utc)
+    point = appmod.LaunchPoint(name="Burst", latitude=39.7, longitude=-77.5)
+    by_feet = appmod.DescentRequest(burst=point, burst_datetime=when, burst_altitude_ft=90000)
+    assert by_feet.burst_altitude_m == pytest.approx(27432.0)
+    by_meters = appmod.DescentRequest(burst=point, burst_datetime=when, burst_altitude_m=30000)
+    assert by_meters.burst_altitude_ft == pytest.approx(98425.2, abs=0.1)
+    with pytest.raises(ValueError):
+        appmod.DescentRequest(burst=point, burst_datetime=when)
+
+
+def _fake_tawhiri_payload(params):
+    lat, lon = float(params["launch_latitude"]), float(params["launch_longitude"])
+    top = float(params["burst_altitude"])
+    return {
+        "prediction": [
+            {"stage": "ascent", "trajectory": [
+                {"latitude": lat, "longitude": lon, "altitude": float(params.get("launch_altitude", 100)), "datetime": "2026-11-14T15:00:00Z"},
+                {"latitude": lat, "longitude": lon, "altitude": top, "datetime": "2026-11-14T15:00:01Z"},
+            ]},
+            {"stage": "descent", "trajectory": [
+                {"latitude": lat, "longitude": lon, "altitude": top, "datetime": "2026-11-14T15:00:01Z"},
+                {"latitude": lat + 0.1, "longitude": lon + 0.3, "altitude": 200.0, "datetime": "2026-11-14T15:30:01Z"},
+            ]},
+        ],
+        "request": {"dataset": "2026-11-14T12:00:00Z"},
+    }
+
+
+def test_v39_burst_point_runs_descent_only_from_burst_altitude(monkeypatch):
+    import asyncio
+    import app as appmod
+    seen = []
+
+    async def fake(params):
+        seen.append(dict(params))
+        return _fake_tawhiri_payload(params)
+
+    monkeypatch.setattr(appmod, "tawhiri_request", fake)
+    req = appmod.DescentRequest(
+        burst=appmod.LaunchPoint(name="Burst 1", latitude=39.7, longitude=-77.5),
+        burst_datetime=datetime.now(timezone.utc), burst_altitude_ft=90000, descent_rate_ms=8.5,
+    )
+    result = asyncio.run(appmod.run_descent(req))
+    assert seen[0]["launch_altitude"] == pytest.approx(27432.0)
+    assert seen[0]["burst_altitude"] == pytest.approx(27433.0)
+    assert seen[0]["descent_rate"] == 8.5
+    assert [f["properties"]["stage"] for f in result["features"]] == ["descent"]
+    assert result["summary"]["mode"] == "descent"
+    assert result["summary"]["launch"]["altitude_m"] == pytest.approx(27433.0)
+    assert result["summary"]["landing"]["longitude"] == pytest.approx(-77.2)
+    assert result["features"][0]["properties"]["burst_point"] is True
+
+
+def _flat_wind_profiles(start, hours=96, u=10.0, v=0.0):
+    import app as appmod
+    levels = [float(level) for level in appmod.FORECAST_PRESSURE_LEVELS_HPA]
+    times = [start + timedelta(hours=h) for h in range(hours)]
+    return {t: {l: u for l in levels} for t in times}, {t: {l: v for l in levels} for t in times}
+
+
+def test_v39_recent_past_launch_falls_back_to_open_meteo_winds(monkeypatch):
+    import asyncio
+    import app as appmod
+    launch = datetime.now(timezone.utc) - timedelta(hours=40)
+
+    async def no_cycle(params):
+        raise appmod.ExternalServiceError("dataset not found")
+
+    async def fake_column(latitude, longitude):
+        u, v = _flat_wind_profiles(launch - timedelta(hours=24))
+        return u, v, 180.0
+
+    async def no_ncep(*args, **kwargs):
+        raise AssertionError("the 1948-2026 reanalysis cannot cover the last 48 hours")
+
+    monkeypatch.setattr(appmod, "tawhiri_request", no_cycle)
+    monkeypatch.setattr(appmod, "fetch_open_meteo_wind_column", fake_column)
+    monkeypatch.setattr(appmod, "run_historical_reanalysis", no_ncep)
+    req = appmod.PredictRequest(launch=appmod.LaunchPoint(name="Replay", latitude=39.7, longitude=-78.0), launch_datetime=launch)
+    result = asyncio.run(appmod.run_burst(req))
+    summary = result["summary"]
+    assert summary["historical"] is True and "Open-Meteo" in summary["historical_source"]
+    assert [f["properties"]["stage"] for f in result["features"]] == ["ascent", "descent"]
+    # A steady 10 m/s west wind must carry the balloon east and nowhere else.
+    assert summary["landing"]["longitude"] > -78.0 + 0.3
+    assert summary["landing"]["latitude"] == pytest.approx(39.7, abs=1e-6)
+
+    descent = appmod.DescentRequest(
+        burst=appmod.LaunchPoint(name="Burst", latitude=39.7, longitude=-77.5),
+        burst_datetime=launch, burst_altitude_ft=90000,
+    )
+    burst_result = asyncio.run(appmod.run_descent(descent))
+    assert [f["properties"]["stage"] for f in burst_result["features"]] == ["descent"]
+    assert burst_result["summary"]["landing"]["altitude_m"] == pytest.approx(180.0)
+    assert burst_result["summary"]["landing"]["longitude"] > -77.5
+
+
+def test_v39_future_launch_never_uses_past_fallback(monkeypatch):
+    import asyncio
+    import app as appmod
+
+    async def down(params):
+        raise appmod.ExternalServiceError("Tawhiri is down")
+
+    async def no_fallback(*args, **kwargs):
+        raise AssertionError("a forecast must not silently switch wind source")
+
+    monkeypatch.setattr(appmod, "tawhiri_request", down)
+    monkeypatch.setattr(appmod, "run_past_fallback", no_fallback)
+    req = appmod.PredictRequest(launch=appmod.LaunchPoint(latitude=39.7, longitude=-78.0), launch_datetime=datetime.now(timezone.utc) + timedelta(hours=20))
+    with pytest.raises(appmod.ExternalServiceError, match="Tawhiri is down"):
+        asyncio.run(appmod.run_burst(req))
+
+
+def test_v39_identical_tawhiri_requests_share_one_upstream_call(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._tawhiri_cache.clear()
+    calls = []
+
+    async def fake_fetch(params):
+        calls.append(params)
+        await asyncio.sleep(0.01)
+        return _fake_tawhiri_payload(params)
+
+    monkeypatch.setattr(appmod, "_tawhiri_fetch", fake_fetch)
+    params = {"launch_latitude": 39.7, "launch_longitude": 282.0, "burst_altitude": 28000, "launch_datetime": "2026-11-14T15:00:00Z"}
+
+    async def go():
+        together = await asyncio.gather(*(appmod.tawhiri_request(dict(params)) for _ in range(5)))
+        again = await appmod.tawhiri_request(dict(params))
+        other = await appmod.tawhiri_request({**params, "burst_altitude": 30000})
+        return together, again, other
+
+    together, again, other = asyncio.run(go())
+    assert len(calls) == 2
+    assert all(item is together[0] for item in together) and again is together[0]
+    assert other is not together[0]
+    appmod._tawhiri_cache.clear()
+
+
+def test_v39_failed_tawhiri_request_is_not_cached(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._tawhiri_cache.clear()
+    attempts = []
+
+    async def flaky(params):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise appmod.ExternalServiceError("temporary")
+        return _fake_tawhiri_payload(params)
+
+    monkeypatch.setattr(appmod, "_tawhiri_fetch", flaky)
+    params = {"launch_latitude": 39.7, "launch_longitude": 282.0, "burst_altitude": 28000}
+
+    async def go():
+        with pytest.raises(appmod.ExternalServiceError):
+            await appmod.tawhiri_request(dict(params))
+        return await appmod.tawhiri_request(dict(params))
+
+    assert asyncio.run(go())["prediction"]
+    assert len(attempts) == 2
+    appmod._tawhiri_cache.clear()
+
+
+def test_v39_airspace_file_is_parsed_once_until_it_changes(tmp_path):
+    import json
+    import os
+    import app as appmod
+    path = tmp_path / "layer.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"n": 1}, "geometry": None}]}), encoding="utf-8")
+    first, _ = appmod.load_geojson_cached(path)
+    second, _ = appmod.load_geojson_cached(path)
+    assert first is second
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": []}), encoding="utf-8")
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 5_000_000))
+    third, _ = appmod.load_geojson_cached(path)
+    assert third is not first and third["features"] == []
+
+
+def test_v39_frontend_contract_for_burst_multi_balloon_and_hosting():
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    css = (base / "static" / "styles.css").read_text(encoding="utf-8")
+    for item in ["burstPanel", "burstLatitude", "burstLongitude", "burstPointAltitudeFt", "burstDate", "burstTime", "runBurstPoint",
+                 "multiPanel", "multiBalloonList", "runMultiBalloon", "addMultiBalloon", "openMultiBalloon"]:
+        assert f'id="{item}"' in html
+        assert item in js
+    assert 'data-draw-mode="burst"' in html and "Create Burst" in html
+    assert "Burst altitude (ft)" in html
+    # Multiple Balloon lives in the advanced-only bottom toolbar.
+    toolbar = html[html.index('class="bottom-tools advanced-map-control"'):html.index('id="aboutMap"')]
+    assert 'id="openMultiBalloon"' in toolbar
+    assert "/api/predict-descent" in js and "burst_altitude_ft:altitudeFt" in js
+    assert "PAST_WINDOW_HOURS = 168" in js
+    # No absolute server paths: the page must work under any website sub-path.
+    assert "fetch(apiUrl(url)" in js and 'meta name="bpp-api-base"' in html
+    assert 'href="/' not in html and 'src="/' not in html
+    assert ".multi-card" in css and ".burst-panel" in css
+    # Operational trajectory colours are unchanged.
+    assert "const COLORS = { ascent: '#ea2c9d', float: '#19a86b', descent: '#f28a22' };" in js
+
+
+def test_v39_config_reports_new_capabilities():
+    import asyncio
+    import app as appmod
+    config = asyncio.run(appmod.config())
+    assert config["past_prediction_hours"] == 168
+    assert config["burst_point_descent"] is True and config["multiple_balloons"] is True
+    assert "last 7 days" in asyncio.run(appmod.health())["prediction_window"]
+
+
+def test_v39_open_meteo_wind_column_is_parsed_into_east_north_winds(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._replay_wind_cache.clear()
+    levels = appmod.FORECAST_PRESSURE_LEVELS_HPA
+    hourly = {"time": ["2026-11-14T14:00", "2026-11-14T15:00"]}
+    for level in levels:
+        hourly[f"wind_speed_{level}hPa"] = [22.3694, None]      # 10 m/s, then a gap
+        hourly[f"wind_direction_{level}hPa"] = [270.0, 270.0]    # from the west
+    seen = {}
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"elevation": 212.0, "hourly": hourly}
+
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def get(self, url, params=None):
+            seen.update(params); return Response()
+
+    monkeypatch.setattr(appmod.httpx, "AsyncClient", Client)
+    u, v, elevation = asyncio.run(appmod.fetch_open_meteo_wind_column(39.7, -78.0))
+    assert seen["models"] == "gfs_seamless" and seen["past_days"] >= 8 and seen["wind_speed_unit"] == "mph"
+    assert elevation == 212.0
+    assert list(u) == [datetime(2026, 11, 14, 14, tzinfo=timezone.utc)]   # the incomplete hour is dropped
+    row_u, row_v = u[list(u)[0]], v[list(v)[0]]
+    assert row_u[850.0] == pytest.approx(10.0, abs=1e-3) and row_v[850.0] == pytest.approx(0.0, abs=1e-6)
+    appmod._replay_wind_cache.clear()
+
+
+def test_v39_waiter_takes_over_when_the_working_request_is_cancelled(monkeypatch):
+    import asyncio
+    import app as appmod
+    appmod._tawhiri_cache.clear()
+    calls = []
+
+    async def slow(params):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return _fake_tawhiri_payload(params)
+
+    monkeypatch.setattr(appmod, "_tawhiri_fetch", slow)
+    params = {"launch_latitude": 39.7, "launch_longitude": 282.0, "burst_altitude": 28000}
+
+    async def go():
+        leader = asyncio.create_task(appmod.tawhiri_request(dict(params)))
+        await asyncio.sleep(0.01)
+        waiter = asyncio.create_task(appmod.tawhiri_request(dict(params)))
+        await asyncio.sleep(0.01)
+        leader.cancel()
+        return await waiter
+
+    assert asyncio.run(go())["prediction"]
+    assert len(calls) == 2
+    appmod._tawhiri_cache.clear()
+
+
+def test_v39_phone_layout_has_parameters_tab_that_hides_controls():
+    base = Path(__file__).resolve().parents[1]
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    css = (base / "static" / "styles.css").read_text(encoding="utf-8")
+    assert 'id="parametersTab"' in html and ">Parameters<" in html
+    assert "setMobileParameters" in js and "toggleMobileParameters" in js
+    assert ".mobile-only-tab{display:none}" in css
+    for selector in ["#predictControlStrip", ".layer-panel", ".bottom-tools", ".prediction-summary", ".drawing-control"]:
+        assert f'html:not([data-mobile-params="open"]) #predictsView {selector}' in css
+
+
+# v3.9.1 — altitude entry in feet, 7-day past window, extra launch themes
+def test_v391_altitude_has_meters_and_feet_boxes_and_requests_stay_in_meters():
+    base = Path(__file__).resolve().parents[1]
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    for box in ["burstAltitude", "burstAltitudeFt", "floatAltitude", "floatAltitudeFt", "burstPointAltitudeFt", "burstPointAltitudeM"]:
+        assert f'<input id="{box}"' in html
+    for name in ["metersFromFeet", "feetFromMeters", "mirrorFeetBox", "feetBoxEdited", "burstPointMetersEdited"]:
+        assert f"function {name}(" in js
+    assert "data-feet-for" in js
+    # Requests are always built from the meter helpers, never the raw box value.
+    assert "burst_altitude_m:burstAltitudeM(),float_altitude_m:floatAltitudeM()," in js
+    assert "burst_altitude_m:Number($('burstAltitude').value)" not in js
+
+
+def test_v391_wind_replay_requests_cover_the_whole_past_window():
+    import app as appmod
+    assert appmod.PAST_PREDICTION_WINDOW_H == 168
+    assert appmod.OPEN_METEO_REPLAY_PAST_DAYS * 24 > appmod.PAST_PREDICTION_WINDOW_H
+
+
+def test_v391_new_launch_themes_are_wired_in_all_three_files():
+    base = Path(__file__).resolve().parents[1]
+    js = (base / "static" / "app.js").read_text(encoding="utf-8")
+    html = (base / "static" / "index.html").read_text(encoding="utf-8")
+    css = (base / "static" / "styles.css").read_text(encoding="utf-8")
+    for theme in ["electric", "water", "david", "lost"]:
+        assert f'<option value="{theme}">' in html
+        assert f"  {theme}:{{primary:" in js
+        assert f'html[data-launch-theme="{theme}"] .site-header' in css
+
+
+# v3.9.2 — animated launch themes
+def test_v392_listed_launch_themes_are_animated_and_respect_reduced_motion():
+    css = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
+    for keyframes in ["nightSky", "auroraSweep", "waterRoll", "davidProwl", "lostTape", "electricSparks"]:
+        assert f"@keyframes {keyframes}{{" in css and f"animation:{keyframes} " in css.replace("davidPulse 4.5s ease-in-out infinite,", "")
+    reduced = css[css.rindex("@media(prefers-reduced-motion:reduce)"):]
+    for theme in ["night", "aurora", "water", "david", "lost"]:
+        assert f'html[data-launch-theme="{theme}"] .site-header' in reduced

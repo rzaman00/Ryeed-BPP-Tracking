@@ -1,4 +1,4 @@
-BPP Prediction Suite v3.8.2
+BPP Prediction Suite v3.9.3
 
 Requirements:
 - Python 3.11 or newer.
@@ -10,10 +10,29 @@ Start on Windows:
 2. The application opens at http://127.0.0.1:8000/.
 3. Keep the launcher window open while using Predicts.
 
-New in 3.8.2 (based on finished):
-- Manual burst altitude can be entered in feet or meters; both fields stay synced.
-- Launch Theme now includes Emo.
-- See UPDATE_3_8_2.md for details.
+New in v3.9.3:
+- Merged the 3.8.2 production fixes: FAA airspace downloads are shared across
+  concurrent requests (avoids the FAA rate limit on a fresh cache), FAA errors
+  show the real reason, and the Emo launch theme is back.
+
+New in v3.9.2:
+- Ascent rate accepts any positive value. Automatic burst altitude still
+  calculates outside the usual range and shows a warning.
+- Animated launch themes: Night Launch, Aurora, Water, David, Lost.
+
+New in v3.9.1:
+- Burst and float altitude have a meters box and a feet box side by side
+  (top bar, Create Burst, Multiple Balloon); typing in one fills in the other.
+- Past predictions now reach back 7 days.
+- Launch themes added: Electric, Water, David, Lost.
+
+New in v3.9.0:
+- Create Burst (Drawing Tools): mark where the balloon burst, enter its altitude
+  in feet and burst time, and get the landing site.
+- Past predictions (48 hours in v3.9.0, 7 days from v3.9.1).
+- Multiple Balloon (Operations Advanced toolbar): run several balloons, each
+  with its own time, parameters, and parameter sweep, at the same time.
+- Faster predictions and map, and website hosting (predicts/modern/WEBSITE.md).
 
 Prediction and safety features:
 - Burst and Float predictions with automatic inflation-based burst altitude.
